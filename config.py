@@ -3,7 +3,7 @@ from typing import Optional
 from pydantic import BaseModel
 
 class Settings(BaseModel):
-    HOST: str = os.getenv("BRIDGE_HOST", "127.0.0.1")
+    HOST: str = os.getenv("BRIDGE_HOST", "0.0.0.0")
     PORT: int = int(os.getenv("BRIDGE_PORT", "8000"))
     MT5_PATH: str = os.getenv("MT5_PATH", r"C:\Program Files\Headway MT5 Terminal\terminal64.exe")
     MT5_SERVER: Optional[str] = os.getenv("MT5_SERVER", "Headway-Real")

@@ -1,17 +1,17 @@
 @echo off
-title MT5 Universal AI Trading Bridge
+title Headway MT5 Institutional Trading Station
 color 0b
 echo ========================================================
-echo        MT5 UNIVERSAL AI TRADING BRIDGE LAUNCHER
+echo   HEADWAY MT5 INSTITUTIONAL TRADING STATION & ANALYTICS
 echo ========================================================
 echo.
-echo Starting Python MT5 AI Bridge Server on http://127.0.0.1:8000...
+echo Starting Institutional Workstation on http://127.0.0.1:8765...
 echo.
 
-python main.py
+python web_app.py
 
 if errorlevel 1 (
     echo.
-    echo [ERROR] The server stopped unexpectedly.
+    echo [ERROR] The workstation server stopped unexpectedly.
     pause
 )
