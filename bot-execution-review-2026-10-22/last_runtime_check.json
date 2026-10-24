@@ -1,0 +1,17 @@
+{
+  "observed_heartbeat_utc": "2026-10-22T13:38:38.020533+00:00",
+  "execution_version": "protected-journal-v2",
+  "execution_build": null,
+  "final_reviewed_build_loaded": false,
+  "last_decisions": {
+    "XAUUSD": {
+      "status": "HOLD",
+      "reason": "Scanning 4 Indicators 24/7 | SMC: INTRARANGE_CONSOLIDATION | Breakers: WAITING_CONFIRMATION | TP Target (XU SEMA): High=4091.31, Low=4056.61",
+      "signal": "HOLD",
+      "signal_bar": "2026-10-22 16:30:00",
+      "timestamp": "2026-10-22T13:38:38.020367+00:00"
+    }
+  },
+  "daily_loss_protection": "DISABLED",
+  "bot_owned_positions": 0
+}

@@ -1,0 +1,16 @@
+{
+  "checks": "PASS",
+  "source_sha256": "919044f1c6aeb01ce5634a29b58612be7f07be0b982e86630836ecd13a216d0f",
+  "binary_sha256": "5aab42886572e5d68fcfba07ab3075369cf74d3e72e2fd82194dee42b7545fce",
+  "protected_pending_submissions": 339,
+  "monotone_trailing_updates": 804,
+  "pending_cancellations": 168,
+  "report": {
+    "History Quality": "n/a",
+    "Total Net Profit": "0.33",
+    "Total Trades": "161",
+    "Profit Factor": "1.70",
+    "Equity Drawdown Maximal": "0.07 (0.01%)"
+  },
+  "scope": "Generated historical ticks; execution smoke test, not proof of profitability or broker-atomic OCO."
+}

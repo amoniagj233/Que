@@ -1,0 +1,398 @@
+"""
+MT5 Trading Agent Core Engine
+Main execution loop, strategy evaluation, signal processing, and order lifecycle management.
+"""
+
+import os
+import json
+import time
+import logging
+from typing import Dict, Any, List, Optional
+from config import MT5Config
+from mt5_connector import MT5Connector
+from risk_manager import RiskManager
+from strategies import get_strategy, Signal
+
+logger = logging.getLogger("MT5Agent.Engine")
+
+class MT5TradingAgent:
+    def __init__(self, config: MT5Config):
+        self.config = config
+        self.connector = MT5Connector(
+            path=config.path,
+            login=config.login,
+            password=config.password,
+            server=config.server,
+        )
+        self.risk_manager = RiskManager(config)
+        self.strategy = get_strategy(config.strategy_name, config)
+        self.virtual_positions: List[Dict[str, Any]] = []  # Used in dry_run mode
+        self.last_loss_timestamp: Dict[str, float] = {}  # Tracks loss timestamps per symbol
+        self.running = False
+
+    def start(self):
+        """Start the MT5 Trading Agent."""
+        logger.info("==================================================")
+        logger.info(f" Starting MT5 Automated Trading Agent ")
+        logger.info(f" Mode: {self.config.mode.upper()}")
+        logger.info(f" Strategy: {self.config.strategy_name.upper()}")
+        logger.info(f" Symbols: {', '.join(self.config.symbols)}")
+        logger.info(f" Timeframe: {self.config.timeframe_str}")
+        logger.info(f" Risk % Per Trade: {self.config.risk_percent_per_trade}%")
+        logger.info("==================================================")
+
+        if not self.connector.connect():
+            logger.critical("Failed to connect to MT5 Terminal. Exiting agent.")
+            return False
+
+        account_info = self.connector.get_account_info()
+        if account_info:
+            self.risk_manager.initialize_balance(account_info["equity"])
+
+        self.running = True
+        return True
+
+    def stop(self):
+        """Stop the trading agent and disconnect from MT5."""
+        logger.info("Stopping MT5 Trading Agent...")
+        self.running = False
+        self.connector.disconnect()
+
+    def process_symbol(self, symbol: str):
+        """Evaluate market data and manage risk/orders for a single symbol."""
+        logger.debug(f"Processing symbol: {symbol}")
+
+        # 1. Fetch Account Information
+        account_info = self.connector.get_account_info()
+        if not account_info:
+            logger.error("Could not fetch account info. Skipping cycle.")
+            return
+
+        # 2. Check Daily Circuit Breaker
+        if self.risk_manager.is_daily_drawdown_exceeded(account_info["equity"]):
+            logger.error(f"Trading halted due to daily drawdown limit! ({self.config.max_daily_drawdown_percent}%)")
+            return
+
+        # 3. Fetch Symbol Info & Spread Check
+        sym_info = self.connector.get_symbol_info(symbol)
+        if not sym_info:
+            logger.warning(f"Could not retrieve tick info for {symbol}")
+            return
+
+        if not self.risk_manager.is_spread_allowed(sym_info):
+            return
+
+        # 4. Fetch Open Positions
+        if self.config.mode == "live":
+            all_open_positions = self.connector.get_open_positions(magic=self.config.magic_number)
+            symbol_open_positions = [p for p in all_open_positions if p["symbol"] == symbol]
+        else:
+            all_open_positions = self.virtual_positions
+            symbol_open_positions = [p for p in self.virtual_positions if p["symbol"] == symbol]
+
+        # 5. Enforce Asset-Calibrated TP, Anti-Slippage Cut (-$8.00), and Early Profit-Lock (+$5.00)
+        active_positions = []
+        sym_upper = symbol.upper()
+        single_tp = getattr(self.config, "single_tp_btc", 10.0) if "BTC" in sym_upper else getattr(self.config, "single_tp_gold", 15.0)
+        lock_trigger = getattr(self.config, "profit_lock_trigger_usd", 5.0)
+        lock_amount = getattr(self.config, "profit_lock_amount_usd", 1.0)
+        hard_cut = getattr(self.config, "hard_loss_trigger_usd", 8.0)
+        
+        for pos in symbol_open_positions:
+            pos_profit = pos.get("profit", 0.0)
+            if pos_profit >= single_tp:
+                logger.info(f"[INDIVIDUAL TAKE-PROFIT] Position #{pos['ticket']} ({pos['symbol']}) reached +${pos_profit:.2f} USD (Target: +${single_tp:.2f})! Closing immediately to secure profit.")
+                if self.config.mode == "live":
+                    self.connector.close_position(pos["ticket"])
+            elif pos_profit <= -hard_cut:
+                self.last_loss_timestamp[symbol] = time.time()
+                logger.warning(f"Position #{pos['ticket']} hit Anti-Slippage Cut trigger (P/L: ${pos_profit:.2f} USD). Closing immediately and activating 60s post-loss stabilization pause on {symbol}!")
+                if self.config.mode == "live":
+                    self.connector.close_position(pos["ticket"])
+            else:
+                # Law 1: Early Profit-Lock at +$5.00 -> Lock in +$1.00 cash profit
+                if pos_profit >= lock_trigger:
+                    digits = sym_info["digits"]
+                    price_open = pos["price_open"]
+                    current_sl = pos["sl"]
+                    is_buy = pos["type"] == "BUY"
+                    profit_dist = 10.0 if "BTC" in sym_upper else 0.10
+                    target_sl = round(price_open + profit_dist, digits) if is_buy else round(price_open - profit_dist, digits)
+
+                    need_mod = False
+                    if is_buy and (current_sl == 0.0 or current_sl < target_sl) and (pos["price_current"] > target_sl):
+                        need_mod = True
+                    elif (not is_buy) and (current_sl == 0.0 or current_sl > target_sl) and (pos["price_current"] < target_sl):
+                        need_mod = True
+
+                    if need_mod:
+                        logger.info(f"[PROFIT-LOCK] Position #{pos['ticket']} reached +${pos_profit:.2f} USD! Locking in +${lock_amount:.2f} cash profit (SL: {target_sl:.2f})")
+                        if self.config.mode == "live":
+                            self.connector.modify_position_sl_tp(pos["ticket"], target_sl, pos["tp"], symbol)
+                        pos["sl"] = target_sl
+
+                active_positions.append(pos)
+        symbol_open_positions = active_positions
+
+        # 6. Manage Trailing Stop Loss & Breakeven Protection on Existing Open Positions
+        if self.config.trailing_stop_enabled and symbol_open_positions:
+            df_recent = self.connector.get_rates(symbol, timeframe_str=self.config.timeframe_str, bars=30)
+            if df_recent is not None and len(df_recent) > 14:
+                from indicators import TechnicalIndicators
+                current_atr = TechnicalIndicators.calculate_atr(df_recent, self.config.atr_period).iloc[-1]
+
+                for pos in symbol_open_positions:
+                    # Check Breakeven Protection (Move SL to entry + 0.5x ATR once trade is +1.5x ATR in profit)
+                    price_open = pos["price_open"]
+                    price_curr = pos["price_current"]
+                    pos_type = pos["type"]
+                    current_sl = pos["sl"]
+                    digits = sym_info["digits"]
+
+                    be_threshold_mult = getattr(self.config, 'be_atr_threshold', 1.5)
+                    be_lock_mult = getattr(self.config, 'be_lock_atr', 0.5)
+
+                    stops_level_pts = sym_info.get("trade_stops_level", 0)
+                    spread_pts = sym_info.get("spread", 0)
+                    point = sym_info.get("point", 0.01)
+                    sym_upper = symbol.upper()
+                    min_dist = max(35.0, (stops_level_pts + spread_pts + 500) * point) if ("BTC" in sym_upper or "CRYPTO" in sym_upper) else max(0.30, (stops_level_pts + spread_pts + 20) * point)
+
+                    # When trade reaches +1.5x ATR expansion, lock in +0.5x ATR real profit!
+                    if pos_type == "BUY" and (price_curr - price_open) >= (current_atr * be_threshold_mult):
+                        profit_lock = max(current_atr * be_lock_mult, 10.0 if "BTC" in sym_upper else 0.50)
+                        be_sl = round(price_open + profit_lock, digits)
+                        if (price_curr - be_sl) >= min_dist and current_sl < be_sl:
+                            logger.info(f"Position #{pos['ticket']} reached +{be_threshold_mult}x ATR profit! Moving SL to REAL PROFIT BREAKEVEN ({be_sl:.2f}, locked +${profit_lock:.2f})")
+                            if self.config.mode == "live":
+                                self.connector.modify_position_sl_tp(pos["ticket"], be_sl, pos["tp"], symbol)
+                            pos["sl"] = be_sl
+
+                    elif pos_type == "SELL" and (price_open - price_curr) >= (current_atr * be_threshold_mult):
+                        profit_lock = max(current_atr * be_lock_mult, 10.0 if "BTC" in sym_upper else 0.50)
+                        be_sl = round(price_open - profit_lock, digits)
+                        if (be_sl - price_curr) >= min_dist and (current_sl == 0.0 or current_sl > be_sl):
+                            logger.info(f"Position #{pos['ticket']} reached +{be_threshold_mult}x ATR profit! Moving SL to REAL PROFIT BREAKEVEN ({be_sl:.2f}, locked +${profit_lock:.2f})")
+                            if self.config.mode == "live":
+                                self.connector.modify_position_sl_tp(pos["ticket"], be_sl, pos["tp"], symbol)
+                            pos["sl"] = be_sl
+
+                    # Trailing Stop Calculation with Chandelier Volatility logic
+                    new_sl = self.risk_manager.calculate_trailing_stop(pos, sym_info, current_atr, df=df_recent)
+                    if new_sl:
+                        if self.config.mode == "live":
+                            self.connector.modify_position_sl_tp(pos["ticket"], new_sl, pos["tp"], symbol)
+                        else:
+                            pos["sl"] = new_sl
+                            logger.info(f"[DRY_RUN] Position #{pos['ticket']} Trailing SL updated to {new_sl:.5f}")
+
+        # 6.5. Check Post-Loss Stabilization Pause (60s pause after -$10 loss to prevent loss chaining)
+        elapsed_since_loss = time.time() - self.last_loss_timestamp.get(symbol, 0)
+        cooldown_sec = getattr(self.config, "post_loss_cooldown_seconds", 60)
+        if elapsed_since_loss < cooldown_sec:
+            rem = int(cooldown_sec - elapsed_since_loss)
+            logger.info(f"[{symbol}] Post-Loss Stabilization Pause Active ({rem}s remaining). Waiting for market to settle before re-entry.")
+            return
+
+        # 7. Check Position Limits
+        if not self.risk_manager.can_open_new_position(len(all_open_positions), len(symbol_open_positions)):
+            return
+
+        # 8. Fetch M1 Rates & M5 HTF Rates & Run Strategy Evaluation
+        df_rates = self.connector.get_rates(symbol, timeframe_str=self.config.timeframe_str, bars=self.config.bars_count)
+        df_htf = self.connector.get_rates(symbol, timeframe_str="M5", bars=100)
+        if df_rates is None or len(df_rates) < 30:
+            logger.warning(f"Insufficient rates returned for {symbol}")
+            return
+
+        signal, reason, metrics = self.strategy.evaluate(df_rates, df_htf, symbol=symbol)
+        current_price = sym_info["ask"] if signal == Signal.BUY else sym_info["bid"]
+        atr = metrics.get("atr", 0.0010)
+
+        logger.info(f"[{symbol}] Strategy Signal: {signal} | Price: {current_price:.5f} | Reason: {reason}")
+
+        if signal == Signal.HOLD:
+            return
+
+        # Directional Conflict Resolver: Cleanly close stale opposite positions before executing new direction
+        opposing_positions = [p for p in symbol_open_positions if p["type"] != signal]
+        if opposing_positions:
+            logger.info(f"Trend Direction Reversal detected to {signal}! Closing {len(opposing_positions)} opposing stale positions on {symbol}...")
+            for opp in opposing_positions:
+                if self.config.mode == "live":
+                    self.connector.close_position(opp["ticket"])
+            symbol_open_positions = [p for p in symbol_open_positions if p["type"] == signal]
+
+        # 9. Check Staggered / Grid Entry Spacing Constraint
+        if not self.risk_manager.is_staggered_entry_valid(symbol_open_positions, current_price, sym_info):
+            return
+
+        # Check Slippage & Spread Spike Shield
+        if not self.risk_manager.is_spread_acceptable(sym_info):
+            return
+
+        # 9. Calculate Market Structure SL, TP, and Scaled Position Size
+        sl_price, tp_price, sl_pips = self.risk_manager.calculate_sl_tp(
+            action=signal,
+            price=current_price,
+            atr=atr,
+            symbol_info=sym_info,
+            df=df_rates
+        )
+
+        lot_size = self.risk_manager.calculate_scaled_lot_size(len(symbol_open_positions), sym_info)
+
+        # 9. Execute Order (Twin Trades: opens 2 trades, both 0.01 lot)
+        trades_to_open = getattr(self.config, "trades_per_signal", 2 if getattr(self.config, "twin_trades_mode", False) else 1)
+        for i in range(trades_to_open):
+            trade_num = i + 1
+            if self.config.mode == "live":
+                logger.info(f"Executing LIVE Order #{trade_num}/{trades_to_open}: {signal} {lot_size} {symbol} @ {current_price:.5f} [SL: {sl_price:.5f}, TP: {tp_price:.5f}]")
+                self.connector.place_order(
+                    symbol=symbol,
+                    action=signal,
+                    lot=lot_size,
+                    sl=sl_price,
+                    tp=tp_price,
+                    magic=self.config.magic_number,
+                    comment=f"MT5Agent_{self.config.strategy_name}_T{trade_num}"
+                )
+            else:
+                logger.info(f"[DRY_RUN VIRTUAL TRADE #{trade_num}] Executed {signal} {lot_size} {symbol} @ {current_price:.5f} | SL: {sl_price:.5f} | TP: {tp_price:.5f} | Reason: {reason}")
+                self.virtual_positions.append({
+                    "ticket": 900000 + len(self.virtual_positions) + 1,
+                    "symbol": symbol,
+                    "type": signal,
+                    "volume": lot_size,
+                    "price_open": current_price,
+                    "price_current": current_price,
+                    "sl": sl_price,
+                    "tp": tp_price,
+                    "magic": self.config.magic_number,
+                    "comment": f"DRY_RUN_T{trade_num}",
+                })
+
+    def reload_runtime_params(self):
+        """Hot-reload dynamic evolved parameters updated by the Loss-Critic Agent."""
+        params_file = os.path.join(os.path.dirname(__file__), "runtime_params.json")
+        if os.path.exists(params_file):
+            try:
+                with open(params_file, "r") as f:
+                    data = json.load(f)
+                last_upd = data.get("last_updated")
+                if hasattr(self, "_last_runtime_upd") and self._last_runtime_upd == last_upd:
+                    return
+                self._last_runtime_upd = last_upd
+                
+                # Apply evolved dynamic risk parameters
+                if "sl_atr_multiplier" in data:
+                    self.config.sl_atr_multiplier = float(data["sl_atr_multiplier"])
+                if "tp_atr_multiplier" in data:
+                    self.config.tp_atr_multiplier = float(data["tp_atr_multiplier"])
+                if "be_atr_threshold" in data:
+                    self.config.be_atr_threshold = float(data["be_atr_threshold"])
+                if "be_lock_atr" in data:
+                    self.config.be_lock_atr = float(data["be_lock_atr"])
+                if "single_trade_take_profit_usd" in data:
+                    self.config.single_trade_take_profit_usd = float(data["single_trade_take_profit_usd"])
+                if "basket_take_profit_usd" in data:
+                    self.config.basket_take_profit_usd = float(data["basket_take_profit_usd"])
+                if "post_loss_cooldown_seconds" in data:
+                    self.config.post_loss_cooldown_seconds = int(data["post_loss_cooldown_seconds"])
+                if "profit_lock_trigger_usd" in data:
+                    self.config.profit_lock_trigger_usd = float(data["profit_lock_trigger_usd"])
+                if "profit_lock_amount_usd" in data:
+                    self.config.profit_lock_amount_usd = float(data["profit_lock_amount_usd"])
+                if "single_tp_gold" in data:
+                    self.config.single_tp_gold = float(data["single_tp_gold"])
+                if "single_tp_btc" in data:
+                    self.config.single_tp_btc = float(data["single_tp_btc"])
+                if "hard_loss_trigger_usd" in data:
+                    self.config.hard_loss_trigger_usd = float(data["hard_loss_trigger_usd"])
+                logger.info(f"[HOT-RELOAD] 4 Upgraded Laws Active: Gold TP: ${getattr(self.config, 'single_tp_gold', 15.0):.1f} | BTC TP: ${getattr(self.config, 'single_tp_btc', 10.0):.1f} | Cut: -${getattr(self.config, 'hard_loss_trigger_usd', 8.0):.1f} | Lock: +${getattr(self.config, 'profit_lock_amount_usd', 1.0):.1f} @ +${getattr(self.config, 'profit_lock_trigger_usd', 5.0):.1f} | Pause: {getattr(self.config, 'post_loss_cooldown_seconds', 60)}s | Basket: ${getattr(self.config, 'basket_take_profit_usd', 100.0):.1f}")
+            except Exception as e:
+                logger.error(f"Error hot-reloading runtime params: {e}")
+
+    def run_cycle(self):
+        """Execute a single pass over all configured symbols and update self-learning engine."""
+        if not self.running:
+            return
+
+        if not hasattr(self, "cycle_count"):
+            self.cycle_count = 0
+        self.cycle_count += 1
+
+        # Hot-reload evolved parameters from Critic Agent
+        self.reload_runtime_params()
+
+        # 1. Enforce Basket Take Profit Target ($100.00 USD across all positions for this magic number)
+        basket_tp = getattr(self.config, "basket_take_profit_usd", 100.0)
+        if self.config.mode == "live":
+            open_pos_all = self.connector.get_open_positions(magic=self.config.magic_number)
+        else:
+            open_pos_all = self.virtual_positions
+
+        total_open_profit = sum(p.get("profit", 0.0) for p in (open_pos_all or []))
+        if total_open_profit >= basket_tp and open_pos_all:
+            logger.info(f"🎯 [BASKET TAKE-PROFIT HIT] Total Open Profit (+${total_open_profit:.2f} USD) reached target (+${basket_tp:.2f} USD)! Closing all {len(open_pos_all)} open positions immediately to bank profit.")
+            for p in open_pos_all:
+                if self.config.mode == "live":
+                    self.connector.close_position(p["ticket"])
+            if self.config.mode == "live":
+                open_pos_all = []
+            else:
+                self.virtual_positions = []
+            logger.info("All positions closed at +$100 basket target. Re-analyzing chart for fresh re-entry...")
+
+        # Periodically trigger Self-Learning Engine analysis every 10 cycles (~50s)
+        if self.cycle_count % 10 == 0 and hasattr(self.strategy, "learner"):
+            try:
+                self.strategy.learner.analyze_recent_trades()
+            except Exception as e:
+                logger.error(f"Error in self-learning trade analysis: {e}")
+
+        logger.info("--- Starting Strategy Evaluation Cycle ---")
+        for symbol in self.config.symbols:
+            try:
+                self.process_symbol(symbol)
+            except Exception as e:
+                logger.error(f"Error processing symbol {symbol}: {str(e)}", exc_info=True)
+        
+        # Export real-time bot telemetry bridge
+        try:
+            acc = self.connector.get_account_info()
+            if acc:
+                import os, json
+                from datetime import datetime, timezone
+                open_pos = self.connector.get_open_positions(magic=self.config.magic_number)
+                telemetry = {
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "magic": self.config.magic_number,
+                    "strategy": self.config.strategy_name,
+                    "balance": acc.get("balance", 0.0),
+                    "equity": acc.get("equity", 0.0),
+                    "floating_profit": acc.get("profit", 0.0),
+                    "open_positions": len(open_pos) if open_pos else 0,
+                    "status": "RUNNING"
+                }
+                out_path = os.path.join(os.path.dirname(__file__), "live_telemetry.json")
+                with open(out_path, "w") as f:
+                    json.dump(telemetry, f, indent=2)
+        except Exception as e:
+            logger.error(f"Telemetry export error: {e}")
+
+        logger.info("--- Cycle Complete ---\n")
+
+    def run_loop(self):
+        """Run continuous polling loop until interrupted."""
+        if not self.start():
+            return
+
+        try:
+            while self.running:
+                self.run_cycle()
+                time.sleep(self.config.poll_interval_seconds)
+        except KeyboardInterrupt:
+            logger.info("Keyboard interrupt received. Shutting down MT5 Trading Agent.")
+        finally:
+            self.stop()

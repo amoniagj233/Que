@@ -1,0 +1,27 @@
+; Defaults remain disabled. Review all inputs in MT5 before demo use.
+EnableTrading=false
+AllowNewEntries=true
+Magic=2026102201
+Lots=0.01
+EnableBuy=true
+EnableSell=true
+EntryDistance=1.0
+StopDistance=0.9
+TakeProfitDistance=1.1
+UseATR=false
+ATRTimeframe=15
+ATRPeriod=14
+ATRMultiplier=1.5
+MaxEntryDistance=5.0
+MaxSpread=2.0
+MaxSpreadEntryRatio=0.25
+MaxCombinedRiskPercent=1.0
+DailyEquityLossPercent=5.0
+TrailStart=0.6
+TrailDistance=0.5
+RepriceThreshold=0.2
+RepriceSeconds=5
+EntryCooldownSeconds=60
+PendingLifetimeSeconds=120
+SlippagePoints=20
+ClearExecutionHalt=false

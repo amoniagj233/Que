@@ -1,0 +1,331 @@
+"""
+MetaTrader 5 API Connector Wrapper
+Handles terminal connection, price retrieval, order placement, and position tracking.
+"""
+
+import logging
+import pandas as pd
+from typing import Dict, List, Optional, Any
+import MetaTrader5 as mt5
+
+logger = logging.getLogger("MT5Agent.Connector")
+
+# Timeframe mapping helper
+TIMEFRAME_MAP = {
+    "M1": mt5.TIMEFRAME_M1,
+    "M5": mt5.TIMEFRAME_M5,
+    "M15": mt5.TIMEFRAME_M15,
+    "M30": mt5.TIMEFRAME_M30,
+    "H1": mt5.TIMEFRAME_H1,
+    "H4": mt5.TIMEFRAME_H4,
+    "D1": mt5.TIMEFRAME_D1,
+}
+
+class MT5Connector:
+    def __init__(self, path: Optional[str] = None, login: Optional[int] = None, 
+                 password: Optional[str] = None, server: Optional[str] = None):
+        self.path = path
+        self.login = login
+        self.password = password
+        self.server = server
+        self.connected = False
+
+    def connect(self) -> bool:
+        """Initialize connection to MetaTrader 5 Terminal."""
+        logger.info("Initializing MT5 Connection...")
+        init_kwargs = {}
+        if self.path:
+            init_kwargs["path"] = self.path
+        if self.login and self.password and self.server:
+            init_kwargs["login"] = self.login
+            init_kwargs["password"] = self.password
+            init_kwargs["server"] = self.server
+
+        # Attempt initialization
+        try:
+            connected = mt5.initialize(**init_kwargs)
+        except Exception as e:
+            logger.error(f"MT5 Initialization exception: {e}")
+            connected = False
+
+        if not connected:
+            err_code, err_msg = mt5.last_error()
+            logger.warning(f"MT5 Terminal connection not active: {err_msg} (code {err_code})")
+            logger.warning("Ensure MetaTrader 5 application (terminal64.exe) is launched and logged in on Windows.")
+            self.connected = False
+            return False
+
+        term_info = mt5.terminal_info()
+        acc_info = mt5.account_info()
+        
+        if term_info is None:
+            logger.error("Failed to retrieve terminal info.")
+            self.connected = False
+            return False
+
+        self.connected = True
+        logger.info(f"Connected to MT5 Terminal Build {term_info.build}")
+        if acc_info:
+            logger.info(f"Account: {acc_info.login} | Server: {acc_info.server} | Balance: {acc_info.balance} {acc_info.currency}")
+        return True
+
+    def disconnect(self):
+        """Shutdown MT5 connection."""
+        if self.connected:
+            mt5.shutdown()
+            self.connected = False
+            logger.info("Disconnected from MT5 Terminal.")
+
+    def get_account_info(self) -> Optional[Dict[str, Any]]:
+        """Fetch current account summary."""
+        if not self.connected and not self.connect():
+            return None
+        info = mt5.account_info()
+        if info is None:
+            # Reconnect attempt if connection was severed
+            self.connected = False
+            if not self.connect():
+                return None
+            info = mt5.account_info()
+            if info is None:
+                return None
+        return {
+            "login": info.login,
+            "trade_mode": info.trade_mode,
+            "leverage": info.leverage,
+            "balance": info.balance,
+            "equity": info.equity,
+            "profit": info.profit,
+            "margin": info.margin,
+            "free_margin": info.margin_free,
+            "currency": info.currency,
+        }
+
+    def get_symbol_info(self, symbol: str) -> Optional[Dict[str, Any]]:
+        """Get live symbol quote and specs."""
+        if not self.connected and not self.connect():
+            return None
+        
+        # Ensure symbol is in market watch
+        if not mt5.symbol_select(symbol, True):
+            logger.warning(f"Failed to select symbol {symbol} in Market Watch")
+
+        info = mt5.symbol_info(symbol)
+        tick = mt5.symbol_info_tick(symbol)
+        if info is None or tick is None:
+            logger.error(f"Could not retrieve tick/symbol info for {symbol}")
+            return None
+
+        point = info.point
+        digits = info.digits
+        spread_pips = (tick.ask - tick.bid) / (point * 10 if digits in (3, 5) else point)
+
+        return {
+            "symbol": symbol,
+            "bid": tick.bid,
+            "ask": tick.ask,
+            "point": point,
+            "digits": digits,
+            "spread_raw": info.spread,
+            "spread_pips": spread_pips,
+            "trade_contract_size": info.trade_contract_size,
+            "volume_min": info.volume_min,
+            "volume_max": info.volume_max,
+            "volume_step": info.volume_step,
+        }
+
+    def get_rates(self, symbol: str, timeframe_str: str = "M15", bars: int = 200) -> Optional[pd.DataFrame]:
+        """Fetch historical candle rates as a pandas DataFrame."""
+        if not self.connected and not self.connect():
+            return None
+
+        tf = TIMEFRAME_MAP.get(timeframe_str.upper(), mt5.TIMEFRAME_M15)
+        rates = mt5.copy_rates_from_pos(symbol, tf, 0, bars)
+        
+        if rates is None or len(rates) == 0:
+            logger.error(f"Failed to fetch rates for {symbol} ({timeframe_str})")
+            return None
+
+        df = pd.DataFrame(rates)
+        df['time'] = pd.to_datetime(df['time'], unit='s')
+        return df
+
+    def get_open_positions(self, symbol: Optional[str] = None, magic: Optional[int] = None) -> List[Dict[str, Any]]:
+        """Retrieve list of currently open positions."""
+        if not self.connected and not self.connect():
+            return []
+
+        kwargs = {}
+        if symbol:
+            kwargs["symbol"] = symbol
+        
+        positions = mt5.positions_get(**kwargs)
+        if positions is None:
+            return []
+
+        res = []
+        for pos in positions:
+            if magic is not None and pos.magic != magic:
+                continue
+            res.append({
+                "ticket": pos.ticket,
+                "symbol": pos.symbol,
+                "type": "BUY" if pos.type == mt5.ORDER_TYPE_BUY else "SELL",
+                "volume": pos.volume,
+                "price_open": pos.price_open,
+                "price_current": pos.price_current,
+                "sl": pos.sl,
+                "tp": pos.tp,
+                "profit": pos.profit,
+                "magic": pos.magic,
+                "comment": pos.comment,
+                "time": pos.time,
+            })
+        return res
+
+    def place_order(self, symbol: str, action: str, lot: float, sl: float = 0.0, 
+                    tp: float = 0.0, magic: int = 0, comment: str = "MT5 Agent") -> Optional[Dict[str, Any]]:
+        """Place a market Buy or Sell order."""
+        if not self.connected and not self.connect():
+            return None
+
+        sym_info = self.get_symbol_info(symbol)
+        if not sym_info:
+            return None
+
+        order_type = mt5.ORDER_TYPE_BUY if action.upper() == "BUY" else mt5.ORDER_TYPE_SELL
+        price = sym_info["ask"] if action.upper() == "BUY" else sym_info["bid"]
+        digits = sym_info["digits"]
+
+        sl_round = round(sl, digits) if sl > 0 else 0.0
+        tp_round = round(tp, digits) if tp > 0 else 0.0
+
+        # Determine filling mode based on symbol execution mode
+        sym = symbol.upper()
+        if "BTC" in sym or "CRYPTO" in sym:
+            filling_modes = [mt5.ORDER_FILLING_FOK, mt5.ORDER_FILLING_RETURN, mt5.ORDER_FILLING_IOC]
+        else:
+            filling_modes = [mt5.ORDER_FILLING_IOC, mt5.ORDER_FILLING_FOK, mt5.ORDER_FILLING_RETURN]
+
+        result = None
+        for fill_mode in filling_modes:
+            request = {
+                "action": mt5.TRADE_ACTION_DEAL,
+                "symbol": symbol,
+                "volume": float(lot),
+                "type": order_type,
+                "price": price,
+                "sl": sl_round,
+                "tp": tp_round,
+                "deviation": 50,
+                "magic": magic,
+                "comment": comment,
+                "type_time": mt5.ORDER_TIME_GTC,
+                "type_filling": fill_mode,
+            }
+
+            logger.info(f"Sending Order: {action} {lot} {symbol} @ {price} | SL: {sl_round} | TP: {tp_round} (Filling: {fill_mode})")
+            result = mt5.order_send(request)
+
+            if result is not None and result.retcode == mt5.TRADE_RETCODE_DONE:
+                break
+            elif result is not None and result.retcode == 10016:
+                logger.warning(f"Order rejected with 10016 (Invalid stops). Retrying with sl=0.0, tp=0.0...")
+                request["sl"] = 0.0
+                request["tp"] = 0.0
+                result = mt5.order_send(request)
+                if result is not None and result.retcode == mt5.TRADE_RETCODE_DONE:
+                    logger.info(f"Market order filled cleanly! Ticket: {result.order}. Attaching stops via modify_position_sl_tp...")
+                    import time
+                    time.sleep(0.3)
+                    self.modify_position_sl_tp(result.order, sl_round, tp_round, symbol)
+                    break
+
+        if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
+            err = result.comment if result else "Unknown error"
+            logger.error(f"Order send failed! Retcode: {result.retcode if result else 'N/A'}, Comment: {err}")
+            return None
+
+        logger.info(f"Order Execution SUCCESS! Ticket: {result.order}, Volume: {result.volume}, Price: {result.price}")
+        return {
+            "ticket": result.order,
+            "symbol": symbol,
+            "action": action.upper(),
+            "volume": result.volume,
+            "price": result.price,
+            "retcode": result.retcode,
+            "comment": result.comment,
+        }
+
+    def modify_position_sl_tp(self, ticket: int, sl: float, tp: float, symbol: str) -> bool:
+        """Modify Stop Loss / Take Profit of an open position."""
+        if not self.connected and not self.connect():
+            return False
+
+        sym_info = self.get_symbol_info(symbol)
+        digits = sym_info["digits"] if sym_info else 5
+
+        request = {
+            "action": mt5.TRADE_ACTION_SLTP,
+            "position": ticket,
+            "symbol": symbol,
+            "sl": round(sl, digits) if sl > 0 else 0.0,
+            "tp": round(tp, digits) if tp > 0 else 0.0,
+        }
+
+        result = mt5.order_send(request)
+        if result and result.retcode == mt5.TRADE_RETCODE_DONE:
+            logger.info(f"Position #{ticket} updated SL: {round(sl, digits)}, TP: {round(tp, digits)}")
+            return True
+        else:
+            logger.error(f"Failed to modify position #{ticket}: {result.comment if result else 'error'}")
+            return False
+
+    def close_position(self, ticket: int) -> bool:
+        """Close an open position by ticket number."""
+        positions = self.get_open_positions()
+        pos = next((p for p in positions if p["ticket"] == ticket), None)
+        if not pos:
+            logger.warning(f"Position #{ticket} not found to close.")
+            return False
+
+        symbol = pos["symbol"]
+        sym_info = self.get_symbol_info(symbol)
+        if not sym_info:
+            return False
+
+        opposite_type = mt5.ORDER_TYPE_SELL if pos["type"] == "BUY" else mt5.ORDER_TYPE_BUY
+        price = sym_info["bid"] if pos["type"] == "BUY" else sym_info["ask"]
+
+        request = {
+            "action": mt5.TRADE_ACTION_DEAL,
+            "position": ticket,
+            "symbol": symbol,
+            "volume": pos["volume"],
+            "type": opposite_type,
+            "price": price,
+            "deviation": 50,
+            "magic": pos["magic"],
+            "comment": "Hard Loss Stop $10",
+            "type_time": mt5.ORDER_TIME_GTC,
+        }
+
+        sym = symbol.upper()
+        if "BTC" in sym or "CRYPTO" in sym:
+            filling_modes = [mt5.ORDER_FILLING_FOK, mt5.ORDER_FILLING_RETURN, mt5.ORDER_FILLING_IOC]
+        else:
+            filling_modes = [mt5.ORDER_FILLING_IOC, mt5.ORDER_FILLING_FOK, mt5.ORDER_FILLING_RETURN]
+
+        result = None
+        for fill_mode in filling_modes:
+            request["type_filling"] = fill_mode
+            result = mt5.order_send(request)
+            if result and result.retcode == mt5.TRADE_RETCODE_DONE:
+                break
+
+        if result and result.retcode == mt5.TRADE_RETCODE_DONE:
+            logger.info(f"Position #{ticket} closed successfully at {price}.")
+            return True
+        else:
+            logger.error(f"Failed to close position #{ticket}: {result.comment if result else 'error'}")
+            return False

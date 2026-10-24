@@ -1,0 +1,73 @@
+"""
+Dedicated Launcher for Bot #2: Liquidity Sweep & Market Structure Shift (MSS)
+Runs independently with Magic Number 20260912 (Zero conflict with Bot #1).
+Specialized for Gold (XAUUSD) & Bitcoin (BTCUSD).
+"""
+
+import argparse
+import logging
+import sys
+from config import MT5Config
+from mt5_agent import MT5TradingAgent
+
+def setup_logging(verbose: bool = False):
+    level = logging.DEBUG if verbose else logging.INFO
+    log_format = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+    logging.basicConfig(
+        level=level,
+        format=log_format,
+        datefmt="%Y-%m-%d %H:%M:%S",
+        handlers=[
+            logging.StreamHandler(sys.stdout),
+            logging.FileHandler("liquidity_bot.log", mode="a", encoding="utf-8")
+        ]
+    )
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Bot #2: Liquidity Sweep & MSS Automated Trading Bot")
+    parser.add_argument("--path", default=None, help="MT5 Terminal path (e.g. C:\\Program Files\\Headway MT5 Terminal\\terminal64.exe)")
+    parser.add_argument("--flat-lot", type=float, default=0.01, help="Fixed lot size (default: 0.01)")
+    parser.add_argument("--mode", choices=["dry_run", "live"], default="dry_run", help="Execution mode (default: dry_run)")
+    parser.add_argument("--symbols", default="XAUUSD,BTCUSD", help="Symbols to trade (default: XAUUSD,BTCUSD)")
+    parser.add_argument("--timeframe", default="M5", help="Timeframe (default: M5 for Liquidity Sweeps)")
+    parser.add_argument("--magic", type=int, default=20260912, help="Magic number (default: 20260912)")
+    parser.add_argument("--risk", type=float, default=0.5, help="Risk percent per trade (default: 0.5)")
+    parser.add_argument("--max-trades", type=int, default=4, help="Max open positions (default: 4)")
+    parser.add_argument("--interval", type=int, default=5, help="Polling interval in seconds (default: 5)")
+    parser.add_argument("--once", action="store_true", help="Run a single evaluation cycle and exit")
+    parser.add_argument("--verbose", action="store_true", help="Enable verbose debug logging")
+    return parser.parse_args()
+
+def main():
+    args = parse_args()
+    setup_logging(args.verbose)
+
+    config = MT5Config.from_env()
+    if args.path:
+        config.path = args.path
+    config.default_flat_lot = args.flat_lot
+    config.flat_lot_mode = True
+    config.strategy_name = "liquidity_sweep_mss"
+    config.mode = args.mode
+    config.symbols = [s.strip().upper() for s in args.symbols.split(",") if s.strip()]
+    config.timeframe_str = args.timeframe
+    config.magic_number = args.magic
+    config.risk_percent_per_trade = args.risk
+    config.twin_trades_mode = True
+    config.trades_per_signal = 2
+    config.default_flat_lot = args.flat_lot
+    config.max_open_positions = max(args.max_trades, 4)
+    config.max_positions_per_symbol = 4
+    config.poll_interval_seconds = args.interval
+
+    agent = MT5TradingAgent(config)
+
+    if args.once:
+        if agent.start():
+            agent.run_cycle()
+            agent.stop()
+    else:
+        agent.run_loop()
+
+if __name__ == "__main__":
+    main()

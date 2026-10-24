@@ -1,0 +1,64 @@
+{
+  "training": [
+    "2026.10.05",
+    "2026.10.10"
+  ],
+  "validation": [
+    "2026.10.12",
+    "2026.10.17"
+  ],
+  "candidates": {
+    "balanced": {
+      "EntryDistance": "1.5",
+      "StopDistance": "1.5",
+      "TakeProfitDistance": "2.0",
+      "TrailStart": "1.0",
+      "TrailDistance": "0.75"
+    },
+    "wide": {
+      "EntryDistance": "2.0",
+      "StopDistance": "2.0",
+      "TakeProfitDistance": "3.0",
+      "TrailStart": "1.5",
+      "TrailDistance": "1.0"
+    },
+    "reward": {
+      "EntryDistance": "1.5",
+      "StopDistance": "1.0",
+      "TakeProfitDistance": "2.0",
+      "TrailStart": "1.2",
+      "TrailDistance": "0.6"
+    },
+    "patient": {
+      "EntryDistance": "2.5",
+      "StopDistance": "1.5",
+      "TakeProfitDistance": "3.0",
+      "TrailStart": "1.5",
+      "TrailDistance": "0.8",
+      "RepriceSeconds": "10"
+    },
+    "broad": {
+      "EntryDistance": "3.0",
+      "StopDistance": "3.0",
+      "TakeProfitDistance": "6.0",
+      "TrailStart": "3.0",
+      "TrailDistance": "1.5"
+    },
+    "fixed_rr": {
+      "EntryDistance": "2.0",
+      "StopDistance": "2.0",
+      "TakeProfitDistance": "4.0",
+      "TrailStart": "5.0",
+      "TrailDistance": "1.0",
+      "RepriceSeconds": "10"
+    },
+    "broadest": {
+      "EntryDistance": "3.0",
+      "StopDistance": "4.0",
+      "TakeProfitDistance": "8.0",
+      "TrailStart": "4.0",
+      "TrailDistance": "2.0"
+    }
+  },
+  "selection_rule": "Exclude halts/zero or <30 trades. Rank training net profit, then profit factor; validate only the training winner. No live recommendation if validation loses."
+}

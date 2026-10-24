@@ -1,0 +1,16 @@
+{
+  "checked_utc": "2026-10-22T13:28:24.377087+00:00",
+  "signal": "HOLD",
+  "reason": "Scanning 4 Indicators 24/7 | SMC: INTRARANGE_CONSOLIDATION | Breakers: WAITING_CONFIRMATION | TP Target (XU SEMA): High=4088.19, Low=4074.22",
+  "closed_bar_broker_timestamp": "2026-10-22 16:27:00",
+  "bar_count": 299,
+  "account_type": "REAL",
+  "balance": 951.05,
+  "equity": 946.08,
+  "open_positions": 3,
+  "risk_budget_at_configured_0_5_percent": 4.7304,
+  "strategy_sl": null,
+  "strategy_tp": null,
+  "broker_stops_level_points": 0,
+  "orders_submitted_by_check": 0
+}

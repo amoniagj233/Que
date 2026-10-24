@@ -1,0 +1,26 @@
+{
+  "mcpServers": {
+    "browseract": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "browseract-mcp"
+      ],
+      "env": {
+        "BROWSERACT_API_KEY": "<YOUR_BROWSERACT_API_KEY>"
+      }
+    },
+    "context-compress": {
+      "command": "npx",
+      "args": ["-y", "context-compress"]
+    },
+    "token-optimizer": {
+      "command": "npx",
+      "args": ["-y", "@ooples/token-optimizer-mcp"]
+    },
+    "flatten": {
+      "command": "npx",
+      "args": ["-y", "flatten-mcp"]
+    }
+  }
+}

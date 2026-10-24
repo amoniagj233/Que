@@ -1,0 +1,737 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MT5 Universal AI Bridge & Control Center</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-base: #0a0d14;
+            --bg-card: #121824;
+            --bg-card-hover: #182030;
+            --border-color: #1e293b;
+            --accent-blue: #3b82f6;
+            --accent-cyan: #06b6d4;
+            --accent-green: #10b981;
+            --accent-red: #ef4444;
+            --accent-amber: #f59e0b;
+            --text-main: #f8fafc;
+            --text-muted: #94a3b8;
+            --font-main: 'Plus Jakarta Sans', sans-serif;
+            --font-mono: 'JetBrains Mono', monospace;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            background-color: var(--bg-base);
+            color: var(--text-main);
+            font-family: var(--font-main);
+            min-height: 100vh;
+            padding: 24px;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding-bottom: 24px;
+            border-bottom: 1px solid var(--border-color);
+            margin-bottom: 24px;
+        }
+
+        .brand {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .logo-badge {
+            background: linear-gradient(135deg, #3b82f6, #06b6d4);
+            color: white;
+            font-weight: 700;
+            padding: 8px 14px;
+            border-radius: 8px;
+            font-size: 16px;
+            letter-spacing: 0.5px;
+        }
+
+        .header-title h1 {
+            font-size: 20px;
+            font-weight: 700;
+            color: #ffffff;
+        }
+
+        .header-title p {
+            font-size: 13px;
+            color: var(--text-muted);
+        }
+
+        .status-pill {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 6px 14px;
+            border-radius: 20px;
+            font-size: 13px;
+            font-weight: 600;
+            background: rgba(16, 185, 129, 0.1);
+            color: var(--accent-green);
+            border: 1px solid rgba(16, 185, 129, 0.25);
+        }
+
+        .status-pill.error {
+            background: rgba(239, 68, 68, 0.1);
+            color: var(--accent-red);
+            border-color: rgba(239, 68, 68, 0.25);
+        }
+
+        .pulse-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background-color: currentColor;
+            animation: pulse 1.8s infinite;
+        }
+
+        @keyframes pulse {
+            0% { opacity: 1; transform: scale(1); }
+            50% { opacity: 0.4; transform: scale(1.2); }
+            100% { opacity: 1; transform: scale(1); }
+        }
+
+        .nav-links {
+            display: flex;
+            gap: 12px;
+        }
+
+        .nav-btn {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            color: var(--text-main);
+            padding: 8px 16px;
+            border-radius: 8px;
+            text-decoration: none;
+            font-size: 13px;
+            font-weight: 600;
+            transition: all 0.15s;
+        }
+
+        .nav-btn:hover {
+            background: var(--bg-card-hover);
+            border-color: var(--accent-blue);
+        }
+
+        /* Metrics Grid */
+        .metrics-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 16px;
+            margin-bottom: 24px;
+        }
+
+        .metric-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 16px 20px;
+        }
+
+        .metric-label {
+            font-size: 12px;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 6px;
+        }
+
+        .metric-value {
+            font-size: 22px;
+            font-weight: 700;
+            font-family: var(--font-mono);
+        }
+
+        .val-positive { color: var(--accent-green); }
+        .val-negative { color: var(--accent-red); }
+
+        /* Main Workspace Columns */
+        .workspace {
+            display: grid;
+            grid-template-columns: 380px 1fr;
+            gap: 24px;
+        }
+
+        @media (max-width: 1024px) {
+            .workspace { grid-template-columns: 1fr; }
+        }
+
+        .panel {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 20px;
+            margin-bottom: 24px;
+        }
+
+        .panel-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 16px;
+            padding-bottom: 12px;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        .panel-title {
+            font-size: 15px;
+            font-weight: 700;
+            color: #fff;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        /* Form elements */
+        .form-group {
+            margin-bottom: 14px;
+        }
+
+        .form-label {
+            display: block;
+            font-size: 12px;
+            color: var(--text-muted);
+            margin-bottom: 6px;
+            font-weight: 500;
+        }
+
+        .form-control {
+            width: 100%;
+            background: var(--bg-base);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 10px 14px;
+            color: var(--text-main);
+            font-family: var(--font-mono);
+            font-size: 14px;
+            outline: none;
+            transition: border-color 0.15s;
+        }
+
+        .form-control:focus {
+            border-color: var(--accent-blue);
+        }
+
+        .quote-ticker {
+            background: var(--bg-base);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 12px;
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 16px;
+            font-family: var(--font-mono);
+        }
+
+        .quote-col {
+            text-align: center;
+        }
+
+        .quote-col span {
+            display: block;
+            font-size: 11px;
+            color: var(--text-muted);
+        }
+
+        .quote-col strong {
+            font-size: 16px;
+        }
+
+        .trade-buttons {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 12px;
+            margin-top: 18px;
+        }
+
+        .btn {
+            border: none;
+            border-radius: 8px;
+            padding: 12px;
+            font-size: 14px;
+            font-weight: 700;
+            cursor: pointer;
+            transition: all 0.15s;
+            font-family: var(--font-main);
+        }
+
+        .btn-buy {
+            background: var(--accent-green);
+            color: #ffffff;
+        }
+
+        .btn-buy:hover {
+            filter: brightness(1.15);
+        }
+
+        .btn-sell {
+            background: var(--accent-red);
+            color: #ffffff;
+        }
+
+        .btn-sell:hover {
+            filter: brightness(1.15);
+        }
+
+        .btn-danger {
+            background: rgba(239, 68, 68, 0.2);
+            color: var(--accent-red);
+            border: 1px solid rgba(239, 68, 68, 0.4);
+            padding: 6px 12px;
+            font-size: 12px;
+        }
+
+        .btn-danger:hover {
+            background: rgba(239, 68, 68, 0.4);
+        }
+
+        /* Table */
+        .table-wrap {
+            overflow-x: auto;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 13px;
+        }
+
+        th {
+            text-align: left;
+            padding: 10px 12px;
+            color: var(--text-muted);
+            border-bottom: 1px solid var(--border-color);
+            font-weight: 600;
+            font-size: 11px;
+            text-transform: uppercase;
+        }
+
+        td {
+            padding: 12px;
+            border-bottom: 1px solid rgba(30, 41, 59, 0.5);
+            font-family: var(--font-mono);
+        }
+
+        .badge-buy {
+            color: var(--accent-green);
+            background: rgba(16, 185, 129, 0.15);
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-weight: 600;
+        }
+
+        .badge-sell {
+            color: var(--accent-red);
+            background: rgba(239, 68, 68, 0.15);
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-weight: 600;
+        }
+
+        /* Code snippets */
+        pre {
+            background: var(--bg-base);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 14px;
+            font-family: var(--font-mono);
+            font-size: 12px;
+            color: #cbd5e1;
+            overflow-x: auto;
+            margin-top: 10px;
+        }
+
+        .copy-tag {
+            cursor: pointer;
+            color: var(--accent-cyan);
+            font-size: 11px;
+            margin-left: 6px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- Header -->
+        <header>
+            <div class="brand">
+                <div class="logo-badge">MT5-AI</div>
+                <div class="header-title">
+                    <h1>Universal AI Trading Bridge</h1>
+                    <p>High-performance MetaTrader 5 API gateway for external AI models & autonomous agents</p>
+                </div>
+            </div>
+            <div style="display: flex; align-items: center; gap: 16px;">
+                <div id="conn-pill" class="status-pill">
+                    <div class="pulse-dot"></div>
+                    <span id="conn-text">Connecting...</span>
+                </div>
+                <div class="nav-links">
+                    <a href="/deriv-bot" class="nav-btn" style="background: rgba(245, 158, 11, 0.2); border-color: #f59e0b; color: #fbbf24; font-weight: 700;">Deriv Digit Bot (amonimobot)</a>
+                    <a href="/docs" target="_blank" class="nav-btn">API Docs (Swagger)</a>
+                    <a href="/api/ai/tools?format=openai" target="_blank" class="nav-btn">AI Tools JSON</a>
+                </div>
+            </div>
+        </header>
+
+        <!-- Live Metrics Cards -->
+        <div class="metrics-grid">
+            <div class="metric-card">
+                <div class="metric-label">Account Login</div>
+                <div id="m-login" class="metric-value">---</div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-label">Server & Mode</div>
+                <div id="m-server" class="metric-value" style="font-size: 18px;">---</div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-label">Balance</div>
+                <div id="m-balance" class="metric-value">$0.00</div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-label">Equity</div>
+                <div id="m-equity" class="metric-value">$0.00</div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-label">Floating Profit</div>
+                <div id="m-profit" class="metric-value">$0.00</div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-label">Free Margin</div>
+                <div id="m-margin" class="metric-value">$0.00</div>
+            </div>
+        </div>
+
+        <!-- Main Workspace -->
+        <div class="workspace">
+            <!-- Left: Quick Trade Form -->
+            <div>
+                <div class="panel">
+                    <div class="panel-header">
+                        <div class="panel-title">Execute Market Order</div>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Symbol (Headway Quotes)</label>
+                        <select id="trade-symbol" class="form-control" onchange="refreshQuote()">
+                            <option value="XAUUSD">XAUUSD (Gold)</option>
+                            <option value="EURUSD">EURUSD</option>
+                            <option value="GBPUSD">GBPUSD</option>
+                            <option value="USDJPY">USDJPY</option>
+                            <option value="BTCUSD">BTCUSD</option>
+                            <option value="ETHUSD">ETHUSD</option>
+                        </select>
+                    </div>
+
+                    <div class="quote-ticker">
+                        <div class="quote-col">
+                            <span>BID</span>
+                            <strong id="q-bid" style="color: var(--accent-red);">---</strong>
+                        </div>
+                        <div class="quote-col">
+                            <span>SPREAD</span>
+                            <strong id="q-spread" style="color: var(--accent-amber);">---</strong>
+                        </div>
+                        <div class="quote-col">
+                            <span>ASK</span>
+                            <strong id="q-ask" style="color: var(--accent-green);">---</strong>
+                        </div>
+                    </div>
+
+                    <div class="form-group">
+                        <label class="form-label">Volume (Lots)</label>
+                        <input id="trade-volume" type="number" step="0.01" value="0.01" class="form-control" />
+                    </div>
+
+                    <div class="form-group">
+                        <label class="form-label">Stop Loss (Price, optional)</label>
+                        <input id="trade-sl" type="number" step="any" placeholder="e.g. 4100.00" class="form-control" />
+                    </div>
+
+                    <div class="form-group">
+                        <label class="form-label">Take Profit (Price, optional)</label>
+                        <input id="trade-tp" type="number" step="any" placeholder="e.g. 4150.00" class="form-control" />
+                    </div>
+
+                    <div class="trade-buttons">
+                        <button class="btn btn-buy" onclick="submitTrade('BUY')">BUY</button>
+                        <button class="btn btn-sell" onclick="submitTrade('SELL')">SELL</button>
+                    </div>
+
+                    <div id="trade-alert" style="margin-top: 14px; font-size: 13px; display: none;"></div>
+                </div>
+
+                <!-- AI Quick Access Guide -->
+                <div class="panel">
+                    <div class="panel-header">
+                        <div class="panel-title">AI Integration Endpoints</div>
+                    </div>
+                    <p style="font-size: 12px; color: var(--text-muted); line-height: 1.5;">
+                        Any AI agent can call the bridge endpoint to execute tools on MT5:
+                    </p>
+                    <pre><code>POST http://127.0.0.1:8000/api/ai/execute
+{
+  "tool_name": "place_market_order",
+  "parameters": {
+    "symbol": "XAUUSD",
+    "action": "BUY",
+    "volume": 0.01
+  }
+}</code></pre>
+                </div>
+            </div>
+
+            <!-- Right: Open Positions & Live AI Activity -->
+            <div>
+                <div class="panel">
+                    <div class="panel-header">
+                        <div class="panel-title">
+                            Open Positions (<span id="pos-count">0</span>)
+                        </div>
+                        <button class="btn btn-danger" onclick="closeAllPositions()">Close All Positions</button>
+                    </div>
+
+                    <div class="table-wrap">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>Ticket</th>
+                                    <th>Symbol</th>
+                                    <th>Action</th>
+                                    <th>Lots</th>
+                                    <th>Open Price</th>
+                                    <th>Current</th>
+                                    <th>SL / TP</th>
+                                    <th>Profit</th>
+                                    <th>Action</th>
+                                </tr>
+                            </thead>
+                            <tbody id="positions-tbody">
+                                <tr>
+                                    <td colspan="9" style="text-align: center; color: var(--text-muted);">Loading open positions...</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- Python AI Connection Snippet -->
+                <div class="panel">
+                    <div class="panel-header">
+                        <div class="panel-title">How Other AIs Connect in Python</div>
+                    </div>
+                    <p style="font-size: 13px; color: var(--text-muted); margin-bottom: 8px;">
+                        External Python AIs (LangChain, CrewAI, AutoGen, scripts) can import our client:
+                    </p>
+                    <pre><code>from client import MT5Client
+
+# Connect to this bridge
+ai = MT5Client("http://127.0.0.1:8000")
+
+# Fetch live market data
+quote = ai.get_quote("XAUUSD")
+print(f"Gold Bid: {quote['bid']}, Ask: {quote['ask']}")
+
+# Execute trade
+order = ai.buy("XAUUSD", volume=0.01, stop_loss=4100.0, take_profit=4150.0)
+print("Order Placed:", order)</code></pre>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        async function fetchState() {
+            try {
+                const res = await fetch('/api/account');
+                const acc = await res.json();
+                
+                document.getElementById('conn-pill').className = 'status-pill';
+                document.getElementById('conn-text').textContent = 'MT5 Connected';
+                document.getElementById('m-login').textContent = acc.login || '---';
+                document.getElementById('m-server').textContent = `${acc.server} (${acc.trade_mode})`;
+                document.getElementById('m-balance').textContent = `$${acc.balance.toFixed(2)}`;
+                document.getElementById('m-equity').textContent = `$${acc.equity.toFixed(2)}`;
+                
+                const pEl = document.getElementById('m-profit');
+                pEl.textContent = `$${acc.profit.toFixed(2)}`;
+                pEl.className = 'metric-value ' + (acc.profit >= 0 ? 'val-positive' : 'val-negative');
+
+                document.getElementById('m-margin').textContent = `$${acc.free_margin.toFixed(2)}`;
+            } catch (err) {
+                document.getElementById('conn-pill').className = 'status-pill error';
+                document.getElementById('conn-text').textContent = 'Disconnected';
+            }
+
+            fetchPositions();
+            refreshQuote();
+        }
+
+        async function fetchPositions() {
+            try {
+                const res = await fetch('/api/positions');
+                const data = await res.json();
+                const pos = data.positions || [];
+                document.getElementById('pos-count').textContent = pos.length;
+                
+                const tbody = document.getElementById('positions-tbody');
+                if (pos.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="9" style="text-align: center; color: var(--text-muted);">No open positions</td></tr>';
+                    return;
+                }
+
+                tbody.innerHTML = pos.map(p => `
+                    <tr>
+                        <td>#${p.ticket}</td>
+                        <td><strong>${p.symbol}</strong></td>
+                        <td><span class="${p.type === 'BUY' ? 'badge-buy' : 'badge-sell'}">${p.type}</span></td>
+                        <td>${p.volume}</td>
+                        <td>${p.price_open}</td>
+                        <td>${p.price_current}</td>
+                        <td>${p.sl || '-'} / ${p.tp || '-'}</td>
+                        <td class="${p.profit >= 0 ? 'val-positive' : 'val-negative'}">$${p.profit.toFixed(2)}</td>
+                        <td><button class="btn btn-danger" style="padding: 4px 8px;" onclick="closePosition(${p.ticket})">Close</button></td>
+                    </tr>
+                `).join('');
+            } catch (err) {
+                console.error("Failed to load positions", err);
+            }
+        }
+
+        async function refreshQuote() {
+            const sym = document.getElementById('trade-symbol').value;
+            try {
+                const res = await fetch(`/api/quote/${encodeURIComponent(sym)}`);
+                const q = await res.json();
+                if (q.bid) {
+                    document.getElementById('q-bid').textContent = q.bid;
+                    document.getElementById('q-ask').textContent = q.ask;
+                    document.getElementById('q-spread').textContent = `${q.spread_points} pts`;
+                }
+            } catch (err) {
+                console.error("Failed to fetch quote", err);
+            }
+        }
+
+        async function submitTrade(action) {
+            const sym = document.getElementById('trade-symbol').value;
+            const vol = parseFloat(document.getElementById('trade-volume').value);
+            const sl = parseFloat(document.getElementById('trade-sl').value) || null;
+            const tp = parseFloat(document.getElementById('trade-tp').value) || null;
+            const alertBox = document.getElementById('trade-alert');
+
+            alertBox.style.display = 'block';
+            alertBox.style.color = '#94a3b8';
+            alertBox.textContent = `Sending ${action} order for ${sym}...`;
+
+            try {
+                const res = await fetch('/api/trade/market', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        symbol: sym,
+                        action: action,
+                        volume: vol,
+                        stop_loss: sl,
+                        take_profit: tp,
+                        comment: 'Web-Manual'
+                    })
+                });
+                const data = await res.json();
+                if (res.ok && data.success) {
+                    alertBox.style.color = 'var(--accent-green)';
+                    alertBox.textContent = `Success! Order #${data.order_ticket} executed at ${data.price}.`;
+                    fetchPositions();
+                    fetchState();
+                } else {
+                    alertBox.style.color = 'var(--accent-red)';
+                    alertBox.textContent = `Error: ${data.detail || data.error || 'Execution failed'}`;
+                }
+            } catch (err) {
+                alertBox.style.color = 'var(--accent-red)';
+                alertBox.textContent = `Network error: ${err.message}`;
+            }
+        }
+
+        async function closePosition(ticket) {
+            if (!confirm(`Are you sure you want to close position #${ticket}?`)) return;
+            try {
+                const res = await fetch('/api/trade/close', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ticket: ticket})
+                });
+                const data = await res.json();
+                if (res.ok) {
+                    fetchPositions();
+                    fetchState();
+                } else {
+                    alert(`Failed to close: ${data.detail || data.error}`);
+                }
+            } catch (err) {
+                alert(`Error: ${err.message}`);
+            }
+        }
+
+        async function closeAllPositions() {
+            if (!confirm("Are you sure you want to close ALL open positions?")) return;
+            try {
+                const res = await fetch('/api/trade/close-all', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({})
+                });
+                const data = await res.json();
+                alert(`Closed ${data.closed_count} of ${data.total_count} positions.`);
+                fetchPositions();
+                fetchState();
+            } catch (err) {
+                alert(`Error: ${err.message}`);
+            }
+        }
+
+        async function loadQuoteSymbols() {
+            try {
+                const res = await fetch('/api/symbols');
+                const data = await res.json();
+                const sel = document.getElementById('trade-symbol');
+                if (data.symbols && data.symbols.length > 0) {
+                    const currentVal = sel.value;
+                    sel.innerHTML = data.symbols.map(s => `<option value="${s}">${s}</option>`).join('');
+                    if (data.symbols.includes(currentVal)) {
+                        sel.value = currentVal;
+                    } else if (data.symbols.includes("XAUUSD")) {
+                        sel.value = "XAUUSD";
+                    } else if (data.symbols.includes("EURUSD")) {
+                        sel.value = "EURUSD";
+                    }
+                }
+            } catch (err) {
+                console.error("Failed to load symbols from Quotes", err);
+            }
+        }
+
+        // Initialize symbols and poll state
+        loadQuoteSymbols().then(() => fetchState());
+        setInterval(fetchState, 2000);
+    </script>
+</body>
+</html>

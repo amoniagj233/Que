@@ -1,0 +1,29 @@
+{
+  "name": "train_blueprint",
+  "inputs": {
+    "EnableTrading": "true",
+    "AllowNewEntries": "true",
+    "Magic": "2026102303",
+    "BasketRiskPercent": "0.75",
+    "DailyLossPercent": "3.0",
+    "ExposureStepUnits": "1.0",
+    "StopATR": "1.0",
+    "Target1ATR": "0.5",
+    "Target2ATR": "0.75",
+    "Target3ATR": "1.0",
+    "TrailATR": "0.35",
+    "BreakBufferATR": "0.05",
+    "MinBodyATR": "0.25",
+    "MaxExtensionATR": "2.0",
+    "MinADX": "0.0",
+    "MaxSpreadTargetRatio": "0.25",
+    "MaxSpreadPrice": "1.0",
+    "CooldownSeconds": "10",
+    "MaxHoldingSeconds": "180",
+    "SlippagePoints": "20",
+    "ClearExecutionHalt": "false"
+  },
+  "training_pass": false,
+  "net": -143.54,
+  "commission_stressed_net": -177.84
+}
