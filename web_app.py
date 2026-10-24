@@ -1,4 +1,5 @@
 import json
+import math
 import os
 import sys
 import threading
@@ -8,6 +9,9 @@ from datetime import date, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
+from trade_safety import (MAX_OPEN_POSITIONS, MAX_GROUP_RISK_PERCENT, positive,
+                          floor_volume, limit_volume, stop_loss_money,
+                          validate_geometry, deal_net)
 
 try:
     import MetaTrader5 as mt5
@@ -685,12 +689,17 @@ class AutomatedSetupScanner:
                 return
 
             acc = mt5.account_info()
-            balance = acc.balance if acc else 7150.0
-            margin_free = acc.margin_free if acc else 0.0
-            margin_level = acc.margin_level if acc else 0.0
-            risk_dollar = balance * 0.01  # Strict 1.0% risk rule
-
             positions = mt5.positions_get()
+            if acc is None or positions is None:
+                with self.lock:
+                    self.status = "DISCONNECTED"
+                    self.status_message = "Account/position query failed; new entries paused."
+                    self.current_setups = []
+                return
+            balance = min(acc.balance, acc.equity)
+            margin_free = acc.margin_free
+            margin_level = acc.margin_level
+            risk_dollar = balance * MAX_GROUP_RISK_PERCENT / 100
             self._sync_journal_positions(positions)
 
             # Rule 3 & 4: Live Trade Awareness & Position Limits
@@ -817,12 +826,13 @@ class AutomatedSetupScanner:
                 # 2. MARKET STATUS VERIFICATION (Rule 1)
                 is_open, open_reason = check_symbol_market_open(sym)
 
-                calc_lot = risk_dollar / stop_dist if stop_dist > 0 else info.volume_min
-                calc_lot = max(info.volume_min, min(calc_lot, info.volume_max))
-                calc_lot = round(calc_lot / info.volume_step) * info.volume_step
-                calc_lot = round(calc_lot, 2)
-                if calc_lot < info.volume_min:
-                    calc_lot = info.volume_min
+                try:
+                    calc_lot = limit_volume(
+                        mt5, info, mt5.ORDER_TYPE_BUY if bias == "BUY" else mt5.ORDER_TYPE_SELL,
+                        sym, max(0.01, info.volume_min), entry, sl, risk_dollar)
+                except (ValueError, TypeError):
+                    filtered_reasons[sym] = "Broker risk data unavailable or minimum lot exceeds budget"
+                    continue
 
                 # Compute Multi-Factor Confidence Score (Rule 2)
                 confidence_score, signals_list = calculate_setup_confidence(
@@ -843,7 +853,7 @@ class AutomatedSetupScanner:
                     "setup_name": setup_name,
                     "action": bias,
                     "confidence_score": confidence_score,
-                    "conviction": f"{confidence_score}%",
+                    "conviction": f"{confidence_score}/100 rule score",
                     "is_high_confidence": confidence_score >= 88,
                     "status": "ACTIVE",
                     "is_market_open": is_open,
@@ -874,19 +884,21 @@ class AutomatedSetupScanner:
                     risk_checks_passed = (
                         margin_free >= 500.0 and
                         (margin_level >= 200.0 or margin_level == 0.0) and
-                        len(positions or []) < 15 and
+                        len(positions) + 3 <= MAX_OPEN_POSITIONS and
                         calc_lot >= info.volume_min and
                         sl > 0 and tp > 0
                     )
                     
                     if risk_checks_passed:
-                        # Auto-execute via 3-Trade Multi-TP Power System with Shared 5% Stop Loss
+                        # Router rechecks current account risk and capacity for every group/leg.
                         order_res = execute_multi_tp_group(
                             symbol=sym,
                             action=bias,
                             ref_balance=balance,
                             default_lot=0.01,
-                            ai_notes=f"Auto-Execution (88-100% Score): {tech_signals}"
+                            ai_notes=f"Auto-Execution (88-100 rule score): {tech_signals}",
+                            confidence_score=confidence_score,
+                            prevent_duplicate=True,
                         )
                         if order_res.get("success"):
                             setup_obj["status"] = "EXECUTED"
@@ -940,7 +952,8 @@ class AutomatedSetupScanner:
                 "journal": self.journal[:20]
             }
 
-scanner = AutomatedSetupScanner(interval_seconds=180)
+# Importing this module must never start an order-producing thread.
+scanner = None
 
 def get_deriv_full_state():
     with mt5_lock:
@@ -1231,305 +1244,276 @@ def close_all_deriv_positions():
 # ==============================================================================
 # 5-TRADE MULTI-TP SYSTEM WITH SHARED 5% STOP LOSS ENGINE
 # ==============================================================================
-def load_multi_tp_groups():
+def load_multi_tp_groups(strict=False):
     if not MULTI_TP_FILE.exists():
         return []
     try:
-        with open(MULTI_TP_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
+        groups = json.loads(MULTI_TP_FILE.read_text(encoding="utf-8"))
+        if not isinstance(groups, list):
+            raise ValueError("Trade group state is not a list")
+        return groups
     except Exception:
+        if strict:
+            raise ValueError("Trade group state cannot be read; new entries paused")
         return []
 
+
 def save_multi_tp_groups(groups):
-    try:
-        with open(MULTI_TP_FILE, "w", encoding="utf-8") as f:
-            json.dump(groups, f, indent=2)
-    except Exception as e:
-        print(f"Error saving multi_tp_groups: {e}")
+    # Commit the complete file; never expose a partially written JSON document.
+    pending = MULTI_TP_FILE.with_suffix(".json.tmp")
+    pending.write_text(json.dumps(groups, indent=2, allow_nan=False), encoding="utf-8")
+    os.replace(pending, MULTI_TP_FILE)
+
 
 def sync_multi_tp_groups():
-    """
-    Reconciles all Multi-TP trade groups against live MT5 positions and closed deals.
-    Updates floating profit, detects reached TPs or triggered shared SL, and calculates group net P&L.
-    """
+    """Reconcile Multi-TP positions against live MT5 positions."""
     with mt5_lock:
         ok, _ = ensure_deriv_connected()
-        if not ok:
-            return load_multi_tp_groups()
-
         groups = load_multi_tp_groups()
-        if not groups:
-            return []
-
+        if not ok or not groups:
+            return groups
         open_positions = mt5.positions_get()
-        open_pos_map = {p.ticket: p for p in open_positions} if open_positions else {}
-
-        deals = mt5.history_deals_get(datetime.now() - timedelta(days=3), datetime.now())
-        deal_pos_map = {}
-        if deals:
-            for d in deals:
-                if d.position_id:
-                    deal_pos_map[d.position_id] = d
-
+        if open_positions is None:
+            return groups
+        live = {p.ticket: p for p in open_positions}
         changed = False
-        for g in groups:
-            group_floating = 0.0
-            group_realized = 0.0
-            all_closed = True
-
-            for pos in g.get("positions", []):
+        for group in groups:
+            realized, floating, all_closed = 0.0, 0.0, True
+            for pos in group.get("positions", []):
                 ticket = pos.get("ticket")
-                target_dollar = pos.get("target_dollar", 10.0)
-
-                if ticket in open_pos_map:
+                if not ticket:
+                    continue
+                if ticket in live:
+                    active = live[ticket]
                     all_closed = False
-                    live_p = open_pos_map[ticket]
-                    pos["status"] = "ACTIVE"
-                    pos["current_price"] = live_p.price_current
-                    pos["floating_profit"] = round(live_p.profit, 2)
-                    group_floating += live_p.profit
+                    pos.update(
+                        status="ACTIVE",
+                        current_price=active.price_current,
+                        floating_profit=round(active.profit + active.swap, 2)
+                    )
+                    floating += pos["floating_profit"]
                 else:
-                    if pos.get("status") == "ACTIVE" or not pos.get("close_reason"):
+                    if pos.get("status") == "ACTIVE" or not pos.get("status"):
+                        pos.update(status="CLOSED", floating_profit=0.0)
                         changed = True
-                        if ticket in deal_pos_map:
-                            d = deal_pos_map[ticket]
-                            net_profit = round(d.profit + d.commission + d.swap, 2)
-                            pos["realized_profit"] = net_profit
-                            pos["close_price"] = d.price
-                            
-                            if net_profit >= (target_dollar * 0.85):
-                                pos["status"] = f"TP REACHED (+${net_profit})"
-                                pos["close_reason"] = "TAKE_PROFIT"
-                            elif net_profit < 0:
-                                pos["status"] = f"STOP LOSS HIT (-${abs(net_profit)})"
-                                pos["close_reason"] = "STOP_LOSS"
-                            else:
-                                pos["status"] = f"CLOSED (+${net_profit})"
-                                pos["close_reason"] = "CLOSED"
-                        else:
-                            pos["status"] = "CLOSED"
-                            pos["close_reason"] = "BROKER_EXECUTION"
+                    realized += pos.get("realized_profit", 0.0)
 
-                    group_realized += pos.get("realized_profit", 0.0)
-
-            g["floating_profit"] = round(group_floating, 2)
-            g["realized_profit"] = round(group_realized, 2)
-            g["total_profit"] = round(group_floating + group_realized, 2)
-            if all_closed and g.get("status") == "ACTIVE":
-                g["status"] = "COMPLETED"
-                changed = True
-
-        if changed or open_positions:
+            group.update(
+                realized_profit=round(realized, 2),
+                floating_profit=round(floating, 2),
+                total_profit=round(realized + floating, 2),
+                status="COMPLETED" if all_closed else "ACTIVE"
+            )
+            changed = True
+        if changed:
             save_multi_tp_groups(groups)
         return groups
 
-def execute_multi_tp_group(symbol, action, ref_balance=1000.0, default_lot=0.01, ai_notes="AI Quantitative Setup", custom_lots=None):
-    """
-    Executes an Automatic 3-Trade Multi-TP Power System on Deriv MT5:
-      - 3 separate positions in the same direction.
-      - Shared Stop Loss at 5% of ref_balance ($50 planned loss across all 3 trades combined).
-      - Trade 1: TP 2% (+$20 on $1,000) - High hit rate (~65%), locks in guaranteed profit.
-      - Trade 2: TP 5% (+$50 on $1,000) - Core trend move (~35%), captures the meat of the trend.
-      - Trade 3: Dynamic AI Runner (+15% / +$150 or 2.5x ATR) - Infinite upside trailing stop for massive breakout days.
-      - Default 0.01 lot per trade (or symbol volume_min).
+
+def execute_multi_tp_group(symbol, action, ref_balance=1000.0, default_lot=0.01,
+                           ai_notes="Multi-TP Setup", custom_lots=None,
+                           confidence_score=None, prevent_duplicate=False):
+    """Three fixed targets; preserve signal/price-distance rules, cap stop exposure.
+
+    Risk/target money is a broker estimate in account currency, excluding costs
+    and stop slippage. No trailing stop or win probability is implied.
     """
     with mt5_lock:
+        def reject(message):
+            return {"success": False, "message": message}
+
+        action = str(action).upper()
+        if action not in ("BUY", "SELL"):
+            return reject("Action must be BUY or SELL")
         ok, msg = ensure_deriv_connected()
         if not ok:
-            return {"success": False, "message": msg}
-
-        # 1. Market Status Verification
-        is_open, open_reason = check_symbol_market_open(symbol)
+            return reject(msg)
+        try:
+            groups = load_multi_tp_groups(strict=True)
+        except ValueError as exc:
+            return reject(str(exc))
+        if any(g.get("symbol") == symbol and g.get("execution_state") == "UNKNOWN" for g in groups):
+            return reject("Prior submission requires broker reconciliation before new symbol entries")
+        is_open, reason = check_symbol_market_open(symbol)
         if not is_open:
-            return {"success": False, "message": f"Execution rejected: {open_reason}"}
-
-        mt5.symbol_select(symbol, True)
+            return reject(f"Execution rejected: {reason}")
         info = mt5.symbol_info(symbol)
-        if not info:
-            return {"success": False, "message": f"Symbol '{symbol}' not found on Deriv MT5."}
-
         tick = mt5.symbol_info_tick(symbol)
-        if not tick:
-            return {"success": False, "message": f"Could not retrieve live price for '{symbol}'."}
-
-        order_type = mt5.ORDER_TYPE_BUY if action.upper() == "BUY" else mt5.ORDER_TYPE_SELL
-        entry_price = tick.ask if order_type == mt5.ORDER_TYPE_BUY else tick.bid
-        digits = info.digits
-
-        # Lot size resolution (3 positions)
-        lot = float(custom_lots) if custom_lots else float(default_lot)
-        if lot < info.volume_min:
-            lot = info.volume_min
-        lot = round(lot, 2)
-        total_lots = round(lot * 3, 2)
-
-        # Margin & Broker Limit Verification
         acc = mt5.account_info()
-        if acc:
-            if acc.limit_orders > 0:
-                current_pos_count = len(mt5.positions_get() or [])
-                if current_pos_count + 3 > acc.limit_orders:
-                    return {
-                        "success": False,
-                        "message": f"Broker position limit ({acc.limit_orders}) will be exceeded. Currently open: {current_pos_count} positions. Please close positions before opening a 3-trade group."
-                    }
-            est_margin = mt5.order_calc_margin(order_type, symbol, total_lots, entry_price)
-            if est_margin and est_margin > acc.margin_free:
-                return {
-                    "success": False,
-                    "message": f"Insufficient margin. Required: ${est_margin:.2f}, Free: ${acc.margin_free:.2f}"
-                }
+        positions = mt5.positions_get()
+        if info is None or tick is None or acc is None or positions is None:
+            return reject("Account, positions, symbol or quote unavailable; no orders sent")
+        if not getattr(acc, "trade_allowed", False) or not getattr(acc, "trade_expert", False):
+            return reject("Account does not permit automated trading")
+        if getattr(acc, "margin_mode", None) != mt5.ACCOUNT_MARGIN_MODE_RETAIL_HEDGING:
+            return reject("Three separate positions require a hedging account")
+        order_type = mt5.ORDER_TYPE_BUY if action == "BUY" else mt5.ORDER_TYPE_SELL
+        if prevent_duplicate and any(p.symbol == symbol and p.type == order_type for p in positions):
+            return reject("An existing position already has this symbol and direction")
+        if len(positions) + 3 > MAX_OPEN_POSITIONS:
+            return reject(f"Three-trade group exceeds the {MAX_OPEN_POSITIONS}-position account cap")
+        try:
+            basis = positive(min(acc.balance, acc.equity), "Account risk basis")
+            budget = basis * MAX_GROUP_RISK_PERCENT / 100
+            entry = positive(tick.ask if action == "BUY" else tick.bid, "Entry")
+            spread = tick.ask - tick.bid
+            if spread < 0:
+                raise ValueError("Quote is crossed")
+            point = positive(info.point, "Symbol point")
+            minimum = max(info.trade_stops_level * point, spread * 1.5, point * 50)
+            rates = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M15, 0, 15)
+            # Retain the existing mean-candle-range calculation and targets.
+            scale = (sum(float(r["high"] - r["low"]) for r in rates) / len(rates)
+                     if rates is not None and len(rates) >= 5 else minimum * 2)
+            if not math.isfinite(scale):
+                raise ValueError("Non-finite candle range")
+            if scale <= point:
+                scale = minimum * 2
+            distance = max(minimum, scale * 1.8)
+            shared_sl = round(max(0.00001, entry - distance) if action == "BUY"
+                              else entry + distance, info.digits)
+            requested = default_lot if custom_lots is None else custom_lots
+            lot = limit_volume(mt5, info, order_type, symbol, requested,
+                               entry, shared_sl, budget, legs=3)
+        except (ValueError, TypeError, OverflowError) as exc:
+            return reject(str(exc))
 
-        # Symbol point value math & precision limits
-        point = info.point or (10 ** -digits)
-        stops_level = info.trade_stops_level or 0
-        spread = (tick.ask - tick.bid)
-        min_stop_dist = max(stops_level * point, spread * 1.5, point * 50)
-
-        # Compute ATR 15
-        rates = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M15, 0, 15)
-        if rates is not None and len(rates) >= 5:
-            trs = [max(r["high"] - r["low"], abs(r["high"] - r["close"]), abs(r["low"] - r["close"])) for r in rates]
-            atr_pts = sum(trs) / len(trs)
-        else:
-            atr_pts = min_stop_dist * 2.0
-
-        if atr_pts <= point:
-            atr_pts = min_stop_dist * 2.0
-
-        # Shared Stop Loss: 1.8x ATR (or minimum broker stop distance)
-        sl_dist = max(min_stop_dist, atr_pts * 1.8)
-        if order_type == mt5.ORDER_TYPE_BUY:
-            shared_sl = round(max(0.00001, entry_price - sl_dist), digits)
-        else:
-            shared_sl = round(entry_price + sl_dist, digits)
-
-        total_risk_dollar = round(float(ref_balance) * 0.05, 2) if ref_balance else 50.0
-        risk_per_trade_dollar = round(total_risk_dollar / 3.0, 2)
-
-        # TP targets (Trade 1: 1.5x ATR, Trade 2: 3.0x ATR, Trade 3: 5.0x ATR AI Runner)
-        tp_configs = [
-            {"sub_id": 1, "name": "Trade 1", "pct": "2%", "target_dollar": 20.0, "dist": max(min_stop_dist, atr_pts * 1.5)},
-            {"sub_id": 2, "name": "Trade 2", "pct": "5%", "target_dollar": 50.0, "dist": max(min_stop_dist, atr_pts * 3.0)},
-            {"sub_id": 3, "name": "Trade 3", "pct": "AI Runner", "target_dollar": 150.0, "dist": max(min_stop_dist, atr_pts * 5.0)}
-        ]
-
-        filling_mode = get_best_filling_mode(info)
-        group_id = f"GRP-{datetime.now().strftime('%Y%m%d%H%M%S')}-{symbol.replace(' ', '')[:6]}"
-
-        executed_positions = []
-        errors = []
-
-        for cfg in tp_configs:
-            tp_dist = cfg["dist"]
-            if order_type == mt5.ORDER_TYPE_BUY:
-                tp_price = round(entry_price + tp_dist, digits)
-            else:
-                tp_price = round(max(entry_price * 0.1, entry_price - tp_dist), digits)
-
-            cur_tick = mt5.symbol_info_tick(symbol)
-            cur_price = (cur_tick.ask if order_type == mt5.ORDER_TYPE_BUY else cur_tick.bid) if cur_tick else entry_price
-
-            comment_str = f"MTP T{cfg['sub_id']} {symbol[:6]}"[:31]
-            req = {
-                "action": mt5.TRADE_ACTION_DEAL,
-                "symbol": symbol,
-                "volume": lot,
-                "type": order_type,
-                "price": cur_price,
-                "sl": shared_sl,
-                "tp": tp_price,
-                "deviation": 30,
-                "magic": 555000 + cfg["sub_id"],
-                "comment": comment_str,
-                "type_time": mt5.ORDER_TIME_GTC,
-                "type_filling": filling_mode,
-            }
-
-            res = mt5.order_send(req)
-            if res is not None and res.retcode == mt5.TRADE_RETCODE_DONE:
-                executed_positions.append({
-                    "sub_id": cfg["sub_id"],
-                    "name": f"{cfg['name']} (TP {cfg['pct']})",
-                    "ticket": res.order,
-                    "lot": lot,
-                    "entry": res.price or cur_price,
-                    "sl": shared_sl,
-                    "tp": tp_price,
-                    "target_dollar": cfg["target_dollar"],
-                    "target_pct": cfg["pct"],
-                    "planned_risk_dollar": risk_per_trade_dollar,
-                    "status": "ACTIVE",
-                    "floating_profit": 0.0,
-                    "close_price": None,
-                    "realized_profit": 0.0,
-                    "close_reason": None
-                })
-            else:
-                err_msg = res.comment if res else str(mt5.last_error())
-                code = res.retcode if res else -1
-                errors.append(f"Trade {cfg['sub_id']} ({cfg['pct']}) failed: {err_msg} (code {code})")
-
+        executed, errors, uncertain = [], [], None
+        reservation = None
+        used_risk = 0.0
+        group_id = f"GRP-{time.time_ns()}-{symbol.replace(' ', '')[:6]}"
+        for leg, multiple in enumerate((1.5, 3.0, 5.0), 1):
+            target_distance = max(minimum, scale * multiple)
+            tp = round(entry + target_distance if action == "BUY" else
+                       max(entry * 0.1, entry - target_distance), info.digits)
+            fresh = mt5.symbol_info_tick(symbol)
+            current_acc = mt5.account_info()
+            current_positions = mt5.positions_get()
+            if fresh is None or current_acc is None or current_positions is None:
+                errors.append("Fresh account/position/quote query failed; remaining legs skipped")
+                break
+            if len(current_positions) >= MAX_OPEN_POSITIONS:
+                errors.append("Position cap reached; remaining legs skipped")
+                break
+            try:
+                price = fresh.ask if action == "BUY" else fresh.bid
+                validate_geometry(action == "BUY", fresh.bid, fresh.ask, shared_sl,
+                                  tp, info.trade_stops_level * point)
+                leg_risk = stop_loss_money(mt5, order_type, symbol, lot, price, shared_sl)
+                current_budget = min(budget, positive(min(current_acc.balance, current_acc.equity),
+                                                     "Account risk basis") * MAX_GROUP_RISK_PERCENT / 100)
+                if used_risk + leg_risk * (4 - leg) > current_budget + 1e-8:
+                    raise ValueError("Current quote exceeds the group stop-risk budget")
+                margin = mt5.order_calc_margin(order_type, symbol, lot, price)
+                if margin is None or not math.isfinite(margin) or margin < 0 or margin > current_acc.margin_free:
+                    raise ValueError("Margin unavailable or insufficient")
+                target_money = mt5.order_calc_profit(order_type, symbol, lot, price, tp)
+                positive(target_money, "Broker target value")
+            except (ValueError, TypeError, OverflowError) as exc:
+                errors.append(str(exc))
+                break
+            request = {"action": mt5.TRADE_ACTION_DEAL, "symbol": symbol, "volume": lot,
+                       "type": order_type, "price": price, "sl": shared_sl, "tp": tp,
+                       "deviation": 30, "magic": 555000 + leg,
+                       "comment": f"MTP T{leg} {symbol[:6]}",
+                       "type_time": mt5.ORDER_TIME_GTC,
+                       "type_filling": get_best_filling_mode(info)}
+            # Persist an uncertain reservation BEFORE sending; a crash cannot silently retry it.
+            if reservation is None:
+                reservation = {"group_id": group_id, "symbol": symbol, "action": action,
+                               "status": "RECONCILIATION_REQUIRED", "execution_state": "UNKNOWN",
+                               "positions": executed, "uncertain_order": request,
+                               "entry_price": entry, "shared_sl": shared_sl,
+                               "total_profit": 0.0, "realized_profit": 0.0, "floating_profit": 0.0}
+                groups.insert(0, reservation)
+            reservation["uncertain_order"] = request
+            try:
+                save_multi_tp_groups(groups)
+            except (OSError, ValueError) as exc:
+                errors.append(f"Execution reservation could not be persisted: {exc}")
+                break
+            try:
+                result = mt5.order_send(request)
+            except Exception as exc:
+                result = None
+                errors.append(f"Submission exception: {exc}")
+            if result is None or result.retcode not in (mt5.TRADE_RETCODE_DONE,
+                                                       mt5.TRADE_RETCODE_DONE_PARTIAL):
+                # Explicit rejections have no fill; all other results require reconciliation.
+                rejected = {10004, 10006, 10007, 10013, 10014, 10015, 10016, 10017,
+                            10018, 10019, 10020, 10021, 10022, 10024, 10026, 10027,
+                            10030, 10032, 10033, 10034, 10035, 10042, 10043, 10044, 10046}
+                if result is None or result.retcode not in rejected:
+                    uncertain = request
+                errors.append(f"Leg {leg}: {result.comment if result else 'Submission outcome unknown'}")
+                break
+            fill_volume = float(result.volume)
+            fill_price = float(result.price or price)
+            if not math.isfinite(fill_volume) or fill_volume <= 0 or not result.order:
+                uncertain = request
+                errors.append("Accepted response has incomplete fill details")
+                break
+            try:
+                fill_risk = stop_loss_money(mt5, order_type, symbol, fill_volume,
+                                            fill_price, shared_sl)
+                fill_target = positive(mt5.order_calc_profit(order_type, symbol, fill_volume,
+                                                            fill_price, tp), "Filled target value")
+            except (ValueError, TypeError):
+                fill_risk, fill_target = leg_risk * fill_volume / lot, target_money * fill_volume / lot
+                uncertain = request
+                errors.append("Filled exposure needs broker reconciliation")
+            used_risk += fill_risk
+            executed.append({"sub_id": leg, "name": f"Trade {leg} (fixed target {multiple}x range)",
+                             "ticket": result.order, "lot": fill_volume, "entry": fill_price,
+                             "sl": shared_sl, "tp": tp, "target_dollar": round(fill_target, 2),
+                             "target_pct": "fixed price target", "planned_risk_dollar": round(fill_risk, 2),
+                             "status": "ACTIVE", "floating_profit": 0.0, "realized_profit": 0.0,
+                             "close_price": None, "close_reason": None})
+            if result.retcode == mt5.TRADE_RETCODE_DONE_PARTIAL or used_risk > current_budget + 1e-8:
+                uncertain = request
+                errors.append("Partial fill or adverse fill requires reconciliation; no more legs sent")
+            if uncertain:
+                break
             time.sleep(0.08)
 
-        if not executed_positions:
-            return {
-                "success": False,
-                "message": f"Execution failed for all 3 positions: {'; '.join(errors)}"
-            }
+        if not executed and uncertain is None:
+            if reservation is not None:
+                groups.remove(reservation)
+                save_multi_tp_groups(groups)
+            return reject("No orders filled: " + "; ".join(errors))
+        group = {"group_id": group_id, "symbol": symbol, "action": action,
+                 "ref_balance": basis, "currency": acc.currency,
+                 "total_risk_dollar": round(used_risk, 2),
+                 "total_risk_pct": round(used_risk / basis * 100, 4),
+                 "risk_budget_dollar": round(budget, 2), "risk_excludes_costs": True,
+                 "risk_complete": uncertain is None,
+                 "lot_per_trade": lot, "total_volume": sum(p["lot"] for p in executed),
+                 "entry_price": executed[0]["entry"] if executed else entry,
+                 "shared_sl": shared_sl, "created_at": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"),
+                 "ai_notes": ai_notes, "confidence_score": confidence_score,
+                 "status": "RECONCILIATION_REQUIRED" if uncertain else "ACTIVE",
+                 "execution_state": "UNKNOWN" if uncertain else "CONFIRMED",
+                 "uncertain_order": uncertain, "realized_profit": 0.0, "floating_profit": 0.0,
+                 "total_profit": 0.0, "positions": executed, "errors": errors}
+        if reservation is not None:
+            groups.remove(reservation)
+        groups.insert(0, group)
+        save_multi_tp_groups(groups)
+        if executed and scanner is not None:
+            score_label = (f"{confidence_score}/100 rule score" if confidence_score is not None
+                           else "Unscored manual entry")
+            scanner.record_execution(group_id, symbol, action, group["entry_price"], shared_sl,
+                                     executed[-1]["tp"], group["total_volume"],
+                                     [p["ticket"] for p in executed], confidence=score_label,
+                                     reason=f"Fixed-target group; estimated stop exposure {used_risk:.2f} {acc.currency} before costs. {ai_notes}",
+                                     execution_type="MULTI_TP_3_TRADES")
+        return {"success": bool(executed) and uncertain is None, "group_id": group_id,
+                "symbol": symbol, "action": action, "tickets": [p["ticket"] for p in executed],
+                "shared_sl": shared_sl, "total_risk_dollar": round(used_risk, 2),
+                "positions_opened": len(executed), "errors": errors,
+                "message": f"Filled {len(executed)}/3 positions; estimated stop exposure {used_risk:.2f} {acc.currency} before costs. " +
+                           ("Broker reconciliation required. " if uncertain else "") + "; ".join(errors)}
 
-        group_obj = {
-            "group_id": group_id,
-            "symbol": symbol,
-            "action": action.upper(),
-            "ref_balance": ref_balance,
-            "total_risk_dollar": total_risk_dollar,
-            "total_risk_pct": 5.0,
-            "planned_loss_per_trade": risk_per_trade_dollar,
-            "lot_per_trade": lot,
-            "total_volume": round(lot * len(executed_positions), 2),
-            "entry_price": executed_positions[0]["entry"] if executed_positions else entry_price,
-            "shared_sl": shared_sl,
-            "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "ai_notes": ai_notes,
-            "status": "ACTIVE",
-            "realized_profit": 0.0,
-            "floating_profit": 0.0,
-            "total_profit": 0.0,
-            "positions": executed_positions,
-            "errors": errors
-        }
-
-        all_groups = load_multi_tp_groups()
-        all_groups.insert(0, group_obj)
-        save_multi_tp_groups(all_groups)
-
-        scanner.record_execution(
-            setup_id=group_id,
-            symbol=symbol,
-            direction=action.upper(),
-            entry=group_obj["entry_price"],
-            sl=shared_sl,
-            tp=executed_positions[-1]["tp"],
-            volume=group_obj["total_volume"],
-            tickets=[p["ticket"] for p in executed_positions],
-            confidence="95% (3-Trade Multi-TP Power System)",
-            reason=f"3-Trade Multi-TP Power System (Shared 5% SL = ${total_risk_dollar:.2f}, TPs: +$20, +$50, AI Runner): {ai_notes}",
-            execution_type="MULTI_TP_3_TRADES"
-        )
-
-        return {
-            "success": True,
-            "group_id": group_id,
-            "symbol": symbol,
-            "action": action.upper(),
-            "tickets": [p["ticket"] for p in executed_positions],
-            "shared_sl": shared_sl,
-            "total_risk_dollar": total_risk_dollar,
-            "positions_opened": len(executed_positions),
-            "message": f"Successfully opened {len(executed_positions)} of 3 Multi-TP positions on {symbol} (Group: {group_id}) with shared 5% SL @ {shared_sl}.",
-            "errors": errors
-        }
 
 def close_multi_tp_trade(ticket):
     return close_deriv_position(ticket)
@@ -3913,10 +3897,12 @@ def get_available_port(preferred_port=8765):
     return preferred_port
 
 def run(port=None):
+    global scanner
     if port is None:
         port = int(os.getenv("PORT", 0)) or get_available_port(8765)
     load_all_symbols()
     server = ThreadingHTTPServer(("0.0.0.0", port), DerivServer)
+    scanner = AutomatedSetupScanner(interval_seconds=180)
     print("=" * 65)
     print(" " * 10 + "HEADWAY MT5 INSTITUTIONAL WORKSTATION")
     print("=" * 65)
