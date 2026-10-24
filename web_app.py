@@ -885,7 +885,7 @@ class AutomatedSetupScanner:
                     risk_checks_passed = (
                         margin_free >= 500.0 and
                         (margin_level >= 200.0 or margin_level == 0.0) and
-                        len(positions) + 3 <= MAX_OPEN_POSITIONS and
+                        len(positions) + 2 <= MAX_OPEN_POSITIONS and
                         calc_lot >= info.volume_min and
                         sl > 0 and tp > 0
                     )
@@ -1507,12 +1507,12 @@ def execute_multi_tp_group(symbol, action, ref_balance=1000.0, default_lot=0.01,
         if not getattr(acc, "trade_allowed", False) or not getattr(acc, "trade_expert", False):
             return reject("Account does not permit automated trading")
         if getattr(acc, "margin_mode", None) != mt5.ACCOUNT_MARGIN_MODE_RETAIL_HEDGING:
-            return reject("Three separate positions require a hedging account")
+            return reject("Two separate positions require a hedging account")
         order_type = mt5.ORDER_TYPE_BUY if action == "BUY" else mt5.ORDER_TYPE_SELL
         if prevent_duplicate and any(p.symbol == symbol and p.type == order_type for p in positions):
             return reject("An existing position already has this symbol and direction")
-        if len(positions) + 3 > MAX_OPEN_POSITIONS:
-            return reject(f"Three-trade group exceeds the {MAX_OPEN_POSITIONS}-position account cap")
+        if len(positions) + 2 > MAX_OPEN_POSITIONS:
+            return reject(f"Two-trade group exceeds the {MAX_OPEN_POSITIONS}-position account cap")
         try:
             basis = positive(min(acc.balance, acc.equity), "Account risk basis")
             budget = basis * MAX_GROUP_RISK_PERCENT / 100
@@ -1535,7 +1535,7 @@ def execute_multi_tp_group(symbol, action, ref_balance=1000.0, default_lot=0.01,
                               else entry + distance, info.digits)
             requested = default_lot if custom_lots is None else custom_lots
             lot = limit_volume(mt5, info, order_type, symbol, requested,
-                               entry, shared_sl, budget, legs=3)
+                               entry, shared_sl, budget, legs=2)
         except (ValueError, TypeError, OverflowError) as exc:
             return reject(str(exc))
 
@@ -1543,7 +1543,7 @@ def execute_multi_tp_group(symbol, action, ref_balance=1000.0, default_lot=0.01,
         reservation = None
         used_risk = 0.0
         group_id = f"GRP-{time.time_ns()}-{symbol.replace(' ', '')[:6]}"
-        for leg, multiple in enumerate((1.5, 3.0, 5.0), 1):
+        for leg, multiple in enumerate((1.8, 4.0), 1):
             target_distance = max(minimum, scale * multiple)
             tp = round(entry + target_distance if action == "BUY" else
                        max(entry * 0.1, entry - target_distance), info.digits)
@@ -1563,7 +1563,7 @@ def execute_multi_tp_group(symbol, action, ref_balance=1000.0, default_lot=0.01,
                 leg_risk = stop_loss_money(mt5, order_type, symbol, lot, price, shared_sl)
                 current_budget = min(budget, positive(min(current_acc.balance, current_acc.equity),
                                                      "Account risk basis") * MAX_GROUP_RISK_PERCENT / 100)
-                if used_risk + leg_risk * (4 - leg) > current_budget + 1e-8:
+                if used_risk + leg_risk * (3 - leg) > current_budget + 1e-8:
                     raise ValueError("Current quote exceeds the group stop-risk budget")
                 margin = mt5.order_calc_margin(order_type, symbol, lot, price)
                 if margin is None or not math.isfinite(margin) or margin < 0 or margin > current_acc.margin_free:
@@ -1667,12 +1667,12 @@ def execute_multi_tp_group(symbol, action, ref_balance=1000.0, default_lot=0.01,
                                      executed[-1]["tp"], group["total_volume"],
                                      [p["ticket"] for p in executed], confidence=score_label,
                                      reason=f"Fixed-target group; estimated stop exposure {used_risk:.2f} {acc.currency} before costs. {ai_notes}",
-                                     execution_type="MULTI_TP_3_TRADES")
+                                     execution_type="MULTI_TP_2_TRADES")
         return {"success": bool(executed) and uncertain is None, "group_id": group_id,
                 "symbol": symbol, "action": action, "tickets": [p["ticket"] for p in executed],
                 "shared_sl": shared_sl, "total_risk_dollar": round(used_risk, 2),
                 "positions_opened": len(executed), "errors": errors,
-                "message": f"Filled {len(executed)}/3 positions; estimated stop exposure {used_risk:.2f} {acc.currency} before costs. " +
+                "message": f"Filled {len(executed)}/2 positions; estimated stop exposure {used_risk:.2f} {acc.currency} before costs. " +
                            ("Broker reconciliation required. " if uncertain else "") + "; ".join(errors)}
 
 
@@ -1906,11 +1906,11 @@ HTML_PAGE = """<!DOCTYPE html>
           <div class="flex items-center gap-2.5">
             <h2 class="text-sm font-bold text-white flex items-center gap-2 font-sans">
               <svg class="w-4 h-4 text-emeraldaccent" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"></path></svg>
-              Multi-TP Trade Manager (3-Trade Multi-TP Power System)
+              Multi-TP Trade Manager (2-Trade Multi-TP Power System)
             </h2>
             <span id="mtpGroupsBadge" class="text-xs px-2.5 py-0.5 rounded-full bg-emerald-500/10 text-emeraldaccent border border-emerald-500/20 font-mono font-semibold">0 GROUPS</span>
           </div>
-          <p class="text-xs text-slate-400 mt-0.5">3 separate positions per setup: Trade 1 (+2% / $20), Trade 2 (+5% / $50), and Trade 3 (AI Dynamic Runner) with a shared 5% account Stop Loss ($50 planned loss max).</p>
+          <p class="text-xs text-slate-400 mt-0.5">2 separate positions per setup: Trade 1 (Fixed Target ~1.8x range) and Trade 2 (AI Dynamic Runner ~4.0x range) with a shared account Stop Loss, allowing up to 7 concurrent setups within the 15-position account limit.</p>
         </div>
 
         <div class="flex flex-wrap items-center gap-2 text-xs font-mono">
@@ -2122,12 +2122,12 @@ HTML_PAGE = """<!DOCTYPE html>
               </div>
             </div>
 
-            <!-- 3-Trade Multi-TP Power System Sizing & Execution Panel -->
+            <!-- 2-Trade Multi-TP Power System Sizing & Execution Panel -->
             <div class="p-3.5 rounded-lg bg-emerald-950/20 border border-emerald-500/40 space-y-2.5">
               <div class="flex items-center justify-between">
                 <div class="flex items-center gap-1.5">
                   <span class="text-sm">⚡</span>
-                  <span class="text-xs font-bold text-white font-sans">3-Trade Multi-TP Power System</span>
+                  <span class="text-xs font-bold text-white font-sans">2-Trade Multi-TP Power System</span>
                   <span class="text-[10px] px-1.5 py-0.2 rounded bg-emerald-500/20 text-emeraldaccent border border-emerald-500/40 font-mono font-bold">SHARED 5% SL</span>
                 </div>
                 <span id="otMtpRiskBadge" class="text-[10px] text-emerald-400 font-mono font-bold">Risk: $50.00 Max</span>
@@ -2142,7 +2142,7 @@ HTML_PAGE = """<!DOCTYPE html>
               </p>
               <button type="button" onclick="executeMtpFromCurrentForm()" class="w-full py-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs uppercase tracking-wider transition shadow-lg shadow-emerald-600/30 flex items-center justify-center gap-2">
                 <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
-                Execute 3-Trade Multi-TP System
+                Execute 2-Trade Multi-TP System
               </button>
             </div>
 
@@ -2763,7 +2763,7 @@ HTML_PAGE = """<!DOCTYPE html>
               <!-- Action Buttons -->
               <div class="space-y-1.5 pt-1">
                 <button type="button" onclick='executeMtpDirectlyFromSetup(${JSON.stringify(s)})' class="w-full py-2 rounded-lg bg-emerald-600/20 hover:bg-emerald-600/30 text-emeraldaccent border border-emerald-500/40 font-bold text-xs transition flex items-center justify-center gap-1.5 shadow-sm">
-                  ⚡ 3-Trade Multi-TP System (Shared 5% SL &bull; $50 Risk)
+                  ⚡ 2-Trade Multi-TP System (Shared SL)
                 </button>
                 <div class="grid grid-cols-2 gap-2">
                   <button type="button" onclick='loadSetupIntoForm(${JSON.stringify(s)})' class="py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-white font-bold text-xs transition flex items-center justify-center gap-1 border border-bordercol">
@@ -3662,7 +3662,7 @@ HTML_PAGE = """<!DOCTYPE html>
             <span class="text-2xl block">⚡</span>
             <div class="text-xs font-bold text-slate-200 uppercase tracking-wider">No Active Multi-TP Trade Groups</div>
             <p class="text-[11px] text-slate-400 max-w-md mx-auto">
-              Execute a 3-Trade Multi-TP opportunity from the Order Ticket or Active Setups cards. Each opportunity opens 3 separate positions: Trade 1 (+2% / $20), Trade 2 (+5% / $50), and Trade 3 (AI Dynamic Runner with infinite upside) with a shared 5% Stop Loss ($50 planned loss max).
+              Execute a 3-Trade Multi-TP opportunity from the Order Ticket or Active Setups cards. Each opportunity opens 2 separate positions: Trade 1 (Fixed Target 1.8x range / Quick Bank) and Trade 2 (AI Dynamic Runner 4.0x range with infinite upside) with a shared Stop Loss, staying well within the 15-position account limit.
             </p>
           </div>
         `;
@@ -3786,7 +3786,7 @@ HTML_PAGE = """<!DOCTYPE html>
       const riskDollar = (refBalance * 0.05).toFixed(2);
       const riskPerTrade = (refBalance * 0.01).toFixed(2);
 
-      if (!confirm(`Execute 3-Trade Multi-TP Power System on ${sym} (${action})?\n\n` +
+      if (!confirm(`Execute 2-Trade Multi-TP Power System on ${sym} (${action})?\n\n` +
                    `• 3 Separate Positions: ${(lotPerTrade * 3).toFixed(2)} total lots (${lotPerTrade} lots each)\n` +
                    `• Shared Stop Loss: 5% maximum planned risk ($${riskDollar} total, $${(riskDollar/3).toFixed(2)} per position)\n` +
                    `• Trade 1: TP 2% (+$${(refBalance*0.02).toFixed(0)} Target) - High hit rate, banks quick profit\n` +
@@ -3798,7 +3798,7 @@ HTML_PAGE = """<!DOCTYPE html>
 
       const statusBox = document.getElementById('orderStatusMsg');
       statusBox.className = 'text-xs p-3 rounded-lg bg-blue-500/10 text-blue-400 border border-blue-500/20';
-      statusBox.innerText = `Transmitting 3-Trade Multi-TP group on ${sym} to Deriv MT5...`;
+      statusBox.innerText = `Transmitting 2-Trade Multi-TP group on ${sym} to Deriv MT5...`;
       statusBox.classList.remove('hidden');
 
       try {
@@ -3836,7 +3836,7 @@ HTML_PAGE = """<!DOCTYPE html>
       const refBalance = parseFloat(refInput ? refInput.value : 1000) || 1000;
       const riskDollar = (refBalance * 0.05).toFixed(2);
 
-      if (!confirm(`Execute 3-Trade Multi-TP Power System for Setup: ${s.setup_name} on ${sym} (${action})?\n\n` +
+      if (!confirm(`Execute 2-Trade Multi-TP Power System for Setup: ${s.setup_name} on ${sym} (${action})?\n\n` +
                    `• Symbol: ${sym} (${action})\n` +
                    `• Shared 5% Stop Loss: $${riskDollar} maximum planned loss combined\n` +
                    `• 3 Independent Positions: Trade 1 (+2% / $20), Trade 2 (+5% / $50), Trade 3 (AI Dynamic Runner)\n` +
@@ -4024,7 +4024,7 @@ class DerivServer(BaseHTTPRequestHandler):
             action = data.get("action", "BUY")
             ref_balance = float(data.get("ref_balance", 1000.0))
             lot_per_trade = float(data.get("lot_per_trade", 0.01))
-            ai_notes = data.get("ai_notes", "Manual 3-Trade Multi-TP Execution")
+            ai_notes = data.get("ai_notes", "Manual 2-Trade Multi-TP Execution")
             res = execute_multi_tp_group(
                 symbol=symbol,
                 action=action,
