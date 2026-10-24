@@ -703,13 +703,15 @@ class AutomatedSetupScanner:
             # Candidate pool for Headway Quotes (Metals, Forex Majors, Crypto, Synthetic Indices)
             candidate_pool = [
                 # 24/7 Active Crypto & Synthetic Assets (Always Open on Headway)
-                {"symbol": "BTCUSD", "category": "Crypto 24/7"},
-                {"symbol": "ETHUSD", "category": "Crypto 24/7"},
+                {"symbol": "BTC", "category": "Crypto 24/7"},
+                {"symbol": "ETH", "category": "Crypto 24/7"},
                 {"symbol": "SOL", "category": "Crypto 24/7"},
                 {"symbol": "DOGE", "category": "Crypto 24/7"},
                 {"symbol": "XRP", "category": "Crypto 24/7"},
                 {"symbol": "ADA", "category": "Crypto 24/7"},
                 {"symbol": "LTC", "category": "Crypto 24/7"},
+                {"symbol": "BTCUSD", "category": "Crypto"},
+                {"symbol": "ETHUSD", "category": "Crypto"},
                 {"symbol": "VOL_10", "category": "Indices 24/7"},
                 {"symbol": "VOL_20", "category": "Indices 24/7"},
                 {"symbol": "BOOM_100", "category": "Indices 24/7"},
@@ -1378,49 +1380,38 @@ def execute_multi_tp_group(symbol, action, ref_balance=1000.0, default_lot=0.01,
                     "message": f"Insufficient margin. Required: ${est_margin:.2f}, Free: ${acc.margin_free:.2f}"
                 }
 
-        # Symbol point value math
-        contract = info.trade_contract_size or 1.0
-        tv = info.trade_tick_value or 1.0
-        ts = info.trade_tick_size or (10 ** -digits)
-
-        dollar_per_unit_price = lot * contract
-        if dollar_per_unit_price <= 0:
-            dollar_per_unit_price = (lot * tv) / ts
-        if dollar_per_unit_price <= 0:
-            dollar_per_unit_price = lot * 1.0
-
-        # Stop Loss — 5% Maximum Risk across 3 positions
-        ref_balance = float(ref_balance) if ref_balance else 1000.0
-        total_risk_dollar = round(ref_balance * 0.05, 2)  # $50.00
-        risk_per_trade_dollar = round(total_risk_dollar / 3.0, 2)  # $16.67 per trade
-
-        sl_dist = risk_per_trade_dollar / dollar_per_unit_price
-        shared_sl = round(entry_price - sl_dist if order_type == mt5.ORDER_TYPE_BUY else entry_price + sl_dist, digits)
-
+        # Symbol point value math & precision limits
         point = info.point or (10 ** -digits)
         stops_level = info.trade_stops_level or 0
-        min_stop_dist = stops_level * point
-        if sl_dist < min_stop_dist:
-            sl_dist = min_stop_dist
-            shared_sl = round(entry_price - sl_dist if order_type == mt5.ORDER_TYPE_BUY else entry_price + sl_dist, digits)
+        spread = (tick.ask - tick.bid)
+        min_stop_dist = max(stops_level * point, spread * 1.5, point * 50)
 
-        # Individual Take Profit Targets: 3-Trade Power System
-        # Trade 1: TP 2% (+$20 Target) - Locks in quick guaranteed profit
-        # Trade 2: TP 5% (+$50 Target) - Captures the meat of the trend move
-        # Trade 3: Dynamic AI Runner - Infinite upside trailing runner
+        # Compute ATR 15
         rates = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M15, 0, 15)
-        atr_pts = 0.0
         if rates is not None and len(rates) >= 5:
             trs = [max(r["high"] - r["low"], abs(r["high"] - r["close"]), abs(r["low"] - r["close"])) for r in rates]
             atr_pts = sum(trs) / len(trs)
+        else:
+            atr_pts = min_stop_dist * 2.0
 
-        ai_tp_dollar = round(ref_balance * 0.15, 2)  # $150.00
-        ai_tp_dist = max(ai_tp_dollar / dollar_per_unit_price, (atr_pts * 2.5) if atr_pts > 0 else 0.0)
+        if atr_pts <= point:
+            atr_pts = min_stop_dist * 2.0
 
+        # Shared Stop Loss: 1.8x ATR (or minimum broker stop distance)
+        sl_dist = max(min_stop_dist, atr_pts * 1.8)
+        if order_type == mt5.ORDER_TYPE_BUY:
+            shared_sl = round(max(0.00001, entry_price - sl_dist), digits)
+        else:
+            shared_sl = round(entry_price + sl_dist, digits)
+
+        total_risk_dollar = round(float(ref_balance) * 0.05, 2) if ref_balance else 50.0
+        risk_per_trade_dollar = round(total_risk_dollar / 3.0, 2)
+
+        # TP targets (Trade 1: 1.5x ATR, Trade 2: 3.0x ATR, Trade 3: 5.0x ATR AI Runner)
         tp_configs = [
-            {"sub_id": 1, "name": "Trade 1", "pct": "2%", "target_dollar": round(ref_balance * 0.02, 2), "dist": (ref_balance * 0.02) / dollar_per_unit_price},
-            {"sub_id": 2, "name": "Trade 2", "pct": "5%", "target_dollar": round(ref_balance * 0.05, 2), "dist": (ref_balance * 0.05) / dollar_per_unit_price},
-            {"sub_id": 3, "name": "Trade 3", "pct": "AI Runner", "target_dollar": ai_tp_dollar, "dist": ai_tp_dist}
+            {"sub_id": 1, "name": "Trade 1", "pct": "2%", "target_dollar": 20.0, "dist": max(min_stop_dist, atr_pts * 1.5)},
+            {"sub_id": 2, "name": "Trade 2", "pct": "5%", "target_dollar": 50.0, "dist": max(min_stop_dist, atr_pts * 3.0)},
+            {"sub_id": 3, "name": "Trade 3", "pct": "AI Runner", "target_dollar": 150.0, "dist": max(min_stop_dist, atr_pts * 5.0)}
         ]
 
         filling_mode = get_best_filling_mode(info)
@@ -1430,8 +1421,11 @@ def execute_multi_tp_group(symbol, action, ref_balance=1000.0, default_lot=0.01,
         errors = []
 
         for cfg in tp_configs:
-            tp_dist = max(cfg["dist"], min_stop_dist)
-            tp_price = round(entry_price + tp_dist if order_type == mt5.ORDER_TYPE_BUY else entry_price - tp_dist, digits)
+            tp_dist = cfg["dist"]
+            if order_type == mt5.ORDER_TYPE_BUY:
+                tp_price = round(entry_price + tp_dist, digits)
+            else:
+                tp_price = round(max(entry_price * 0.1, entry_price - tp_dist), digits)
 
             cur_tick = mt5.symbol_info_tick(symbol)
             cur_price = (cur_tick.ask if order_type == mt5.ORDER_TYPE_BUY else cur_tick.bid) if cur_tick else entry_price
