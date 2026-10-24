@@ -20,6 +20,10 @@ except ImportError:
     mt5 = None
     np = None
 
+from smart_profit_chaser import (
+    SmartProfitChaser, ProfitChaserConfig, ProfitMode, PullbackMethod, TrailingMethod, PositionState
+)
+
 HEADWAY_TERMINAL_PATH = os.getenv("MT5_PATH", r"C:\Program Files\Headway MT5 Terminal\terminal64.exe")
 BASE_DIR = Path(__file__).resolve().parent
 JOURNAL_FILE = BASE_DIR / "trades_journal.json"
@@ -1036,11 +1040,30 @@ class ProfitGuardian:
             ok, _ = ensure_deriv_connected()
             if not ok:
                 return
+            acc = mt5.account_info()
             positions = mt5.positions_get()
             if positions is None:
                 return
             
             active_tickets = {p.ticket for p in positions}
+            if profit_chaser and profit_chaser.config.enabled:
+                profit_chaser.sync_with_live_mt5_positions(list(active_tickets))
+                for p in positions:
+                    profit_chaser.register_position(
+                        ticket=p.ticket,
+                        symbol=p.symbol,
+                        direction="BUY" if p.type == mt5.ORDER_TYPE_BUY else "SELL",
+                        volume=p.volume,
+                        entry_price=p.price_open,
+                        entry_equity=float(acc.equity if acc else 1000.0),
+                        position_margin=float(getattr(p, "margin", 0.0) or 100.0),
+                        point_size=0.01
+                    )
+                    profit_chaser.update_position(
+                        ticket=p.ticket,
+                        current_profit_currency=float(p.profit + p.swap),
+                        current_price=float(p.price_current)
+                    )
             with self.lock:
                 for t in list(self.peak_tracker.keys()):
                     if t not in active_tickets:
@@ -1178,6 +1201,7 @@ class ProfitGuardian:
             }
 
 guardian = None
+profit_chaser = SmartProfitChaser()
 
 scanner = None
 
@@ -1968,6 +1992,66 @@ HTML_PAGE = """<!DOCTYPE html>
     </section>
 
     <!-- ============================================================================== -->
+    <!-- ============================================================================== -->
+    <!-- SECTION: SMART DYNAMIC PROFIT CHASING, PULLBACK & RECOVERY STATION (OPTION B)     -->
+    <!-- ============================================================================== -->
+    <section class="bg-panel border border-bordercol rounded-xl p-5 shadow-sm space-y-4">
+      <div class="flex flex-wrap items-center justify-between gap-3 pb-3.5 border-b border-bordercol">
+        <div>
+          <div class="flex items-center gap-2.5">
+            <h2 class="text-sm font-bold text-white flex items-center gap-2 font-sans">
+              <svg class="w-4 h-4 text-cyanaccent" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6"></path></svg>
+              Smart Dynamic Profit Chasing, Pullback & Recovery Engine (Option B)
+            </h2>
+            <span id="chaserPositionsCount" class="text-xs px-2.5 py-0.5 rounded-full bg-cyan-500/10 text-cyanaccent border border-cyan-500/20 font-mono font-semibold">0 TRADES MONITORED</span>
+            <span id="chaserRecoveryBadge" class="text-xs px-2.5 py-0.5 rounded-full bg-emerald-500/10 text-emeraldaccent border border-emerald-500/20 font-mono font-semibold">0 RECOVERIES BANKED</span>
+          </div>
+          <p class="text-xs text-slate-400 mt-0.5">Continuous peak profit tracking with Option-B pullback recovery. Never caps winners prematurely; ratchets trailing floor up.</p>
+        </div>
+
+        <div class="flex flex-wrap items-center gap-2 text-xs font-mono">
+          <div class="px-3 py-1.5 rounded-lg bg-slate-900 border border-bordercol flex items-center gap-2 text-slate-300">
+            <span class="text-slate-400">Pullback Mode:</span>
+            <span class="font-bold text-amberaccent" id="chaserPullbackMethod">25% OF PEAK</span>
+          </div>
+          <div class="px-3 py-1.5 rounded-lg bg-slate-900 border border-bordercol flex items-center gap-2 text-slate-300">
+            <span class="text-slate-400">Trailing Shield:</span>
+            <span class="font-bold text-emeraldaccent" id="chaserTrailingMethod">MAX 35% GIVEBACK</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Live Chased Positions Table -->
+      <div class="overflow-x-auto">
+        <table class="w-full text-left text-xs font-mono">
+          <thead>
+            <tr class="text-slate-400 border-b border-bordercol/60 pb-2">
+              <th class="py-2 px-3">Position</th>
+              <th class="py-2 px-3">Current Profit</th>
+              <th class="py-2 px-3">All-Time Peak</th>
+              <th class="py-2 px-3">Pullback / Drop</th>
+              <th class="py-2 px-3">Option B Recovery Target</th>
+              <th class="py-2 px-3">Protected Floor</th>
+              <th class="py-2 px-3">Status Machine</th>
+            </tr>
+          </thead>
+          <tbody id="chaserPositionsBody">
+            <tr>
+              <td colspan="7" class="py-4 text-center text-slate-500">Scanning live MT5 open positions for profit chasing telemetry...</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- Live Recovery & Peak Events Feed -->
+      <div class="pt-2 border-t border-bordercol/40">
+        <span class="text-[11px] font-mono text-slate-400 uppercase font-bold tracking-wider">Option-B Peak & Recovery Live Audit Stream:</span>
+        <div id="chaserEventStream" class="mt-2 space-y-1.5 max-h-36 overflow-y-auto font-mono text-[11px] text-slate-300">
+          <div class="text-slate-500 italic">No events logged yet. Active trades will log new highs, pullbacks, and Option-B recoveries here.</div>
+        </div>
+      </div>
+    </section>
+
     <!-- SECTION: MULTI-TP TRADE MANAGER (5-Trade Multi-TP System with Shared 5% SL)    -->
     <!-- ============================================================================== -->
     <section class="bg-panel border border-bordercol rounded-xl p-5 shadow-sm space-y-4">
@@ -2988,7 +3072,106 @@ HTML_PAGE = """<!DOCTYPE html>
       }
     }
 
+    async function fetchProfitChaser() {
+      try {
+        const res = await fetch('/api/profit_chaser/dashboard');
+        const data = await res.json();
+        renderProfitChaserDashboard(data);
+      } catch (e) {
+        console.error('Profit chaser fetch error:', e);
+      }
+    }
+
+    function renderProfitChaserDashboard(data) {
+      const positions = data.positions || [];
+      const events = data.recent_events || [];
+      const config = data.config || {};
+
+      const countEl = document.getElementById('chaserPositionsCount');
+      if (countEl) countEl.innerText = `${positions.length} TRADES MONITORED`;
+
+      const totRecoveries = positions.reduce((acc, p) => acc + (p.recovery_count || 0), 0);
+      const recBadge = document.getElementById('chaserRecoveryBadge');
+      if (recBadge) recBadge.innerText = `${totRecoveries} RECOVERIES COMPLETED`;
+
+      const pbMethodEl = document.getElementById('chaserPullbackMethod');
+      if (pbMethodEl) pbMethodEl.innerText = `${config.pullback_value || 25}% OF PEAK`;
+
+      const trMethodEl = document.getElementById('chaserTrailingMethod');
+      if (trMethodEl) trMethodEl.innerText = `MAX ${config.max_giveback_pct || 35}% GIVEBACK`;
+
+      const tbody = document.getElementById('chaserPositionsBody');
+      if (tbody) {
+        if (positions.length === 0) {
+          tbody.innerHTML = '<tr><td colspan="7" class="py-4 text-center text-slate-500">No active positions currently open in MT5. New entries are auto-registered.</td></tr>';
+        } else {
+          tbody.innerHTML = positions.map(p => {
+            const isBuy = p.direction === 'BUY';
+            const dirClass = isBuy ? 'text-emeraldaccent bg-emerald-500/10 border-emerald-500/30' : 'text-roseaccent bg-rose-500/10 border-rose-500/30';
+            const profitClass = p.current_profit >= 0 ? 'text-emeraldaccent font-bold' : 'text-roseaccent font-bold';
+            
+            // Dynamic status badge styling
+            let statusBadge = '<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-800 text-slate-300">TRACKING</span>';
+            if (p.status_label === 'TRACKING NEW HIGH') {
+              statusBadge = '<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-cyan-500/20 text-cyanaccent border border-cyan-500/40 animate-pulse">✨ TRACKING NEW HIGH</span>';
+            } else if (p.status_label === 'PULLBACK DETECTED') {
+              statusBadge = '<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-500/20 text-amberaccent border border-amber-500/40 animate-pulse">⚠️ PULLBACK DETECTED</span>';
+            } else if (p.status_label === 'WAITING FOR RECOVERY') {
+              statusBadge = '<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-indigo-500/20 text-indigo-300 border border-indigo-500/40">⏳ WAITING FOR RECOVERY</span>';
+            } else if (p.status_label === 'RECOVERY COMPLETED') {
+              statusBadge = '<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-500/20 text-emeraldaccent border border-emerald-500/40 shadow-sm shadow-emerald-500/20">🌟 RECOVERY COMPLETED (Option B)</span>';
+            } else if (p.status_label === 'NEW PEAK RECORDED') {
+              statusBadge = '<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-purple-500/20 text-purple-300 border border-purple-500/40 font-bold">🚀 NEW PEAK RECORDED</span>';
+            } else if (p.status_label === 'PROFIT PROTECTION TRIGGERED') {
+              statusBadge = '<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-rose-500/20 text-roseaccent border border-rose-500/40">🛡️ PROTECTION TRIGGERED</span>';
+            }
+
+            return `
+              <tr class="border-b border-bordercol/30 hover:bg-slate-800/20 transition">
+                <td class="py-2.5 px-3">
+                  <div class="flex items-center gap-1.5">
+                    <span class="font-bold text-white">${p.symbol}</span>
+                    <span class="px-1.5 py-0.2 rounded text-[10px] border ${dirClass}">${p.direction}</span>
+                    <span class="text-slate-500 text-[10px]">#${p.ticket} (${p.volume})</span>
+                  </div>
+                </td>
+                <td class="py-2.5 px-3 ${profitClass}">$${p.current_profit.toFixed(2)}</td>
+                <td class="py-2.5 px-3 text-cyanaccent font-bold">$${p.highest_profit.toFixed(2)}</td>
+                <td class="py-2.5 px-3">
+                  <span class="${p.current_pullback > 0 ? 'text-amberaccent' : 'text-slate-400'}">
+                    -$${p.current_pullback.toFixed(2)} (${p.current_pullback_pct.toFixed(1)}%)
+                  </span>
+                </td>
+                <td class="py-2.5 px-3 text-slate-300">
+                  ${p.recovery_target > 0 ? '$' + p.recovery_target.toFixed(2) + ' (Rec: ' + p.recovery_count + ')' : '--'}
+                </td>
+                <td class="py-2.5 px-3 text-emeraldaccent">
+                  ${p.protected_floor > 0 ? '$' + p.protected_floor.toFixed(2) : '<span class="text-slate-500">Arming at $' + (config.activation_threshold || 10) + '</span>'}
+                </td>
+                <td class="py-2.5 px-3">
+                  ${statusBadge}
+                </td>
+              </tr>
+            `;
+          }).join('');
+        }
+      }
+
+      const streamEl = document.getElementById('chaserEventStream');
+      if (streamEl && events.length > 0) {
+        streamEl.innerHTML = events.slice(0, 8).map(e => {
+          let col = 'text-slate-300';
+          if (e.event_type === 'RECOVERY_COMPLETED') col = 'text-emeraldaccent font-bold';
+          else if (e.event_type === 'PULLBACK_DETECTED') col = 'text-amberaccent';
+          else if (e.event_type === 'NEW_PEAK_RECORDED') col = 'text-cyanaccent font-bold';
+          else if (e.event_type === 'PROTECTION_TRIGGERED') col = 'text-roseaccent font-bold';
+          return `<div class="flex items-center gap-2"><span class="text-slate-500">${e.time.split(' ')[1]}</span> <span class="${col}">${e.note}</span></div>`;
+        }).join('');
+      }
+    }
+
     async function fetchState() {
+      fetchProfitChaser();
       try {
         const res = await fetch('/api/state');
         const data = await res.json();
@@ -4024,6 +4207,12 @@ class DerivServer(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "application/json")
             self.end_headers()
             self.wfile.write(json.dumps(state).encode("utf-8"))
+        elif url.path == "/api/profit_chaser/dashboard":
+            data = profit_chaser.get_dashboard_data() if profit_chaser else {"positions": [], "recent_events": []}
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(data).encode("utf-8"))
         elif url.path == "/api/backtest/results":
             res_file = Path("best_strategy_configs.json")
             data = json.loads(res_file.read_text(encoding="utf-8")) if res_file.exists() else []
@@ -4149,6 +4338,16 @@ class DerivServer(BaseHTTPRequestHandler):
                 "message": f"Profit Guardian {'ENABLED' if en else 'DISABLED'}"
             }).encode("utf-8"))
 
+        elif url.path == "/api/profit_chaser/config":
+            if profit_chaser:
+                for k, v in data.items():
+                    if hasattr(profit_chaser.config, k):
+                        setattr(profit_chaser.config, k, v)
+                profit_chaser.save_state()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({"success": True, "config": profit_chaser.get_dashboard_data()["config"] if profit_chaser else {}}).encode("utf-8"))
         elif url.path == "/api/profit_guardian/config":
             if guardian:
                 guardian.update_config(data)

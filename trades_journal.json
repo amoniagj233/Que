@@ -1,5 +1,113 @@
 [
   {
+    "setup_id": "GRP-1792876437789141400-VOL_10",
+    "symbol": "VOL_10",
+    "direction": "BUY",
+    "entry_price": 1041976.0,
+    "sl": 1041351.0,
+    "tp": 1043355.0,
+    "volume": 0.02,
+    "tickets": [
+      1365993697,
+      1365993718
+    ],
+    "confidence": "98/100 rule score",
+    "reason": "Fixed-target group; estimated stop exposure 12.51 USD before costs. Auto-Execution (88-100 rule score): M15 EMA20 at 1041699.0, RSI(14) at 54.4, ATR(14) at 351.0 | Confluence: Price above EMA20; Positive EMA slope",
+    "execution_type": "MULTI_TP_2_TRADES",
+    "execution_time": "2026-10-24 21:13:58 UTC",
+    "status": "OPEN"
+  },
+  {
+    "setup_id": "GRP-1792876436844270600-BOOM_1",
+    "symbol": "BOOM_100",
+    "direction": "SELL",
+    "entry_price": 1404889.0,
+    "sl": 1406325.0,
+    "tp": 1401701.0,
+    "volume": 0.02,
+    "tickets": [
+      1365993655,
+      1365993677
+    ],
+    "confidence": "93/100 rule score",
+    "reason": "Fixed-target group; estimated stop exposure 28.74 USD before costs. Auto-Execution (88-100 rule score): M15 EMA20 at 1406521.0, RSI(14) at 45.5, ATR(14) at 784.0 | Confluence: Price below EMA20; RSI in prime short momentum zone (45.5)",
+    "execution_type": "MULTI_TP_2_TRADES",
+    "execution_time": "2026-10-24 21:13:57 UTC",
+    "status": "OPEN"
+  },
+  {
+    "setup_id": "GRP-1792876371502949500-ADA",
+    "symbol": "ADA",
+    "direction": "BUY",
+    "entry_price": 0.2063,
+    "sl": 0.2013,
+    "tp": 0.2113,
+    "volume": 0.02,
+    "tickets": [
+      1365990653,
+      1365990672
+    ],
+    "confidence": "90/100 rule score",
+    "reason": "Fixed-target group; estimated stop exposure 10.00 USD before costs. Auto-Execution (88-100 rule score): M15 EMA20 at 0.2051, RSI(14) at 58.4, ATR(14) at 0.0007 | Confluence: Price above EMA20; RSI in prime long momentum zone (58.4)",
+    "execution_type": "MULTI_TP_2_TRADES",
+    "execution_time": "2026-10-24 21:12:53 UTC",
+    "status": "OPEN"
+  },
+  {
+    "setup_id": "GRP-1792876368753804400-CRASH_",
+    "symbol": "CRASH_100",
+    "direction": "SELL",
+    "entry_price": 317364.0,
+    "sl": 318553.0,
+    "tp": 314713.0,
+    "volume": 0.02,
+    "tickets": [
+      1365990546,
+      1365990562
+    ],
+    "confidence": "98/100 rule score",
+    "reason": "Fixed-target group; estimated stop exposure 23.74 USD before costs. Auto-Execution (88-100 rule score): M15 EMA20 at 318077.0, RSI(14) at 48.1, ATR(14) at 672.0 | Confluence: Price below EMA20; Negative EMA slope",
+    "execution_type": "MULTI_TP_2_TRADES",
+    "execution_time": "2026-10-24 21:12:51 UTC",
+    "status": "OPEN"
+  },
+  {
+    "setup_id": "GRP-1792875646577800500-CRASH_",
+    "symbol": "CRASH_100",
+    "direction": "SELL",
+    "entry_price": 317823.0,
+    "sl": 318927.0,
+    "tp": 315367.0,
+    "volume": 0.02,
+    "tickets": [
+      1365955937,
+      1365955946
+    ],
+    "confidence": "98/100 rule score",
+    "reason": "Fixed-target group; estimated stop exposure 22.07 USD before costs. Auto-Execution (88-100 rule score): M15 EMA20 at 318090.0, RSI(14) at 52.5, ATR(14) at 620.0 | Confluence: Price below EMA20; Negative EMA slope",
+    "execution_type": "MULTI_TP_2_TRADES",
+    "execution_time": "2026-10-24 21:00:47 UTC",
+    "status": "CLOSED"
+  },
+  {
+    "setup_id": "GRP-1792875645464021300-BOOM_1",
+    "symbol": "BOOM_100",
+    "direction": "SELL",
+    "entry_price": 1405400.0,
+    "sl": 1406733.0,
+    "tp": 1402448.0,
+    "volume": 0.02,
+    "tickets": [
+      1365955918,
+      1365955929
+    ],
+    "confidence": "93/100 rule score",
+    "reason": "Fixed-target group; estimated stop exposure 26.66 USD before costs. Auto-Execution (88-100 rule score): M15 EMA20 at 1406536.0, RSI(14) at 48.8, ATR(14) at 721.0 | Confluence: Price below EMA20; RSI in prime short momentum zone (48.8)",
+    "execution_type": "MULTI_TP_2_TRADES",
+    "execution_time": "2026-10-24 21:00:46 UTC",
+    "status": "CLOSED"
+  },
+  {
     "setup_id": "GRP-1792873319401098700-VOL_10",
     "symbol": "VOL_10",
     "direction": "SELL",
@@ -35,7 +143,7 @@
     "reason": "Fixed-target group; estimated stop exposure 40.25 USD before costs. Auto-Execution (88-100 rule score): M15 EMA20 at 805842.0, RSI(14) at 64.6, ATR(14) at 756.0 | Confluence: Price above EMA20; Positive EMA slope",
     "execution_type": "MULTI_TP_3_TRADES",
     "execution_time": "2026-10-24 20:16:23 UTC",
-    "status": "OPEN"
+    "status": "CLOSED"
   },
   {
     "setup_id": "GRP-1792872981125813100-VOL_10",
@@ -54,7 +162,7 @@
     "reason": "Fixed-target group; estimated stop exposure 17.90 USD before costs. Auto-Execution (88-100 rule score): M15 EMA20 at 1041641.0, RSI(14) at 40.9, ATR(14) at 334.0 | Confluence: Price above EMA20; Positive EMA slope",
     "execution_type": "MULTI_TP_3_TRADES",
     "execution_time": "2026-10-24 20:16:22 UTC",
-    "status": "OPEN"
+    "status": "CLOSED"
   },
   {
     "setup_id": "GRP-1792872978382616700-ETH",
@@ -92,7 +200,7 @@
     "reason": "3-Trade Multi-TP Power System (Shared 5% SL = $74999.91, TPs: +$20, +$50, AI Runner): Auto-Execution (88-100% Score): M15 EMA20 at 316594.0, RSI(14) at 46.2, ATR(14) at 686.0 | Confluence: Price above EMA20; Positive EMA slope",
     "execution_type": "MULTI_TP_3_TRADES",
     "execution_time": "2026-10-24 16:35:19 UTC",
-    "status": "OPEN"
+    "status": "CLOSED"
   },
   {
     "setup_id": "GRP-20261024163516-BOOM_1",
