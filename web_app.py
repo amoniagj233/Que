@@ -25,6 +25,7 @@ BASE_DIR = Path(__file__).resolve().parent
 JOURNAL_FILE = BASE_DIR / "trades_journal.json"
 CONFIG_FILE = BASE_DIR / "auto_trade_config.json"
 MULTI_TP_FILE = BASE_DIR / "multi_tp_groups.json"
+PROFIT_GUARDIAN_CONFIG_FILE = BASE_DIR / "profit_guardian_config.json"
 
 TICKER_SYMBOLS = [
     "XAUUSD",
@@ -953,6 +954,161 @@ class AutomatedSetupScanner:
             }
 
 # Importing this module must never start an order-producing thread.
+
+class ProfitGuardian:
+    """
+    Automated High-Water Mark Profit Protection Engine
+    Rules:
+      1. Tracks every open MT5 position's peak floating profit (profit + swap).
+      2. When floating profit reaches activation threshold ($10.00+), the shield is ARMED.
+      3. If profit pulls back from peak by more than max_giveback_pct (default 35%) or drops to minimum guaranteed ($5.00),
+         instantly market-closes the position to bank guaranteed profit.
+      4. Protects all open positions from fast momentum reversals and profit givebacks.
+    """
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.config = self.load_config()
+        self.peak_tracker = {}  # {ticket: {"symbol": str, "peak_profit": float, "armed": bool, "floor": float}}
+        self.closed_events = []
+        self.running = False
+        self.thread = None
+
+    def load_config(self):
+        default_cfg = {
+            "enabled": True,
+            "activation_usd": 10.0,
+            "max_giveback_pct": 35.0,
+            "min_guaranteed_usd": 5.0
+        }
+        if PROFIT_GUARDIAN_CONFIG_FILE.exists():
+            try:
+                data = json.loads(PROFIT_GUARDIAN_CONFIG_FILE.read_text(encoding="utf-8"))
+                default_cfg.update(data)
+            except Exception:
+                pass
+        return default_cfg
+
+    def save_config(self):
+        try:
+            PROFIT_GUARDIAN_CONFIG_FILE.write_text(json.dumps(self.config, indent=2), encoding="utf-8")
+        except Exception as e:
+            print("Error saving Profit Guardian config:", e)
+
+    def toggle_enabled(self):
+        with self.lock:
+            self.config["enabled"] = not self.config.get("enabled", True)
+            self.save_config()
+            return self.config["enabled"]
+
+    def update_config(self, new_cfg):
+        with self.lock:
+            self.config.update(new_cfg)
+            self.save_config()
+
+    def start(self):
+        if not self.running:
+            self.running = True
+            self.thread = threading.Thread(target=self._guardian_loop, daemon=True)
+            self.thread.start()
+
+    def stop(self):
+        self.running = False
+
+    def get_ticket_info(self, ticket):
+        with self.lock:
+            info = self.peak_tracker.get(ticket)
+            if info:
+                return dict(info)
+            return {"armed": False, "peak_profit": 0.0, "floor": 0.0}
+
+    def _guardian_loop(self):
+        while self.running:
+            try:
+                if self.config.get("enabled", True):
+                    self.check_positions()
+            except Exception as e:
+                print("Profit Guardian loop error:", e)
+            time.sleep(1.0)
+
+    def check_positions(self):
+        with mt5_lock:
+            ok, _ = ensure_deriv_connected()
+            if not ok:
+                return
+            positions = mt5.positions_get()
+            if positions is None:
+                return
+            
+            active_tickets = {p.ticket for p in positions}
+            with self.lock:
+                for t in list(self.peak_tracker.keys()):
+                    if t not in active_tickets:
+                        del self.peak_tracker[t]
+
+            activation_threshold = float(self.config.get("activation_usd", 10.0))
+            giveback_pct = float(self.config.get("max_giveback_pct", 35.0)) / 100.0
+            min_guaranteed = float(self.config.get("min_guaranteed_usd", 5.0))
+
+            to_close = []
+            for p in positions:
+                ticket = p.ticket
+                symbol = p.symbol
+                cur_profit = round(p.profit + p.swap, 2)
+
+                with self.lock:
+                    if ticket not in self.peak_tracker:
+                        self.peak_tracker[ticket] = {
+                            "symbol": symbol,
+                            "type": "BUY" if p.type == mt5.ORDER_TYPE_BUY else "SELL",
+                            "volume": p.volume,
+                            "peak_profit": cur_profit,
+                            "armed": False,
+                            "floor": 0.0
+                        }
+
+                    entry = self.peak_tracker[ticket]
+                    if cur_profit > entry["peak_profit"]:
+                        entry["peak_profit"] = cur_profit
+
+                    # Arm shield if profit touches or exceeds activation threshold ($10+)
+                    if entry["peak_profit"] >= activation_threshold:
+                        entry["armed"] = True
+                        allowed_giveback = entry["peak_profit"] * giveback_pct
+                        calculated_floor = entry["peak_profit"] - allowed_giveback
+                        entry["floor"] = round(max(min_guaranteed, calculated_floor), 2)
+
+                    if entry["armed"] and cur_profit <= entry["floor"]:
+                        to_close.append((ticket, symbol, cur_profit, entry["peak_profit"], entry["floor"]))
+
+            for ticket, symbol, cur_profit, peak, floor in to_close:
+                res = close_deriv_position(ticket)
+                event_msg = f"🛡️ Profit Guardian Secured +${cur_profit:.2f} on {symbol} (Ticket #{ticket}) — Protected from drop after peak of +${peak:.2f} (Floor was +${floor:.2f})"
+                print(event_msg)
+                with self.lock:
+                    if ticket in self.peak_tracker:
+                        del self.peak_tracker[ticket]
+                    self.closed_events.insert(0, {
+                        "time": datetime.utcnow().strftime("%H:%M:%S UTC"),
+                        "symbol": symbol,
+                        "ticket": ticket,
+                        "profit": cur_profit,
+                        "peak_profit": peak,
+                        "floor": floor,
+                        "message": event_msg
+                    })
+                    if len(self.closed_events) > 30:
+                        self.closed_events = self.closed_events[:30]
+
+    def get_status(self):
+        with self.lock:
+            return {
+                "config": dict(self.config),
+                "tracked_positions": dict(self.peak_tracker),
+                "recent_protections": list(self.closed_events[:10])
+            }
+
+guardian = None
+
 scanner = None
 
 def get_deriv_full_state():
@@ -990,6 +1146,7 @@ def get_deriv_full_state():
         if positions_raw:
             for p in positions_raw:
                 p_type = "BUY" if p.type == mt5.ORDER_TYPE_BUY else "SELL"
+                p_guard = guardian.get_ticket_info(p.ticket) if guardian else {}
                 positions.append({
                     "ticket": p.ticket,
                     "symbol": p.symbol,
@@ -1000,7 +1157,10 @@ def get_deriv_full_state():
                     "sl": round(p.sl, 5),
                     "tp": round(p.tp, 5),
                     "profit": round(p.profit, 2),
-                    "time": time.strftime("%H:%M:%S", time.localtime(p.time))
+                    "time": time.strftime("%H:%M:%S", time.localtime(p.time)),
+                    "guardian_armed": p_guard.get("armed", False),
+                    "guardian_peak": p_guard.get("peak_profit", round(p.profit, 2)),
+                    "guardian_floor": p_guard.get("floor", 0.0)
                 })
         
         quotes = {}
@@ -1019,7 +1179,8 @@ def get_deriv_full_state():
             "account": account_data,
             "positions": positions,
             "quotes": quotes,
-            "imm_dates": get_next_imm_dates(date.today())
+            "imm_dates": get_next_imm_dates(date.today()),
+            "profit_guardian": guardian.get_status() if guardian else {}
         }
 
 def get_recent_trade_history(limit=15):
@@ -1688,6 +1849,15 @@ HTML_PAGE = """<!DOCTYPE html>
             <button id="autoTradeBtn" onclick="toggleAutoTrade()" class="px-2.5 py-1 rounded text-[11px] font-bold transition flex items-center gap-1.5 bg-slate-800 text-slate-400 border border-slate-700">
               <span id="autoTradeDot" class="w-2 h-2 rounded-full bg-slate-500"></span>
               <span id="autoTradeText">DISABLED</span>
+            </button>
+          </div>
+
+          <!-- PROFIT GUARDIAN TOGGLE ($10+ Peak Lock) -->
+          <div class="flex items-center gap-2 text-xs font-mono px-3 py-1.5 rounded-lg bg-slate-900 border border-bordercol shadow-inner">
+            <span class="text-slate-400 font-sans text-xs font-medium">Profit Shield ($10+ Floor):</span>
+            <button id="guardianBtn" onclick="toggleProfitGuardian()" class="px-2.5 py-1 rounded text-[11px] font-bold transition flex items-center gap-1.5 bg-emerald-500/20 text-emeraldaccent border border-emerald-500/50 shadow-sm shadow-emerald-500/20">
+              <span class="w-2 h-2 rounded-full bg-emeraldaccent animate-pulse"></span>
+              <span id="guardianText">ARMED (ACTIVE)</span>
             </button>
           </div>
 
@@ -2413,6 +2583,28 @@ HTML_PAGE = """<!DOCTYPE html>
       }
     }
 
+    async function toggleProfitGuardian() {
+      try {
+        const res = await fetch('/api/profit_guardian/toggle', { method: 'POST' });
+        const data = await res.json();
+        renderGuardianButton(data.enabled);
+      } catch (err) {
+        alert('Profit Guardian error: ' + err);
+      }
+    }
+
+    function renderGuardianButton(enabled) {
+      const btn = document.getElementById('guardianBtn');
+      if (!btn) return;
+      if (enabled) {
+        btn.className = 'px-2.5 py-1 rounded text-[11px] font-bold transition flex items-center gap-1.5 bg-emerald-500/20 text-emeraldaccent border border-emerald-500/50 shadow-sm shadow-emerald-500/20';
+        btn.innerHTML = '<span class="w-2 h-2 rounded-full bg-emeraldaccent animate-pulse"></span><span>ARMED (ACTIVE)</span>';
+      } else {
+        btn.className = 'px-2.5 py-1 rounded text-[11px] font-bold transition flex items-center gap-1.5 bg-slate-800 text-slate-400 border border-slate-700';
+        btn.innerHTML = '<span class="w-2 h-2 rounded-full bg-slate-500"></span><span>DISABLED</span>';
+      }
+    }
+
     function renderAutoTradeButton(enabled) {
       const btn = document.getElementById('autoTradeBtn');
       const dot = document.getElementById('autoTradeDot');
@@ -2785,14 +2977,20 @@ HTML_PAGE = """<!DOCTYPE html>
         tr.className = 'hover:bg-slate-900/60 font-mono transition';
         tr.innerHTML = `
           <td class="py-2.5 px-4 text-slate-400">#${p.ticket}</td>
-          <td class="py-2.5 px-4 font-bold text-white font-sans">${p.symbol}</td>
+          <td class="py-2.5 px-4 font-bold text-white font-sans">
+            ${p.symbol}
+            ${p.guardian_armed ? `<span class="ml-1 text-[9px] px-1.5 py-0.5 rounded bg-emerald-500/20 text-emeraldaccent border border-emerald-500/40 font-mono font-bold" title="Peak: +$${p.guardian_peak.toFixed(2)} | Floor: +$${p.guardian_floor.toFixed(2)}">🛡️ +$${p.guardian_floor.toFixed(2)} FLOOR</span>` : ''}
+          </td>
           <td class="py-2.5 px-4"><span class="px-2 py-0.5 rounded text-[10px] font-bold border ${typeBadge}">${p.type}</span></td>
           <td class="py-2.5 px-4 font-bold text-slate-200">${p.volume}</td>
           <td class="py-2.5 px-4 text-slate-400">${p.price_open}</td>
           <td class="py-2.5 px-4 text-white">${p.price_current}</td>
           <td class="py-2.5 px-4 text-slate-400">${p.sl || '-'}</td>
           <td class="py-2.5 px-4 text-slate-400">${p.tp || '-'}</td>
-          <td class="py-2.5 px-4 ${pClass}">${isProfit ? '+' : ''}$${p.profit.toFixed(2)}</td>
+          <td class="py-2.5 px-4 ${pClass}">
+            ${isProfit ? '+' : ''}$${p.profit.toFixed(2)}
+            ${p.guardian_armed ? `<span class="block text-[9px] text-emeraldaccent font-mono font-normal">Floor: +$${p.guardian_floor.toFixed(2)} (Peak: +$${p.guardian_peak.toFixed(2)})</span>` : ''}
+          </td>
           <td class="py-2.5 px-4 text-right font-sans">
             <button onclick="closeOrder(${p.ticket})" class="px-2.5 py-1 rounded bg-red-500/10 hover:bg-red-500/20 text-crimsonaccent border border-red-500/30 text-[11px] font-medium transition">
               Close Trade
@@ -3783,6 +3981,12 @@ class DerivServer(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "application/json")
             self.end_headers()
             self.wfile.write(json.dumps(groups).encode("utf-8"))
+        elif url.path == "/api/profit_guardian/status":
+            st = guardian.get_status() if guardian else {}
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(st).encode("utf-8"))
         else:
             self.send_response(404)
             self.end_headers()
@@ -3858,6 +4062,23 @@ class DerivServer(BaseHTTPRequestHandler):
                 "auto_trade_enabled": new_state,
                 "message": f"Auto-trading {'ENABLED' if new_state else 'DISABLED'}"
             }).encode("utf-8"))
+        elif url.path == "/api/profit_guardian/toggle":
+            en = guardian.toggle_enabled() if guardian else False
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({
+                "enabled": en,
+                "message": f"Profit Guardian {'ENABLED' if en else 'DISABLED'}"
+            }).encode("utf-8"))
+
+        elif url.path == "/api/profit_guardian/config":
+            if guardian:
+                guardian.update_config(data)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({"success": True, "config": guardian.config if guardian else {}}).encode("utf-8"))
 
         elif url.path == "/api/rescan":
             scanner.run_scan_now()
@@ -3900,9 +4121,12 @@ def run(port=None):
     global scanner
     if port is None:
         port = int(os.getenv("PORT", 0)) or get_available_port(8765)
+    global guardian
     load_all_symbols()
     server = ThreadingHTTPServer(("0.0.0.0", port), DerivServer)
     scanner = AutomatedSetupScanner(interval_seconds=180)
+    guardian = ProfitGuardian()
+    guardian.start()
     print("=" * 65)
     print(" " * 10 + "HEADWAY MT5 INSTITUTIONAL WORKSTATION")
     print("=" * 65)
