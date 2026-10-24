@@ -700,20 +700,31 @@ class AutomatedSetupScanner:
                     p_type = "BUY" if p.type == mt5.ORDER_TYPE_BUY else "SELL"
                     open_pos.add((p.symbol, p_type))
 
-            # Candidate pool for Headway Quotes (Metals, Forex Majors, Crypto, Indices)
-            candidates = [
-                {"symbol": "XAUUSD", "category": "Metals", "bias": "BUY", "name": "Gold Trend Continuation", "notes": "XAUUSD Gold upward momentum holding above EMA support."},
-                {"symbol": "EURUSD", "category": "Forex Major", "bias": "BUY", "name": "EURUSD 15M Trend Setup", "notes": "EURUSD steady continuation above dynamic EMA band."},
-                {"symbol": "GBPUSD", "category": "Forex Major", "bias": "BUY", "name": "GBPUSD Momentum Continuation", "notes": "GBPUSD bullish expansion channel."},
-                {"symbol": "USDJPY", "category": "Forex Major", "bias": "SELL", "name": "USDJPY Rejection Pullback", "notes": "USDJPY dynamic resistance rejection."},
-                {"symbol": "USDCAD", "category": "Forex Major", "bias": "SELL", "name": "USDCAD Trend Pullback", "notes": "USDCAD lower high rejection."},
-                {"symbol": "AUDUSD", "category": "Forex Major", "bias": "BUY", "name": "AUDUSD Trend Continuation", "notes": "AUDUSD accumulation above support."},
-                {"symbol": "BTCUSD", "category": "Crypto", "bias": "BUY", "name": "Bitcoin Momentum Breakout", "notes": "BTCUSD 15M impulse holding dynamic moving averages."},
-                {"symbol": "ETHUSD", "category": "Crypto", "bias": "BUY", "name": "Ethereum Trend Continuation", "notes": "ETHUSD constructive higher-low sequence."},
-                {"symbol": "SOLUSD", "category": "Crypto", "bias": "BUY", "name": "Solana Impulse Continuation", "notes": "Solana M15 upward impulse above EMA20."},
-                {"symbol": "US500", "category": "Indices", "bias": "BUY", "name": "S&P 500 Index Trend Continuation", "notes": "US500 index trend accumulation."},
-                {"symbol": "DJ30", "category": "Indices", "bias": "BUY", "name": "Dow Jones Industrial Momentum", "notes": "DJ30 index momentum expansion."},
-                {"symbol": "NASDAQ-100", "category": "Indices", "bias": "BUY", "name": "Nasdaq Tech Momentum", "notes": "NASDAQ-100 breakout above resistance."},
+            # Candidate pool for Headway Quotes (Metals, Forex Majors, Crypto, Synthetic Indices)
+            candidate_pool = [
+                # 24/7 Active Crypto & Synthetic Assets (Always Open on Headway)
+                {"symbol": "BTCUSD", "category": "Crypto 24/7"},
+                {"symbol": "ETHUSD", "category": "Crypto 24/7"},
+                {"symbol": "SOL", "category": "Crypto 24/7"},
+                {"symbol": "DOGE", "category": "Crypto 24/7"},
+                {"symbol": "XRP", "category": "Crypto 24/7"},
+                {"symbol": "ADA", "category": "Crypto 24/7"},
+                {"symbol": "LTC", "category": "Crypto 24/7"},
+                {"symbol": "VOL_10", "category": "Indices 24/7"},
+                {"symbol": "VOL_20", "category": "Indices 24/7"},
+                {"symbol": "BOOM_100", "category": "Indices 24/7"},
+                {"symbol": "CRASH_100", "category": "Indices 24/7"},
+                # Premier Metals & Forex (Active weekdays, Weekend Technical Analysis)
+                {"symbol": "XAUUSD", "category": "Metals"},
+                {"symbol": "XAGUSD", "category": "Metals"},
+                {"symbol": "EURUSD", "category": "Forex Major"},
+                {"symbol": "GBPUSD", "category": "Forex Major"},
+                {"symbol": "USDJPY", "category": "Forex Major"},
+                {"symbol": "USDCAD", "category": "Forex Major"},
+                {"symbol": "AUDUSD", "category": "Forex Major"},
+                {"symbol": "US500", "category": "Indices"},
+                {"symbol": "DJ30", "category": "Indices"},
+                {"symbol": "NASDAQ-100", "category": "Indices"},
             ]
 
             valid_setups = []
@@ -726,24 +737,8 @@ class AutomatedSetupScanner:
                 if j.get("status") == "OPEN"
             }
 
-            for c in candidates:
+            for c in candidate_pool:
                 sym = c["symbol"]
-                bias = c["bias"]
-
-                # 1. LIVE POSITION AWARENESS (Rule 3): Prevent duplicates
-                if (sym, bias) in open_pos:
-                    filtered_reasons[sym] = f"Blocked: Active {bias} position already open in Headway MT5"
-                    continue
-
-                if (sym, bias) in recent_executed:
-                    filtered_reasons[sym] = f"Blocked: Previous {bias} setup executed and still open in MT5"
-                    continue
-
-                # 2. MARKET STATUS VERIFICATION (Rule 1): Exclude closed markets
-                is_open, open_reason = check_symbol_market_open(sym)
-                if not is_open:
-                    filtered_reasons[sym] = f"Market Closed: {open_reason}"
-                    continue
 
                 mt5.symbol_select(sym, True)
                 info = mt5.symbol_info(sym)
@@ -765,9 +760,10 @@ class AutomatedSetupScanner:
                 tr = np.maximum(highs[1:] - lows[1:], np.abs(highs[1:] - closes[:-1]))
                 tr = np.maximum(tr, np.abs(lows[1:] - closes[:-1]))
                 atr = float(np.mean(tr[-14:]))
-                if atr <= (10 ** -info.digits):
-                    filtered_reasons[sym] = "Zero/negligible ATR volatility (Flat market)"
-                    continue
+                digits = info.digits
+                point = info.point or (10 ** -digits)
+                if atr <= (point * 0.5):
+                    atr = point * 15.0
 
                 # Compute EMA20
                 if np is not None:
@@ -786,29 +782,38 @@ class AutomatedSetupScanner:
                 rs = avg_gain / avg_loss
                 rsi = float(100 - (100 / (1 + rs)))
 
-                digits = info.digits
-                point = info.point or (10 ** -digits)
+                cur_p = (tick.bid + tick.ask) / 2.0 if (tick.bid > 0 and tick.ask > 0) else closes[-1]
                 stop_dist = max(atr * 1.5, point * 50)
-                cur_p = tick.bid if bias == "SELL" else tick.ask
 
-                # STRICT TREND CRITERIA (Rule 4: No Forced Recommendations)
-                if bias == "SELL" and cur_p > (ema20 + stop_dist * 0.8):
-                    filtered_reasons[sym] = f"No Setup: Price ({cur_p:.2f}) broke above EMA20 resistance ({ema20:.2f})"
-                    continue
-                if bias == "BUY" and cur_p < (ema20 - stop_dist * 0.8):
-                    filtered_reasons[sym] = f"No Setup: Price ({cur_p:.2f}) broke below EMA20 support ({ema20:.2f})"
-                    continue
-
-                if bias == "BUY":
-                    entry = tick.ask
+                # Dynamic Trend & Momentum Determination (Long vs Short)
+                if cur_p >= ema20:
+                    bias = "BUY"
+                    setup_name = f"{sym} Trend Momentum (Long)"
+                    notes = f"{sym} M15 bullish trend holding above dynamic EMA support."
+                    entry = tick.ask if tick.ask > 0 else closes[-1]
                     sl = entry - stop_dist
                     tp = entry + (stop_dist * 2.0)
-                    invalidation = f"Invalidated if M15 candle closes below {round(sl, digits)} or RSI drops below 32.0"
+                    invalidation = f"Invalidated if M15 candle closes below {round(sl, digits)} or RSI drops below 35.0"
                 else:
-                    entry = tick.bid
+                    bias = "SELL"
+                    setup_name = f"{sym} Bearish Momentum (Short)"
+                    notes = f"{sym} M15 downward impulse holding below dynamic EMA resistance."
+                    entry = tick.bid if tick.bid > 0 else closes[-1]
                     sl = entry + stop_dist
                     tp = entry - (stop_dist * 2.0)
-                    invalidation = f"Invalidated if M15 candle closes above {round(sl, digits)} or price breaks recent swing high before fill"
+                    invalidation = f"Invalidated if M15 candle closes above {round(sl, digits)} or RSI breaks above 68.0"
+
+                # 1. LIVE POSITION AWARENESS (Rule 3): Prevent duplicates
+                if (sym, bias) in open_pos:
+                    filtered_reasons[sym] = f"Blocked: Active {bias} position already open in Headway MT5"
+                    continue
+
+                if (sym, bias) in recent_executed:
+                    filtered_reasons[sym] = f"Blocked: Previous {bias} setup executed and still open in MT5"
+                    continue
+
+                # 2. MARKET STATUS VERIFICATION (Rule 1)
+                is_open, open_reason = check_symbol_market_open(sym)
 
                 calc_lot = risk_dollar / stop_dist if stop_dist > 0 else info.volume_min
                 calc_lot = max(info.volume_min, min(calc_lot, info.volume_max))
@@ -823,18 +828,24 @@ class AutomatedSetupScanner:
                 )
                 
                 tech_signals = f"M15 EMA20 at {round(ema20, digits)}, RSI(14) at {rsi:.1f}, ATR(14) at {round(atr, digits)} | Confluence: {'; '.join(signals_list[:2])}"
+                if not is_open:
+                    setup_name += " [Weekend Analysis]"
+                    tech_signals = f"[Market Closed – Weekend Structure] " + tech_signals
+
                 setup_id = f"{sym.replace(' ', '_')}_{bias}_{int(time.time())//180}"
 
                 setup_obj = {
                     "id": setup_id,
                     "symbol": sym,
                     "category": c["category"],
-                    "setup_name": c["name"],
+                    "setup_name": setup_name,
                     "action": bias,
                     "confidence_score": confidence_score,
                     "conviction": f"{confidence_score}%",
                     "is_high_confidence": confidence_score >= 88,
                     "status": "ACTIVE",
+                    "is_market_open": is_open,
+                    "market_note": "OPEN" if is_open else "CLOSED (Weekend Analysis)",
                     "entry": round(entry, digits),
                     "sl": round(sl, digits),
                     "tp": round(tp, digits),
@@ -845,12 +856,12 @@ class AutomatedSetupScanner:
                     "rr_ratio": "1:2.0",
                     "technical_signals": tech_signals,
                     "invalidation_condition": invalidation,
-                    "notes": c["notes"],
+                    "notes": notes,
                     "symbol_perf": get_symbol_perf_summary(sym)
                 }
 
-                # HIGH-CONFIDENCE AUTOMATIC EXECUTION (Rule 2 & 3: 88-100% Auto-Trade Threshold)
-                if confidence_score >= 88 and self.auto_trade_enabled:
+                # HIGH-CONFIDENCE AUTOMATIC EXECUTION (Rule 2 & 3: 88-100% Auto-Trade Threshold on OPEN markets only)
+                if is_open and confidence_score >= 88 and self.auto_trade_enabled:
                     # Risk gate: Disallow automatic execution on Priority 5 (AVOID) symbols with severe historical losses
                     if setup_obj.get("symbol_perf", {}).get("priority_num") == 5:
                         filtered_reasons[sym] = f"Auto-Execution blocked: {sym} has historical Priority 5 (AVOID) status (Severe Loss Skew/Drawdown). Manual confirmation required."
@@ -2511,6 +2522,7 @@ HTML_PAGE = """<!DOCTYPE html>
                   <div class="flex items-center gap-2">
                     <span class="font-bold text-white font-mono text-sm">${s.symbol}</span>
                     <span class="text-[10px] px-1.5 py-0.5 rounded bg-slate-800 text-slate-400">${s.category}</span>
+                    <span class="text-[9px] px-1.5 py-0.5 rounded font-mono font-bold border ${s.is_market_open ? 'bg-emerald-500/10 text-emeraldaccent border-emerald-500/30' : 'bg-amber-500/10 text-amberaccent border-amber-500/30'}">${s.is_market_open ? 'LIVE 24/7' : 'WEEKEND ANALYSIS'}</span>
                   </div>
                   <div class="flex items-center gap-1.5">
                     <span class="text-[10px] px-2 py-0.5 rounded font-mono font-bold border ${badgeClass}">${s.action}</span>
