@@ -584,6 +584,8 @@ class AutomatedSetupScanner:
         self.status_message = "Starting automated background 3-minute market scanner..."
         self.journal = self.load_journal()
         self.auto_trade_enabled = self.load_config()
+        self.auto_rescan_enabled = False  # Disabled: 2-min auto rescan removed as requested
+        self.dismissed_setups = set()     # Set of (symbol, action) dismissed/taken setups
         self.running = True
         
         # Start scanner daemon thread
@@ -628,6 +630,21 @@ class AutomatedSetupScanner:
                 json.dump(self.journal, f, indent=2)
         except Exception as e:
             print("Error saving trades journal:", e)
+
+    def dismiss_setup(self, setup_id=None, symbol=None, action=None):
+        """Immediately removes a setup from current recommendations and adds to dismissed set."""
+        with self.lock:
+            self.current_setups = [
+                s for s in self.current_setups
+                if s.get("id") != setup_id and not (symbol and s.get("symbol") == symbol and s.get("action") == (action or "").upper())
+            ]
+            if symbol and action:
+                self.dismissed_setups.add((symbol, action.upper()))
+            elif symbol:
+                self.dismissed_setups.add((symbol, "BUY"))
+                self.dismissed_setups.add((symbol, "SELL"))
+            self._update_status_message()
+            print(f"[Scanner] Dismissed setup for {symbol} ({action}). Current active setups remaining: {len(self.current_setups)}")
 
     def record_execution(self, setup_id, symbol, direction, entry, sl, tp, volume, tickets, confidence="--", reason="Manual Execution", execution_type="MANUAL"):
         with self.lock:
@@ -819,6 +836,11 @@ class AutomatedSetupScanner:
                     tp = entry - (stop_dist * 2.0)
                     invalidation = f"Invalidated if M15 candle closes above {round(sl, digits)} or RSI breaks above 68.0"
 
+                # Check if setup was taken or dismissed by user
+                if (sym, bias) in self.dismissed_setups:
+                    filtered_reasons[sym] = f"Setup on {sym} ({bias}) was taken or dismissed by user"
+                    continue
+
                 # 1. LIVE POSITION AWARENESS (Rule 3): Prevent duplicates
                 if (sym, bias) in open_pos:
                     filtered_reasons[sym] = f"Blocked: Active {bias} position already open in Headway MT5"
@@ -927,19 +949,22 @@ class AutomatedSetupScanner:
                 self._update_status_message()
 
     def _run_loop(self):
-        """Continuous background thread executing every 3 minutes."""
+        """Initial startup scan, then re-scans ONLY if auto_rescan_enabled is True or user clicks Re-Scan."""
         time.sleep(1)
         self.run_scan_now()
         
         while self.running:
+            if not self.auto_rescan_enabled:
+                time.sleep(1.0)
+                continue
             for _ in range(self.interval):
-                if not self.running:
+                if not self.running or not self.auto_rescan_enabled:
                     break
                 time.sleep(1)
                 with self.lock:
                     if self.next_scan_seconds > 0:
                         self.next_scan_seconds -= 1
-            if self.running:
+            if self.running and self.auto_rescan_enabled:
                 self.run_scan_now()
 
     def get_state(self):
@@ -1955,10 +1980,11 @@ HTML_PAGE = """<!DOCTYPE html>
             </button>
           </div>
 
-          <!-- Countdown badge -->
+          <!-- Scan Mode Badge (2-min auto rescan removed as requested) -->
           <div class="flex items-center gap-1.5 text-xs font-mono px-3 py-1.5 rounded-lg bg-slate-900 border border-bordercol text-slate-300">
-            <span class="w-2 h-2 rounded-full bg-cyanaccent animate-pulse"></span>
-            <span>Next Scan: <span id="rescanCountdown" class="text-white font-bold">03:00</span></span>
+            <span class="w-2 h-2 rounded-full bg-emeraldaccent"></span>
+            <span class="text-slate-400 font-sans">Scan Mode:</span>
+            <span class="text-emeraldaccent font-bold" id="rescanCountdown">ON DEMAND (Manual)</span>
             <span class="text-slate-500 text-[10px] ml-1">(Last: <span id="lastScanTime" class="text-slate-400">--</span>)</span>
           </div>
 
@@ -2919,12 +2945,15 @@ HTML_PAGE = """<!DOCTYPE html>
                 <button type="button" onclick='executeMtpDirectlyFromSetup(${JSON.stringify(s)})' class="w-full py-2 rounded-lg bg-emerald-600/20 hover:bg-emerald-600/30 text-emeraldaccent border border-emerald-500/40 font-bold text-xs transition flex items-center justify-center gap-1.5 shadow-sm">
                   ⚡ 2-Trade Multi-TP System (Shared SL)
                 </button>
-                <div class="grid grid-cols-2 gap-2">
+                <div class="grid grid-cols-3 gap-1.5">
                   <button type="button" onclick='loadSetupIntoForm(${JSON.stringify(s)})' class="py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-white font-bold text-xs transition flex items-center justify-center gap-1 border border-bordercol">
                     Load Setup
                   </button>
                   <button type="button" onclick='executeSetupDirectly(${JSON.stringify(s)})' class="py-1.5 rounded-lg ${isBuy ? 'bg-emeraldaccent hover:bg-emerald-600' : 'bg-crimsonaccent hover:bg-red-600'} text-white font-bold text-xs transition shadow flex items-center justify-center gap-1">
-                    1-Click Single
+                    1-Click
+                  </button>
+                  <button type="button" onclick='dismissSetupCard("${s.id}", "${s.symbol}", "${s.action}")' class="py-1.5 rounded-lg bg-slate-800/80 hover:bg-red-500/20 text-slate-400 hover:text-red-400 font-bold text-xs transition flex items-center justify-center gap-1 border border-bordercol" title="Dismiss / Remove this Setup">
+                    ✕ Dismiss
                   </button>
                 </div>
               </div>
@@ -3001,6 +3030,26 @@ HTML_PAGE = """<!DOCTYPE html>
       }
     }
 
+    async function dismissSetupCard(setupId, symbol, action) {
+      // Smooth fade out and remove card from DOM
+      const card = document.getElementById(`setup-card-${setupId}`) || document.querySelector(`[data-setup-id="${setupId}"]`);
+      if (card) {
+        card.style.transition = 'all 0.35s ease-out';
+        card.style.opacity = '0';
+        card.style.transform = 'scale(0.95)';
+        setTimeout(() => card.remove(), 350);
+      }
+      try {
+        await fetch('/api/setups/dismiss', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ setup_id: setupId, symbol: symbol, action: action })
+        });
+      } catch (err) {
+        console.error('Error dismissing setup:', err);
+      }
+    }
+
     function loadSetupIntoForm(s) {
       currentLoadedSetupId = s.id;
       selectSymbol(s.symbol);
@@ -3054,14 +3103,8 @@ HTML_PAGE = """<!DOCTYPE html>
         if (out.success) {
           statusBox.className = 'text-xs p-3 rounded-lg bg-emerald-500/10 text-emeraldaccent border border-emerald-500/20';
           statusBox.innerText = '✅ ' + out.message;
-          const card = document.getElementById(`setup-card-${s.id}`);
-          if (card) {
-            card.style.transition = 'all 0.35s ease-out';
-            card.style.opacity = '0';
-            setTimeout(() => card.remove(), 350);
-          }
+          dismissSetupCard(s.id, s.symbol, s.action);
           refreshAll();
-          fetchSetups();
         } else {
           statusBox.className = 'text-xs p-3 rounded-lg bg-red-500/10 text-crimsonaccent border border-red-500/20';
           statusBox.innerText = '❌ ' + out.message;
@@ -3383,17 +3426,11 @@ HTML_PAGE = """<!DOCTYPE html>
 
     // 1-second countdown loop synchronized with background scanner
     function updateCountdown() {
+      // Automatic 2-minute periodic rescan is permanently REMOVED as requested.
+      // Re-scan is strictly manual / on demand via 'Re-Scan Now' button.
       const countdownEl = document.getElementById('rescanCountdown');
-      if (localSecondsLeft <= 0) {
-        localSecondsLeft = 180;
-        fetchSetups();
-      } else {
-        localSecondsLeft--;
-      }
       if (countdownEl) {
-        const mins = Math.floor(localSecondsLeft / 60);
-        const secs = localSecondsLeft % 60;
-        countdownEl.innerText = `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+        countdownEl.innerText = 'ON DEMAND (Manual)';
       }
     }
 
@@ -4112,8 +4149,9 @@ HTML_PAGE = """<!DOCTYPE html>
         });
         const out = await res.json();
         alert(out.message);
+        // Immediately remove taken setup card from Recommended Setups
+        dismissSetupCard(s.id, s.symbol, s.action);
         fetchMultiTpGroups();
-        fetchSetups();
         refreshAll();
       } catch (err) {
         alert('Multi-TP execution error: ' + err);
@@ -4338,6 +4376,16 @@ class DerivServer(BaseHTTPRequestHandler):
                 "message": f"Profit Guardian {'ENABLED' if en else 'DISABLED'}"
             }).encode("utf-8"))
 
+        elif url.path == "/api/setups/dismiss":
+            sid = data.get("setup_id")
+            sym = data.get("symbol")
+            act = data.get("action")
+            if scanner:
+                scanner.dismiss_setup(setup_id=sid, symbol=sym, action=act)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({"success": True, "message": f"Setup {sym} {act} dismissed"}).encode("utf-8"))
         elif url.path == "/api/profit_chaser/config":
             if profit_chaser:
                 for k, v in data.items():
