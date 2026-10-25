@@ -1,5 +1,143 @@
 [
   {
+    "group_id": "GRP-1792920255207553600-ETH",
+    "symbol": "ETH",
+    "action": "SELL",
+    "ref_balance": 1499971.41,
+    "currency": "USD",
+    "total_risk_dollar": 13.17,
+    "total_risk_pct": 0.0009,
+    "risk_budget_dollar": 14999.71,
+    "risk_excludes_costs": true,
+    "risk_complete": true,
+    "lot_per_trade": 0.01,
+    "total_volume": 0.01,
+    "entry_price": 2325.94,
+    "shared_sl": 2339.11,
+    "created_at": "2026-10-25 09:24:15 UTC",
+    "ai_notes": "Auto-Execution (88-100 rule score): M15 EMA20 at 2351.56, RSI(14) at 57.0, ATR(14) at 7.38 | Confluence: Price below EMA20; Negative EMA slope",
+    "confidence_score": 97,
+    "status": "ACTIVE",
+    "execution_state": "CONFIRMED",
+    "uncertain_order": null,
+    "realized_profit": 0.0,
+    "floating_profit": -0.96,
+    "total_profit": -0.96,
+    "positions": [
+      {
+        "sub_id": 1,
+        "name": "Trade 1 (fixed target 1.8x range)",
+        "ticket": 1368072208,
+        "lot": 0.01,
+        "entry": 2325.94,
+        "sl": 2339.11,
+        "tp": 2312.89,
+        "target_dollar": 13.05,
+        "target_pct": "fixed price target",
+        "planned_risk_dollar": 13.17,
+        "status": "ACTIVE",
+        "floating_profit": -0.96,
+        "realized_profit": 0.0,
+        "close_price": null,
+        "close_reason": null,
+        "current_price": 2326.9
+      }
+    ],
+    "errors": []
+  },
+  {
+    "group_id": "GRP-1792920254723524100-CRASH_",
+    "symbol": "CRASH_100",
+    "action": "SELL",
+    "ref_balance": 1499972.09,
+    "currency": "USD",
+    "total_risk_dollar": 11.73,
+    "total_risk_pct": 0.0008,
+    "risk_budget_dollar": 14999.72,
+    "risk_excludes_costs": true,
+    "risk_complete": true,
+    "lot_per_trade": 0.01,
+    "total_volume": 0.01,
+    "entry_price": 314254.0,
+    "shared_sl": 315427.0,
+    "created_at": "2026-10-25 09:24:15 UTC",
+    "ai_notes": "Auto-Execution (88-100 rule score): M15 EMA20 at 316951.0, RSI(14) at 31.6, ATR(14) at 658.0 | Confluence: Price below EMA20; Negative EMA slope",
+    "confidence_score": 97,
+    "status": "ACTIVE",
+    "execution_state": "CONFIRMED",
+    "uncertain_order": null,
+    "realized_profit": 0.0,
+    "floating_profit": -0.19,
+    "total_profit": -0.19,
+    "positions": [
+      {
+        "sub_id": 1,
+        "name": "Trade 1 (fixed target 1.8x range)",
+        "ticket": 1368072183,
+        "lot": 0.01,
+        "entry": 314254.0,
+        "sl": 315427.0,
+        "tp": 313079.0,
+        "target_dollar": 11.75,
+        "target_pct": "fixed price target",
+        "planned_risk_dollar": 11.73,
+        "status": "ACTIVE",
+        "floating_profit": -0.19,
+        "realized_profit": 0.0,
+        "close_price": null,
+        "close_reason": null,
+        "current_price": 314273.0
+      }
+    ],
+    "errors": []
+  },
+  {
+    "group_id": "GRP-1792920254233777300-BOOM_1",
+    "symbol": "BOOM_100",
+    "action": "SELL",
+    "ref_balance": 1499972.25,
+    "currency": "USD",
+    "total_risk_dollar": 12.37,
+    "total_risk_pct": 0.0008,
+    "risk_budget_dollar": 14999.72,
+    "risk_excludes_costs": true,
+    "risk_complete": true,
+    "lot_per_trade": 0.01,
+    "total_volume": 0.01,
+    "entry_price": 1408472.0,
+    "shared_sl": 1409709.0,
+    "created_at": "2026-10-25 09:24:14 UTC",
+    "ai_notes": "Auto-Execution (88-100 rule score): M15 EMA20 at 1408630.0, RSI(14) at 51.2, ATR(14) at 704.0 | Confluence: Price below EMA20; RSI in prime short momentum zone (51.2)",
+    "confidence_score": 93,
+    "status": "ACTIVE",
+    "execution_state": "CONFIRMED",
+    "uncertain_order": null,
+    "realized_profit": 0.0,
+    "floating_profit": -2.27,
+    "total_profit": -2.27,
+    "positions": [
+      {
+        "sub_id": 1,
+        "name": "Trade 1 (fixed target 1.8x range)",
+        "ticket": 1368072160,
+        "lot": 0.01,
+        "entry": 1408472.0,
+        "sl": 1409709.0,
+        "tp": 1407235.0,
+        "target_dollar": 12.37,
+        "target_pct": "fixed price target",
+        "planned_risk_dollar": 12.37,
+        "status": "ACTIVE",
+        "floating_profit": -2.27,
+        "realized_profit": 0.0,
+        "close_price": null,
+        "close_reason": null,
+        "current_price": 1408699.0
+      }
+    ],
+    "errors": []
+  },
+  {
     "group_id": "GRP-1792919515437205100-ETH",
     "symbol": "ETH",
     "action": "SELL",
@@ -17,12 +155,12 @@
     "created_at": "2026-10-25 09:11:56 UTC",
     "ai_notes": "Auto-Execution (88-100 rule score): M15 EMA20 at 2353.51, RSI(14) at 54.2, ATR(14) at 6.6 | Confluence: Price below EMA20; Negative EMA slope",
     "confidence_score": 98,
-    "status": "ACTIVE",
+    "status": "COMPLETED",
     "execution_state": "CONFIRMED",
     "uncertain_order": null,
     "realized_profit": 0.0,
-    "floating_profit": 11.97,
-    "total_profit": 11.97,
+    "floating_profit": 0.0,
+    "total_profit": 0.0,
     "positions": [
       {
         "sub_id": 1,
@@ -35,12 +173,12 @@
         "target_dollar": 12.56,
         "target_pct": "fixed price target",
         "planned_risk_dollar": 12.56,
-        "status": "ACTIVE",
-        "floating_profit": 6.11,
+        "status": "CLOSED",
+        "floating_profit": 0.0,
         "realized_profit": 0.0,
         "close_price": null,
         "close_reason": null,
-        "current_price": 2328.28
+        "current_price": 2322.55
       },
       {
         "sub_id": 2,
@@ -53,12 +191,12 @@
         "target_dollar": 27.65,
         "target_pct": "fixed price target",
         "planned_risk_dollar": 12.81,
-        "status": "ACTIVE",
-        "floating_profit": 5.86,
+        "status": "CLOSED",
+        "floating_profit": 0.0,
         "realized_profit": 0.0,
         "close_price": null,
         "close_reason": null,
-        "current_price": 2328.28
+        "current_price": 2322.55
       }
     ],
     "errors": []
@@ -85,8 +223,8 @@
     "execution_state": "CONFIRMED",
     "uncertain_order": null,
     "realized_profit": 0.0,
-    "floating_profit": 0.1,
-    "total_profit": 0.1,
+    "floating_profit": -1.1,
+    "total_profit": -1.1,
     "positions": [
       {
         "sub_id": 1,
@@ -100,11 +238,11 @@
         "target_pct": "fixed price target",
         "planned_risk_dollar": 5.2,
         "status": "ACTIVE",
-        "floating_profit": 0.0,
+        "floating_profit": -0.6,
         "realized_profit": 0.0,
         "close_price": null,
         "close_reason": null,
-        "current_price": 0.2028
+        "current_price": 0.2034
       },
       {
         "sub_id": 2,
@@ -118,11 +256,11 @@
         "target_pct": "fixed price target",
         "planned_risk_dollar": 5.1,
         "status": "ACTIVE",
-        "floating_profit": 0.1,
+        "floating_profit": -0.5,
         "realized_profit": 0.0,
         "close_price": null,
         "close_reason": null,
-        "current_price": 0.2028
+        "current_price": 0.2034
       }
     ],
     "errors": []
@@ -213,8 +351,8 @@
     "execution_state": "CONFIRMED",
     "uncertain_order": null,
     "realized_profit": 0.0,
-    "floating_profit": -4.97,
-    "total_profit": -4.97,
+    "floating_profit": -7.45,
+    "total_profit": -7.45,
     "positions": [
       {
         "sub_id": 1,
@@ -228,11 +366,11 @@
         "target_pct": "fixed price target",
         "planned_risk_dollar": 5.92,
         "status": "ACTIVE",
-        "floating_profit": -2.47,
+        "floating_profit": -3.71,
         "realized_profit": 0.0,
         "close_price": null,
         "close_reason": null,
-        "current_price": 1044025.0
+        "current_price": 1043901.0
       },
       {
         "sub_id": 2,
@@ -246,11 +384,11 @@
         "target_pct": "fixed price target",
         "planned_risk_dollar": 5.95,
         "status": "ACTIVE",
-        "floating_profit": -2.5,
+        "floating_profit": -3.74,
         "realized_profit": 0.0,
         "close_price": null,
         "close_reason": null,
-        "current_price": 1044025.0
+        "current_price": 1043901.0
       }
     ],
     "errors": []
@@ -273,12 +411,12 @@
     "created_at": "2026-10-25 09:08:51 UTC",
     "ai_notes": "Auto-Execution (88-100 rule score): M15 EMA20 at 318045.0, RSI(14) at 44.0, ATR(14) at 695.0 | Confluence: Price below EMA20; Negative EMA slope",
     "confidence_score": 98,
-    "status": "ACTIVE",
+    "status": "COMPLETED",
     "execution_state": "CONFIRMED",
     "uncertain_order": null,
     "realized_profit": 0.0,
-    "floating_profit": 10.15,
-    "total_profit": 10.15,
+    "floating_profit": 0.0,
+    "total_profit": 0.0,
     "positions": [
       {
         "sub_id": 1,
@@ -291,12 +429,12 @@
         "target_dollar": 12.58,
         "target_pct": "fixed price target",
         "planned_risk_dollar": 12.56,
-        "status": "ACTIVE",
-        "floating_profit": 5.07,
+        "status": "CLOSED",
+        "floating_profit": 0.0,
         "realized_profit": 0.0,
         "close_price": null,
         "close_reason": null,
-        "current_price": 314765.0
+        "current_price": 314697.0
       },
       {
         "sub_id": 2,
@@ -309,12 +447,12 @@
         "target_dollar": 27.94,
         "target_pct": "fixed price target",
         "planned_risk_dollar": 12.55,
-        "status": "ACTIVE",
-        "floating_profit": 5.08,
+        "status": "CLOSED",
+        "floating_profit": 0.0,
         "realized_profit": 0.0,
         "close_price": null,
         "close_reason": null,
-        "current_price": 314765.0
+        "current_price": 314697.0
       }
     ],
     "errors": []
@@ -337,12 +475,12 @@
     "created_at": "2026-10-25 09:08:50 UTC",
     "ai_notes": "Auto-Execution (88-100 rule score): M15 EMA20 at 1408640.0, RSI(14) at 38.4, ATR(14) at 664.0 | Confluence: Price below EMA20; Negative EMA slope",
     "confidence_score": 90,
-    "status": "ACTIVE",
+    "status": "COMPLETED",
     "execution_state": "CONFIRMED",
     "uncertain_order": null,
     "realized_profit": 0.0,
-    "floating_profit": 5.04,
-    "total_profit": 5.04,
+    "floating_profit": 0.0,
+    "total_profit": 0.0,
     "positions": [
       {
         "sub_id": 1,
@@ -355,12 +493,12 @@
         "target_dollar": 11.93,
         "target_pct": "fixed price target",
         "planned_risk_dollar": 11.93,
-        "status": "ACTIVE",
-        "floating_profit": 2.52,
+        "status": "CLOSED",
+        "floating_profit": 0.0,
         "realized_profit": 0.0,
         "close_price": null,
         "close_reason": null,
-        "current_price": 1407842.0
+        "current_price": 1407684.0
       },
       {
         "sub_id": 2,
@@ -373,12 +511,12 @@
         "target_dollar": 26.51,
         "target_pct": "fixed price target",
         "planned_risk_dollar": 11.93,
-        "status": "ACTIVE",
-        "floating_profit": 2.52,
+        "status": "CLOSED",
+        "floating_profit": 0.0,
         "realized_profit": 0.0,
         "close_price": null,
         "close_reason": null,
-        "current_price": 1407842.0
+        "current_price": 1407684.0
       }
     ],
     "errors": []
@@ -597,8 +735,8 @@
     "execution_state": "CONFIRMED",
     "uncertain_order": null,
     "realized_profit": 0.0,
-    "floating_profit": -7.6,
-    "total_profit": -7.6,
+    "floating_profit": -6.4,
+    "total_profit": -6.4,
     "positions": [
       {
         "sub_id": 1,
@@ -612,11 +750,11 @@
         "target_pct": "fixed price target",
         "planned_risk_dollar": 5.0,
         "status": "ACTIVE",
-        "floating_profit": -3.8,
+        "floating_profit": -3.2,
         "realized_profit": 0.0,
         "close_price": null,
         "close_reason": null,
-        "current_price": 0.2025
+        "current_price": 0.2031
       },
       {
         "sub_id": 2,
@@ -630,11 +768,11 @@
         "target_pct": "fixed price target",
         "planned_risk_dollar": 5.0,
         "status": "ACTIVE",
-        "floating_profit": -3.8,
+        "floating_profit": -3.2,
         "realized_profit": 0.0,
         "close_price": null,
         "close_reason": null,
-        "current_price": 0.2025
+        "current_price": 0.2031
       }
     ],
     "errors": []
