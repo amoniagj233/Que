@@ -1,0 +1,34 @@
+{
+  "active_model_version": "v1.0",
+  "min_confidence_threshold": 0.6,
+  "min_expected_value_r": 0.2,
+  "max_risk_per_trade_pct": 1.0,
+  "max_daily_loss_pct": 3.0,
+  "max_drawdown_limit_pct": 5.0,
+  "max_open_trades_gold": 1,
+  "max_allowed_spread_pts": 450,
+  "news_filter_enabled": true,
+  "auto_trade_enabled": false,
+  "enabled_strategies": {
+    "A": true,
+    "B": true,
+    "C": true,
+    "D": true,
+    "E": true,
+    "F": true,
+    "G": true
+  },
+  "enabled_regimes": [
+    "Strong Bullish Trend",
+    "Moderate Bullish Trend",
+    "Strong Bearish Trend",
+    "Moderate Bearish Trend",
+    "Volatility Expansion / Breakout"
+  ],
+  "chaser_option_b": {
+    "pullback_type": "PERCENTAGE",
+    "pullback_threshold": 20.0,
+    "trailing_activation_r": 1.0,
+    "trailing_step_r": 0.25
+  }
+}

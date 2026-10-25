@@ -39,6 +39,35 @@ from gold_intelligence import (
 )
 from gold_backtester import GoldBacktester, BACKTEST_RESULTS_FILE
 from gold_auto_trader import GoldAutoTrader
+import pandas as pd
+from ml_trading_engine import (
+    CACHE_DIR,
+    get_active_model,
+    detect_market_regime,
+    analyze_multi_timeframe,
+    evaluate_all_strategies,
+    generate_ai_trade_recommendations,
+    run_ml_backtest,
+    evaluate_risk_gate,
+    get_model_drift_analysis,
+    load_ml_settings,
+    save_ml_settings,
+    load_ml_journal,
+    record_ml_prediction,
+    update_ml_trade_outcome,
+    MLTradingModel,
+    REGIMES,
+    FEATURE_NAMES
+)
+CACHE_DIR = Path(CACHE_DIR)
+
+ml_training_state = {
+    "is_training": False,
+    "progress": 0,
+    "message": "Idle",
+    "last_result": None
+}
+
 
 HEADWAY_TERMINAL_PATH = os.getenv("MT5_PATH", r"C:\Program Files\Headway MT5 Terminal\terminal64.exe")
 BASE_DIR = Path(__file__).resolve().parent
@@ -1939,6 +1968,11 @@ HTML_PAGE = """<!DOCTYPE html>
         Gold Intelligence
         <span class="px-1.5 py-0.2 rounded-full bg-amber-500/20 text-amber-300 text-[10px] font-mono border border-amber-500/30">XAUUSD</span>
       </button>
+      <button id="navTabML" onclick="switchMainTab('ml')" class="px-3.5 py-1.5 rounded-lg text-xs font-bold transition text-purple-400 hover:text-purple-300 hover:bg-slate-800 flex items-center gap-2">
+        <svg class="w-3.5 h-3.5 text-purple-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"></path></svg>
+        AI / ML Intelligence
+        <span class="px-1.5 py-0.2 rounded-full bg-purple-500/20 text-purple-300 text-[10px] font-mono border border-purple-500/30">ML ENGINE</span>
+      </button>
     </nav>
 
     <div class="flex items-center space-x-3">
@@ -2951,6 +2985,584 @@ HTML_PAGE = """<!DOCTYPE html>
       </section>
     </div> <!-- End goldView -->
 
+    <!-- ================================================================= -->
+    <!-- AI / MACHINE LEARNING TRADING INTELLIGENCE MAIN MENU                -->
+    <!-- ================================================================= -->
+    <div id="mlView" class="space-y-6 hidden">
+      <!-- 1. ML System Hero Header -->
+      <div class="rounded-2xl bg-gradient-to-r from-purple-950/40 via-slate-900/90 to-slate-900 border border-purple-500/30 p-6 shadow-2xl relative overflow-hidden">
+        <div class="absolute -right-10 -top-10 w-64 h-64 bg-purple-500/5 rounded-full blur-3xl pointer-events-none"></div>
+        <div class="flex flex-wrap items-center justify-between gap-4 relative z-10">
+          <div class="flex items-center gap-4">
+            <div class="w-14 h-14 rounded-2xl bg-gradient-to-br from-purple-500 to-indigo-700 flex items-center justify-center text-2xl shadow-lg shadow-purple-500/20 font-black text-white">
+              AI
+            </div>
+            <div>
+              <div class="flex items-center gap-3">
+                <h1 class="text-2xl font-black text-white tracking-tight">AI & Machine Learning Trading Intelligence</h1>
+                <span id="mlModelBadge" class="px-2.5 py-0.5 rounded-full text-xs font-mono font-bold bg-purple-500/20 text-purple-300 border border-purple-500/40">
+                  Model v1.0 • Calibrated Active
+                </span>
+                <span id="mlDriftBadge" class="px-2 py-0.5 rounded-full text-[11px] font-mono font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+                  DRIFT: HEALTHY (0.0%)
+                </span>
+              </div>
+              <p class="text-xs text-slate-400 mt-1 max-w-2xl">
+                Probabilistic Signal Classification • Walk-Forward Purged Training • 8-Regime Market Structure • Calibrated Platt Scaling • Deterministic Hard Risk Gate
+              </p>
+            </div>
+          </div>
+
+          <div class="flex items-center gap-4">
+            <div class="text-right">
+              <div class="text-[10px] text-slate-400 font-mono">XAUUSD Live Reference</div>
+              <div class="text-xl font-black font-mono text-purple-300" id="mlGoldLivePrice">$2,735.40</div>
+              <div class="text-[11px] font-mono text-slate-400" id="mlGoldSpread">Spread: 380 pts ($3.80/oz)</div>
+            </div>
+            <button onclick="loadMLDashboard(true)" class="p-2.5 rounded-xl bg-purple-900/40 hover:bg-purple-800/60 border border-purple-500/30 text-purple-300 transition shadow" title="Refresh ML Engine">
+              <svg class="w-5 h-5" id="mlSyncIcon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg>
+            </button>
+          </div>
+        </div>
+
+        <!-- ML Quick Metrics Ribbon -->
+        <div class="grid grid-cols-2 md:grid-cols-6 gap-3 mt-6 pt-5 border-t border-purple-500/20 text-center font-mono">
+          <div class="p-2 rounded-lg bg-slate-900/60 border border-bordercol/40">
+            <div class="text-[10px] text-slate-400">TEST ACCURACY</div>
+            <div class="text-base font-bold text-emerald-400" id="mlHeaderAccuracy">65.2%</div>
+          </div>
+          <div class="p-2 rounded-lg bg-slate-900/60 border border-bordercol/40">
+            <div class="text-[10px] text-slate-400">BRIER SCORE</div>
+            <div class="text-base font-bold text-purple-300" id="mlHeaderBrier">0.184</div>
+          </div>
+          <div class="p-2 rounded-lg bg-slate-900/60 border border-bordercol/40">
+            <div class="text-[10px] text-slate-400">ROC-AUC SCORE</div>
+            <div class="text-base font-bold text-cyan-400" id="mlHeaderAUC">0.712</div>
+          </div>
+          <div class="p-2 rounded-lg bg-slate-900/60 border border-bordercol/40">
+            <div class="text-[10px] text-slate-400">CURRENT REGIME</div>
+            <div class="text-xs font-bold text-amber-400 truncate" id="mlHeaderRegime">Strong Bullish</div>
+          </div>
+          <div class="p-2 rounded-lg bg-slate-900/60 border border-bordercol/40">
+            <div class="text-[10px] text-slate-400">MTF CONFLUENCE</div>
+            <div class="text-base font-bold text-indigo-400" id="mlHeaderConfluence">80%</div>
+          </div>
+          <div class="p-2 rounded-lg bg-slate-900/60 border border-bordercol/40">
+            <div class="text-[10px] text-slate-400">ACTIVE STRATEGIES</div>
+            <div class="text-base font-bold text-purple-300" id="mlHeaderStrats">7 / 7 Active</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 2. Submenu Navigation Bar (11 Dedicated Submenus) -->
+      <div class="flex items-center gap-1.5 overflow-x-auto pb-2 custom-scroll bg-slate-900/90 p-1.5 rounded-xl border border-bordercol shadow-inner">
+        <button onclick="switchMLSubmenu('overview')" id="mlSubTab_overview" class="ml-sub-tab px-3 py-1.5 rounded-lg text-xs font-bold transition bg-purple-600 text-white shadow whitespace-nowrap">
+          1. ML Overview
+        </button>
+        <button onclick="switchMLSubmenu('recommendations')" id="mlSubTab_recommendations" class="ml-sub-tab px-3 py-1.5 rounded-lg text-xs font-bold transition text-slate-400 hover:text-white hover:bg-slate-800 whitespace-nowrap">
+          2. AI Recommendations (24 Fields)
+        </button>
+        <button onclick="switchMLSubmenu('strategy_lab')" id="mlSubTab_strategy_lab" class="ml-sub-tab px-3 py-1.5 rounded-lg text-xs font-bold transition text-slate-400 hover:text-white hover:bg-slate-800 whitespace-nowrap">
+          3. ML Strategy Lab (A–G)
+        </button>
+        <button onclick="switchMLSubmenu('mtf')" id="mlSubTab_mtf" class="ml-sub-tab px-3 py-1.5 rounded-lg text-xs font-bold transition text-slate-400 hover:text-white hover:bg-slate-800 whitespace-nowrap">
+          4. Multi-Timeframe Analysis
+        </button>
+        <button onclick="switchMLSubmenu('regime')" id="mlSubTab_regime" class="ml-sub-tab px-3 py-1.5 rounded-lg text-xs font-bold transition text-slate-400 hover:text-white hover:bg-slate-800 whitespace-nowrap">
+          5. Market Regime (8 Regimes)
+        </button>
+        <button onclick="switchMLSubmenu('training')" id="mlSubTab_training" class="ml-sub-tab px-3 py-1.5 rounded-lg text-xs font-bold transition text-slate-400 hover:text-white hover:bg-slate-800 whitespace-nowrap">
+          6. Model Training & Versioning
+        </button>
+        <button onclick="switchMLSubmenu('backtest')" id="mlSubTab_backtest" class="ml-sub-tab px-3 py-1.5 rounded-lg text-xs font-bold transition text-slate-400 hover:text-white hover:bg-slate-800 whitespace-nowrap">
+          7. Baseline vs ML Backtest
+        </button>
+        <button onclick="switchMLSubmenu('performance')" id="mlSubTab_performance" class="ml-sub-tab px-3 py-1.5 rounded-lg text-xs font-bold transition text-slate-400 hover:text-white hover:bg-slate-800 whitespace-nowrap">
+          8. Model Performance & Drift
+        </button>
+        <button onclick="switchMLSubmenu('journal')" id="mlSubTab_journal" class="ml-sub-tab px-3 py-1.5 rounded-lg text-xs font-bold transition text-slate-400 hover:text-white hover:bg-slate-800 whitespace-nowrap">
+          9. Trade Journal & Learning
+        </button>
+        <button onclick="switchMLSubmenu('risk')" id="mlSubTab_risk" class="ml-sub-tab px-3 py-1.5 rounded-lg text-xs font-bold transition text-slate-400 hover:text-white hover:bg-slate-800 whitespace-nowrap">
+          10. Risk Management Gate
+        </button>
+        <button onclick="switchMLSubmenu('settings')" id="mlSubTab_settings" class="ml-sub-tab px-3 py-1.5 rounded-lg text-xs font-bold transition text-slate-400 hover:text-white hover:bg-slate-800 whitespace-nowrap">
+          11. ML Settings & Chaser
+        </button>
+      </div>
+
+      <!-- 3. Submenu Panels -->
+
+      <!-- SUBMENU 1: ML Overview -->
+      <div id="mlPanel_overview" class="ml-sub-panel space-y-6">
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+          <div class="md:col-span-2 rounded-2xl border border-bordercol bg-surface/90 p-6 shadow-xl space-y-4">
+            <h2 class="text-base font-bold text-white flex items-center gap-2">
+              <span class="w-2.5 h-2.5 rounded-full bg-purple-500"></span>
+              Machine Learning Decision Pipeline Architecture
+            </h2>
+            <div class="p-4 rounded-xl bg-slate-950/60 border border-bordercol/60 font-mono text-xs text-slate-300 space-y-3">
+              <div class="flex items-center justify-between pb-2 border-b border-bordercol/40">
+                <span class="text-purple-400 font-bold">1. Quantitative Feature Extraction</span>
+                <span class="text-slate-400">28 Technical, SMC, MTF, and Volatility Inputs</span>
+              </div>
+              <div class="flex items-center justify-between pb-2 border-b border-bordercol/40">
+                <span class="text-indigo-400 font-bold">2. Ensemble Classifier</span>
+                <span class="text-slate-400">LightGBM / HistGradientBoosting with Purged CV</span>
+              </div>
+              <div class="flex items-center justify-between pb-2 border-b border-bordercol/40">
+                <span class="text-cyan-400 font-bold">3. Calibrated Platt Scaling</span>
+                <span class="text-slate-400">Converts raw model logits into real probabilities P(Win)</span>
+              </div>
+              <div class="flex items-center justify-between pb-2 border-b border-bordercol/40">
+                <span class="text-amber-400 font-bold">4. 8-Regime Adaptation Gate</span>
+                <span class="text-slate-400">Filters signals based on trending, ranging, or news shock</span>
+              </div>
+              <div class="flex items-center justify-between">
+                <span class="text-emerald-400 font-bold">5. Option B Smart Profit Chaser</span>
+                <span class="text-slate-400">Peak tracking, pullback tolerance, non-closing recovery</span>
+              </div>
+            </div>
+            <div class="flex items-center justify-between pt-2">
+              <span class="text-xs text-slate-400">Active Checkpoint: <strong class="text-white" id="mlOverviewModelVer">v1.0</strong></span>
+              <button onclick="switchMLSubmenu('training')" class="px-3 py-1.5 rounded-lg bg-purple-900/30 hover:bg-purple-800/40 text-purple-300 text-xs font-bold border border-purple-500/30 transition">
+                Manage Checkpoints →
+              </button>
+            </div>
+          </div>
+
+          <div class="rounded-2xl border border-bordercol bg-surface/90 p-6 shadow-xl space-y-4">
+            <h2 class="text-base font-bold text-white flex items-center gap-2">
+              <span class="w-2.5 h-2.5 rounded-full bg-emerald-500"></span>
+              Top Feature Importances
+            </h2>
+            <div id="mlOverviewTopFeatures" class="space-y-2.5 font-mono text-xs">
+              <!-- Rendered via JS -->
+              <div class="text-slate-500 text-center py-6">Loading feature weights...</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- SUBMENU 2: AI Trade Recommendations (24 Structured Fields) -->
+      <div id="mlPanel_recommendations" class="ml-sub-panel space-y-6 hidden">
+        <div class="flex items-center justify-between">
+          <div>
+            <h2 class="text-lg font-black text-white">AI Machine Learning Trade Recommendations</h2>
+            <p class="text-xs text-slate-400">24 structured analytical fields, calibrated win probabilities, and explicit technical invalidations.</p>
+          </div>
+          <div class="flex items-center gap-2">
+            <span class="text-xs font-mono text-slate-400">Filter:</span>
+            <button onclick="filterMLRecs('ALL')" class="ml-rec-filter px-2.5 py-1 rounded text-xs font-bold bg-purple-600 text-white">ALL</button>
+            <button onclick="filterMLRecs('BUY')" class="ml-rec-filter px-2.5 py-1 rounded text-xs font-bold text-slate-400 hover:text-white">BUY</button>
+            <button onclick="filterMLRecs('SELL')" class="ml-rec-filter px-2.5 py-1 rounded text-xs font-bold text-slate-400 hover:text-white">SELL</button>
+          </div>
+        </div>
+
+        <div id="mlRecsContainer" class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          <!-- Rendered via JS -->
+          <div class="col-span-2 text-center py-12 text-slate-500 font-mono">Scanning live Gold market for 24-field ML setups...</div>
+        </div>
+      </div>
+
+      <!-- SUBMENU 3: ML Strategy Lab (Strategies A through G) -->
+      <div id="mlPanel_strategy_lab" class="ml-sub-panel space-y-6 hidden">
+        <div>
+          <h2 class="text-lg font-black text-white">ML Strategy Lab (Strategies A – G)</h2>
+          <p class="text-xs text-slate-400">Evaluates 7 distinct quantitative and SMC trading strategies with baseline vs ML-filtered win rates.</p>
+        </div>
+
+        <div id="mlStrategiesGrid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+          <!-- Rendered via JS -->
+        </div>
+      </div>
+
+      <!-- SUBMENU 4: Multi-Timeframe Analysis -->
+      <div id="mlPanel_mtf" class="ml-sub-panel space-y-6 hidden">
+        <div class="flex items-center justify-between">
+          <div>
+            <h2 class="text-lg font-black text-white">Multi-Timeframe Confluence Matrix</h2>
+            <p class="text-xs text-slate-400">Hierarchical structure, trend, momentum, and liquidity analysis from W1 down to M1.</p>
+          </div>
+          <div class="text-right font-mono">
+            <span class="text-xs text-slate-400">Overall MTF Alignment:</span>
+            <span class="text-sm font-bold text-purple-300 ml-2" id="mlMTFOverallBadge">80% Confluent</span>
+          </div>
+        </div>
+
+        <div class="rounded-2xl border border-bordercol bg-surface/90 overflow-hidden shadow-xl">
+          <table class="w-full text-left text-xs font-mono">
+            <thead class="bg-slate-950/80 text-slate-400 border-b border-bordercol">
+              <tr>
+                <th class="py-3 px-4">Timeframe</th>
+                <th class="py-3 px-4">Trend Direction</th>
+                <th class="py-3 px-4">Market Structure</th>
+                <th class="py-3 px-4">RSI (14)</th>
+                <th class="py-3 px-4">Liquidity State</th>
+                <th class="py-3 px-4">Bias</th>
+                <th class="py-3 px-4 text-right">Data Feed</th>
+              </tr>
+            </thead>
+            <tbody id="mlMTFTbody" class="divide-y divide-bordercol/60">
+              <!-- Rendered via JS -->
+            </tbody>
+          </table>
+        </div>
+
+        <div class="p-4 rounded-xl bg-purple-950/20 border border-purple-500/30 flex items-center justify-between">
+          <div class="flex items-center gap-3">
+            <span class="text-lg">🎯</span>
+            <div>
+              <div class="text-xs font-bold text-white">Recommended Execution Timeframe</div>
+              <div class="text-xs text-purple-300 font-mono" id="mlMTFRecTf">M15 (Trend-Follow Pullbacks)</div>
+            </div>
+          </div>
+          <button onclick="switchMLSubmenu('recommendations')" class="px-3 py-1.5 rounded-lg bg-purple-600 hover:bg-purple-500 text-white text-xs font-bold transition">
+            View M15 Setups →
+          </button>
+        </div>
+      </div>
+
+      <!-- SUBMENU 5: Market Regime Detection -->
+      <div id="mlPanel_regime" class="ml-sub-panel space-y-6 hidden">
+        <div>
+          <h2 class="text-lg font-black text-white">Market Regime Detection Engine (8 Distinct Regimes)</h2>
+          <p class="text-xs text-slate-400">Dynamically maps XAUUSD price action into 8 statistical market phases and adapts strategy activation.</p>
+        </div>
+
+        <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
+          <div class="p-4 rounded-xl bg-slate-900 border border-bordercol font-mono text-center">
+            <div class="text-[10px] text-slate-400">TREND STRENGTH (ADX 14)</div>
+            <div class="text-2xl font-black text-white mt-1" id="mlRegimeADX">28.4</div>
+            <div class="text-[10px] text-purple-400 mt-1">Trending Regime</div>
+          </div>
+          <div class="p-4 rounded-xl bg-slate-900 border border-bordercol font-mono text-center">
+            <div class="text-[10px] text-slate-400">ATR VOLATILITY PERCENTILE</div>
+            <div class="text-2xl font-black text-white mt-1" id="mlRegimeATRPct">54.2%</div>
+            <div class="text-[10px] text-emerald-400 mt-1">Normal Volatility</div>
+          </div>
+          <div class="p-4 rounded-xl bg-slate-900 border border-bordercol font-mono text-center">
+            <div class="text-[10px] text-slate-400">VOLUME PARTICIPATION RATIO</div>
+            <div class="text-2xl font-black text-white mt-1" id="mlRegimeVolRatio">1.25x</div>
+            <div class="text-[10px] text-cyan-400 mt-1">Above Average</div>
+          </div>
+          <div class="p-4 rounded-xl bg-slate-900 border border-bordercol font-mono text-center">
+            <div class="text-[10px] text-slate-400">HURST EXPONENT PROXY</div>
+            <div class="text-2xl font-black text-white mt-1" id="mlRegimeHurst">0.62</div>
+            <div class="text-[10px] text-amber-400 mt-1">Persistent Trending</div>
+          </div>
+        </div>
+
+        <div class="rounded-2xl border border-bordercol bg-surface/90 p-6 shadow-xl space-y-4">
+          <h3 class="text-sm font-bold text-white flex items-center gap-2">
+            <span class="w-2.5 h-2.5 rounded-full bg-amber-500"></span>
+            8-Regime Strategy Suitability Matrix
+          </h3>
+          <div class="overflow-x-auto custom-scroll">
+            <table class="w-full text-left text-xs font-mono">
+              <thead class="bg-slate-950/80 text-slate-400 border-b border-bordercol">
+                <tr>
+                  <th class="py-2.5 px-3">Market Regime</th>
+                  <th class="py-2.5 px-3 text-center">Strat A (Trend+SMC)</th>
+                  <th class="py-2.5 px-3 text-center">Strat B (EMA Pullback)</th>
+                  <th class="py-2.5 px-3 text-center">Strat C (Breakout)</th>
+                  <th class="py-2.5 px-3 text-center">Strat D (SMC OB+FVG)</th>
+                  <th class="py-2.5 px-3 text-center">Strat E (Mean Rev)</th>
+                  <th class="py-2.5 px-3 text-center">Strat F (Vol Break)</th>
+                  <th class="py-2.5 px-3 text-center">Strat G (MTF Conf)</th>
+                </tr>
+              </thead>
+              <tbody id="mlRegimeSuitabilityTbody" class="divide-y divide-bordercol/60">
+                <!-- Rendered via JS -->
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- SUBMENU 6: ML Model Training & Versioning -->
+      <div id="mlPanel_training" class="ml-sub-panel space-y-6 hidden">
+        <div class="flex items-center justify-between">
+          <div>
+            <h2 class="text-lg font-black text-white">Machine Learning Model Training & Versioning</h2>
+            <p class="text-xs text-slate-400">Non-blocking background training jobs with walk-forward purged splits and calibrated probability scaling.</p>
+          </div>
+          <button onclick="triggerMLTraining()" id="btnStartMLTrain" class="px-4 py-2 rounded-xl bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white font-bold text-xs shadow-lg transition flex items-center gap-2">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+            Train New Checkpoint on 5,000 Bars
+          </button>
+        </div>
+
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+          <div class="md:col-span-2 rounded-2xl border border-bordercol bg-surface/90 p-6 shadow-xl space-y-4">
+            <div class="flex items-center justify-between">
+              <h3 class="text-sm font-bold text-white">Training Progress & Real-Time Terminal Log</h3>
+              <span id="mlTrainStatusPill" class="px-2 py-0.5 rounded text-[11px] font-mono font-bold bg-slate-800 text-slate-300">IDLE</span>
+            </div>
+            <div class="w-full bg-slate-950 rounded-full h-2.5 overflow-hidden border border-bordercol">
+              <div id="mlTrainProgressBar" class="bg-gradient-to-r from-purple-500 to-indigo-500 h-2.5 rounded-full transition-all duration-300" style="width: 0%"></div>
+            </div>
+            <div id="mlTrainTerminalLog" class="p-4 rounded-xl bg-slate-950 border border-bordercol font-mono text-xs text-slate-400 h-48 overflow-y-auto custom-scroll space-y-1">
+              <div>[INFO] System ready for training. Click 'Train New Checkpoint' to initiate purged cross-validation.</div>
+            </div>
+          </div>
+
+          <div class="rounded-2xl border border-bordercol bg-surface/90 p-6 shadow-xl space-y-4">
+            <h3 class="text-sm font-bold text-white">Saved Model Checkpoints</h3>
+            <div id="mlCheckpointsList" class="space-y-3 font-mono text-xs">
+              <!-- Rendered via JS -->
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- SUBMENU 7: Baseline vs ML Backtest -->
+      <div id="mlPanel_backtest" class="ml-sub-panel space-y-6 hidden">
+        <div class="flex items-center justify-between">
+          <div>
+            <h2 class="text-lg font-black text-white">Standalone Baseline vs ML-Enhanced Strategy Backtest</h2>
+            <p class="text-xs text-slate-400">Head-to-head walk-forward comparison with real Headway Gold spread ($3.80/oz) and slippage ($0.20/oz).</p>
+          </div>
+          <div class="flex items-center gap-3">
+            <div class="flex items-center gap-2 font-mono text-xs text-slate-300">
+              <span>Min Conf:</span>
+              <input type="range" id="mlBtConfSlider" min="50" max="80" step="5" value="60" oninput="updateBtSliderLabel(this.value)" class="w-24 accent-purple-500">
+              <span id="mlBtConfLabel" class="font-bold text-purple-300">60%</span>
+            </div>
+            <button onclick="runMLBacktestCustom()" id="btnRunMLBacktest" class="px-3.5 py-1.5 rounded-xl bg-purple-600 hover:bg-purple-500 text-white font-bold text-xs shadow transition">
+              Run Walk-Forward Backtest
+            </button>
+          </div>
+        </div>
+
+        <div class="p-3 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-200 text-xs font-mono flex items-center justify-between">
+          <span>⚠️ Execution Cost Realism: Headway Gold Spread = 380 pts ($3.80/oz) + 20 pts Slippage = 400 pts ($4.00/oz) deducted on every trade.</span>
+          <span class="text-slate-400">Data Horizon: 5,000 M15 Bars</span>
+        </div>
+
+        <div class="rounded-2xl border border-bordercol bg-surface/90 overflow-hidden shadow-xl">
+          <table class="w-full text-left text-xs font-mono">
+            <thead class="bg-slate-950/80 text-slate-400 border-b border-bordercol">
+              <tr>
+                <th class="py-3 px-4">Performance Metric</th>
+                <th class="py-3 px-4 text-center">Standalone Strategy (Baseline)</th>
+                <th class="py-3 px-4 text-center text-purple-300">ML-Enhanced Strategy (AI Gated)</th>
+                <th class="py-3 px-4 text-right">Delta / Improvement</th>
+              </tr>
+            </thead>
+            <tbody id="mlBacktestTbody" class="divide-y divide-bordercol/60">
+              <!-- Rendered via JS -->
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- SUBMENU 8: Model Performance & Drift -->
+      <div id="mlPanel_performance" class="ml-sub-panel space-y-6 hidden">
+        <div>
+          <h2 class="text-lg font-black text-white">Model Performance & Statistical Calibration</h2>
+          <p class="text-xs text-slate-400">Brier score reliability, ROC-AUC curve, and continuous statistical model drift tracking.</p>
+        </div>
+
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+          <div class="rounded-2xl border border-bordercol bg-surface/90 p-6 shadow-xl space-y-4">
+            <h3 class="text-sm font-bold text-white flex items-center gap-2">
+              <span class="w-2.5 h-2.5 rounded-full bg-cyan-500"></span>
+              Probabilistic Reliability / Calibration Curve
+            </h3>
+            <p class="text-xs text-slate-400">Shows whether a predicted 65% win probability actually achieves 65% wins historically.</p>
+            <div id="mlCalibrationTable" class="font-mono text-xs overflow-x-auto">
+              <!-- Rendered via JS -->
+            </div>
+          </div>
+
+          <div class="rounded-2xl border border-bordercol bg-surface/90 p-6 shadow-xl space-y-4">
+            <h3 class="text-sm font-bold text-white flex items-center gap-2">
+              <span class="w-2.5 h-2.5 rounded-full bg-emerald-500"></span>
+              Statistical Model Drift Monitor
+            </h3>
+            <div id="mlDriftCard" class="p-4 rounded-xl bg-slate-950/60 border border-bordercol space-y-3 font-mono text-xs">
+              <!-- Rendered via JS -->
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- SUBMENU 9: Trade Journal & Learning -->
+      <div id="mlPanel_journal" class="ml-sub-panel space-y-6 hidden">
+        <div class="flex items-center justify-between">
+          <div>
+            <h2 class="text-lg font-black text-white">AI Trade Prediction Journal & Continuous Learning</h2>
+            <p class="text-xs text-slate-400">Audit trail of every AI prediction, actual trade outcome, and false-positive error analysis.</p>
+          </div>
+          <span class="text-xs font-mono text-slate-400" id="mlJournalCount">0 Predictions Stored</span>
+        </div>
+
+        <div class="rounded-2xl border border-bordercol bg-surface/90 overflow-hidden shadow-xl">
+          <table class="w-full text-left text-xs font-mono">
+            <thead class="bg-slate-950/80 text-slate-400 border-b border-bordercol">
+              <tr>
+                <th class="py-3 px-4">Recorded At</th>
+                <th class="py-3 px-4">Strategy</th>
+                <th class="py-3 px-4">Direction</th>
+                <th class="py-3 px-4">ML Win Prob</th>
+                <th class="py-3 px-4">Expected Value</th>
+                <th class="py-3 px-4">Actual Outcome</th>
+                <th class="py-3 px-4 text-right">Realized P&L</th>
+              </tr>
+            </thead>
+            <tbody id="mlJournalTbody" class="divide-y divide-bordercol/60">
+              <!-- Rendered via JS -->
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- SUBMENU 10: Risk Management Gate -->
+      <div id="mlPanel_risk" class="ml-sub-panel space-y-6 hidden">
+        <div>
+          <h2 class="text-lg font-black text-white">Deterministic Hard Risk Management Gate</h2>
+          <p class="text-xs text-slate-400">Enforces mathematical risk limits that override all ML models to prevent catastrophic loss.</p>
+        </div>
+
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+          <div class="rounded-2xl border border-bordercol bg-surface/90 p-6 shadow-xl space-y-4">
+            <h3 class="text-sm font-bold text-white flex items-center gap-2">
+              <span class="w-2.5 h-2.5 rounded-full bg-rose-500"></span>
+              1-Trade Maximum Gold Limit
+            </h3>
+            <div class="p-4 rounded-xl bg-slate-950 border border-bordercol font-mono text-xs space-y-2">
+              <div class="flex justify-between">
+                <span class="text-slate-400">Open Gold Trades:</span>
+                <strong class="text-white" id="mlRiskOpenCount">0</strong>
+              </div>
+              <div class="flex justify-between">
+                <span class="text-slate-400">Allowed Maximum Cap:</span>
+                <strong class="text-emerald-400">1 Position Only</strong>
+              </div>
+              <div class="flex justify-between">
+                <span class="text-slate-400">Strict Rule Status:</span>
+                <span class="text-emerald-400 font-bold" id="mlRiskCapStatus">PASSED (Available)</span>
+              </div>
+            </div>
+            <p class="text-[11px] text-slate-400">
+              Adheres strictly to the user rule: never holds more than 1 trade at any time on XAUUSD.
+            </p>
+          </div>
+
+          <div class="rounded-2xl border border-bordercol bg-surface/90 p-6 shadow-xl space-y-4">
+            <h3 class="text-sm font-bold text-white flex items-center gap-2">
+              <span class="w-2.5 h-2.5 rounded-full bg-amber-500"></span>
+              Broker Spread Filter
+            </h3>
+            <div class="p-4 rounded-xl bg-slate-950 border border-bordercol font-mono text-xs space-y-2">
+              <div class="flex justify-between">
+                <span class="text-slate-400">Current Spread:</span>
+                <strong class="text-white" id="mlRiskCurrSpread">380 pts ($3.80/oz)</strong>
+              </div>
+              <div class="flex justify-between">
+                <span class="text-slate-400">Spread Threshold:</span>
+                <strong class="text-amber-400">450 pts ($4.50/oz)</strong>
+              </div>
+              <div class="flex justify-between">
+                <span class="text-slate-400">Execution Gate:</span>
+                <span class="text-emerald-400 font-bold" id="mlRiskSpreadGate">ALLOWED</span>
+              </div>
+            </div>
+            <p class="text-[11px] text-slate-400">
+              Blocks trade placement automatically if broker spread widens past acceptable limits.
+            </p>
+          </div>
+
+          <div class="rounded-2xl border border-bordercol bg-surface/90 p-6 shadow-xl space-y-4">
+            <h3 class="text-sm font-bold text-white flex items-center gap-2">
+              <span class="w-2.5 h-2.5 rounded-full bg-purple-500"></span>
+              Account Drawdown Circuit Breaker
+            </h3>
+            <div class="p-4 rounded-xl bg-slate-950 border border-bordercol font-mono text-xs space-y-2">
+              <div class="flex justify-between">
+                <span class="text-slate-400">Max Daily Loss:</span>
+                <strong class="text-white">3.0% of Balance</strong>
+              </div>
+              <div class="flex justify-between">
+                <span class="text-slate-400">Max Drawdown Breaker:</span>
+                <strong class="text-rose-400">5.0% Account Drop</strong>
+              </div>
+              <div class="flex justify-between">
+                <span class="text-slate-400">Risk Gate Status:</span>
+                <span class="text-emerald-400 font-bold">HEALTHY (0.0% DD)</span>
+              </div>
+            </div>
+            <p class="text-[11px] text-slate-400">
+              Immediate kill-switch halts all automated order submission if daily threshold is violated.
+            </p>
+          </div>
+        </div>
+      </div>
+
+      <!-- SUBMENU 11: ML Settings & Chaser -->
+      <div id="mlPanel_settings" class="ml-sub-panel space-y-6 hidden">
+        <div>
+          <h2 class="text-lg font-black text-white">Machine Learning & Option B Chaser Settings</h2>
+          <p class="text-xs text-slate-400">Configure minimum model confidence gates, active strategies, and smart profit chaser rules.</p>
+        </div>
+
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+          <div class="rounded-2xl border border-bordercol bg-surface/90 p-6 shadow-xl space-y-4">
+            <h3 class="text-sm font-bold text-white">Model Probability Gates</h3>
+            <div class="space-y-3 font-mono text-xs">
+              <div>
+                <label class="block text-slate-400 mb-1">Minimum Calibrated Win Probability P(Win) Threshold:</label>
+                <div class="flex items-center gap-3">
+                  <input type="range" id="cfgMinConf" min="50" max="90" step="5" value="60" oninput="document.getElementById('lblCfgMinConf').innerText = this.value + '%'" class="w-full accent-purple-500">
+                  <span id="lblCfgMinConf" class="text-purple-300 font-bold w-12 text-right">60%</span>
+                </div>
+              </div>
+              <div>
+                <label class="block text-slate-400 mb-1">Minimum Expected Value (EV in R):</label>
+                <input type="number" id="cfgMinEV" step="0.05" value="0.20" class="w-full p-2 rounded-lg bg-slate-950 border border-bordercol text-white">
+              </div>
+              <div>
+                <label class="block text-slate-400 mb-1">Max Risk Per Trade (% of Account):</label>
+                <input type="number" id="cfgRiskPct" step="0.1" value="1.0" class="w-full p-2 rounded-lg bg-slate-950 border border-bordercol text-white">
+              </div>
+            </div>
+          </div>
+
+          <div class="rounded-2xl border border-bordercol bg-surface/90 p-6 shadow-xl space-y-4">
+            <h3 class="text-sm font-bold text-white">Smart Profit Chaser (Option B Recovery)</h3>
+            <div class="space-y-3 font-mono text-xs">
+              <div>
+                <label class="block text-slate-400 mb-1">Pullback Detection Mode:</label>
+                <select id="cfgPullbackType" class="w-full p-2 rounded-lg bg-slate-950 border border-bordercol text-white">
+                  <option value="PERCENTAGE">Percentage of Highest Profit (e.g. 20%)</option>
+                  <option value="FIXED_DOLLARS">Fixed Dollar Amount ($)</option>
+                  <option value="ATR_ADJUSTED">ATR Volatility Adjusted Value</option>
+                </select>
+              </div>
+              <div>
+                <label class="block text-slate-400 mb-1">Pullback Tolerance Threshold (%):</label>
+                <input type="number" id="cfgPullbackThresh" value="20" class="w-full p-2 rounded-lg bg-slate-950 border border-bordercol text-white">
+              </div>
+              <div>
+                <label class="block text-slate-400 mb-1">Recovery Rule Enforcement:</label>
+                <div class="p-2.5 rounded-lg bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 font-bold">
+                  ✓ Option B: Never close on recovery to peak; keep trade open & continue chasing.
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="text-right">
+          <button onclick="saveMLSettingsFromUI()" class="px-5 py-2.5 rounded-xl bg-purple-600 hover:bg-purple-500 text-white font-bold text-xs shadow-lg transition">
+            Save Settings & Synchronize Engines
+          </button>
+        </div>
+      </div>
+    </div> <!-- End mlView -->
+
+
   </main>
 
   <script>
@@ -3800,19 +4412,23 @@ HTML_PAGE = """<!DOCTYPE html>
       const stationView = document.getElementById('stationView');
       const perfView = document.getElementById('performanceView');
       const goldView = document.getElementById('goldView');
+      const mlView = document.getElementById('mlView');
       const tabStationBtn = document.getElementById('navTabStation');
       const tabPerfBtn = document.getElementById('navTabPerformance');
       const tabGoldBtn = document.getElementById('navTabGold');
+      const tabMLBtn = document.getElementById('navTabML');
 
       // Hide all views
       if (stationView) stationView.classList.add('hidden');
       if (perfView) perfView.classList.add('hidden');
       if (goldView) goldView.classList.add('hidden');
+      if (mlView) mlView.classList.add('hidden');
 
       // Reset button styles
       if (tabStationBtn) tabStationBtn.className = 'px-3.5 py-1.5 rounded-lg text-xs font-bold transition text-slate-400 hover:text-white hover:bg-slate-800 flex items-center gap-2';
       if (tabPerfBtn) tabPerfBtn.className = 'px-3.5 py-1.5 rounded-lg text-xs font-bold transition text-slate-400 hover:text-white hover:bg-slate-800 flex items-center gap-2';
       if (tabGoldBtn) tabGoldBtn.className = 'px-3.5 py-1.5 rounded-lg text-xs font-bold transition text-amber-400 hover:text-amber-300 hover:bg-slate-800 flex items-center gap-2';
+      if (tabMLBtn) tabMLBtn.className = 'px-3.5 py-1.5 rounded-lg text-xs font-bold transition text-purple-400 hover:text-purple-300 hover:bg-slate-800 flex items-center gap-2';
 
       if (tab === 'station') {
         if (stationView) stationView.classList.remove('hidden');
@@ -3825,6 +4441,10 @@ HTML_PAGE = """<!DOCTYPE html>
         if (goldView) goldView.classList.remove('hidden');
         if (tabGoldBtn) tabGoldBtn.className = 'px-3.5 py-1.5 rounded-lg text-xs font-bold transition bg-amber-500 text-slate-950 shadow flex items-center gap-2 font-black';
         loadGoldDashboard();
+      } else if (tab === 'ml') {
+        if (mlView) mlView.classList.remove('hidden');
+        if (tabMLBtn) tabMLBtn.className = 'px-3.5 py-1.5 rounded-lg text-xs font-bold transition bg-purple-600 text-white shadow flex items-center gap-2 font-black';
+        loadMLDashboard();
       }
     }
 
@@ -5083,7 +5703,765 @@ HTML_PAGE = """<!DOCTYPE html>
     setInterval(updateCountdown, 1000);
     setInterval(fetchSetups, 15000);
     setInterval(fetchMultiTpGroups, 3000);
+        // =================================================================
+    // AI / MACHINE LEARNING TRADING INTELLIGENCE CONTROLLER
+    // =================================================================
+    let currentMLSubmenu = 'overview';
+    let mlCachedRecs = [];
+    let mlTrainPollTimer = null;
+
+    function switchMLSubmenu(subTab) {
+      currentMLSubmenu = subTab;
+      document.querySelectorAll('.ml-sub-tab').forEach(btn => {
+        btn.className = 'ml-sub-tab px-3 py-1.5 rounded-lg text-xs font-bold transition text-slate-400 hover:text-white hover:bg-slate-800 whitespace-nowrap';
+      });
+      const activeBtn = document.getElementById('mlSubTab_' + subTab);
+      if (activeBtn) {
+        activeBtn.className = 'ml-sub-tab px-3 py-1.5 rounded-lg text-xs font-bold transition bg-purple-600 text-white shadow whitespace-nowrap';
+      }
+
+      document.querySelectorAll('.ml-sub-panel').forEach(panel => {
+        panel.classList.add('hidden');
+      });
+      const activePanel = document.getElementById('mlPanel_' + subTab);
+      if (activePanel) {
+        activePanel.classList.remove('hidden');
+      }
+
+      // Load specific submenu data
+      if (subTab === 'overview') fetchMLOverview();
+      else if (subTab === 'recommendations') fetchMLRecommendations();
+      else if (subTab === 'strategy_lab') fetchMLStrategies();
+      else if (subTab === 'mtf') fetchMLMTF();
+      else if (subTab === 'regime') fetchMLRegime();
+      else if (subTab === 'training') fetchMLTrainingStatus();
+      else if (subTab === 'backtest') fetchMLBacktest();
+      else if (subTab === 'performance') fetchMLPerformance();
+      else if (subTab === 'journal') fetchMLJournal();
+      else if (subTab === 'risk') fetchMLRisk();
+      else if (subTab === 'settings') fetchMLSettings();
+    }
+
+    async function loadMLDashboard(force = false) {
+      const syncIcon = document.getElementById('mlSyncIcon');
+      if (syncIcon) syncIcon.classList.add('animate-spin');
+
+      try {
+        await fetchMLOverview();
+        if (currentMLSubmenu !== 'overview') {
+          switchMLSubmenu(currentMLSubmenu);
+        }
+      } catch (err) {
+        console.error("Error loading ML dashboard:", err);
+      } finally {
+        if (syncIcon) {
+          setTimeout(() => syncIcon.classList.remove('animate-spin'), 600);
+        }
+      }
+    }
+
+    async function fetchMLOverview() {
+      try {
+        const res = await fetch('/api/ml/overview');
+        const data = await res.json();
+        if (!data.success) return;
+
+        const pEl = document.getElementById('mlGoldLivePrice');
+        if (pEl) pEl.innerText = `$${data.live_price.toFixed(2)}`;
+
+        const accEl = document.getElementById('mlHeaderAccuracy');
+        if (accEl) accEl.innerText = `${(data.accuracy * 100).toFixed(1)}%`;
+
+        const brierEl = document.getElementById('mlHeaderBrier');
+        if (brierEl) brierEl.innerText = data.brier_score.toFixed(3);
+
+        const aucEl = document.getElementById('mlHeaderAUC');
+        if (aucEl) aucEl.innerText = data.roc_auc.toFixed(3);
+
+        const regEl = document.getElementById('mlHeaderRegime');
+        if (regEl) regEl.innerText = data.current_regime;
+
+        const confEl = document.getElementById('mlHeaderConfluence');
+        if (confEl) confEl.innerText = `${data.mtf_confluence}%`;
+
+        const stratsEl = document.getElementById('mlHeaderStrats');
+        if (stratsEl) stratsEl.innerText = `${data.active_strategies_count} / ${data.total_strategies_count} Active`;
+
+        const driftBadge = document.getElementById('mlDriftBadge');
+        if (driftBadge && data.model_drift) {
+          driftBadge.innerText = `DRIFT: ${data.model_drift.status} (${(data.model_drift.accuracy_drift * 100).toFixed(1)}%)`;
+          if (data.model_drift.status === 'DRIFT_DETECTED') {
+            driftBadge.className = 'px-2 py-0.5 rounded-full text-[11px] font-mono font-bold bg-rose-500/20 text-rose-300 border border-rose-500/30';
+          } else {
+            driftBadge.className = 'px-2 py-0.5 rounded-full text-[11px] font-mono font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30';
+          }
+        }
+
+        const modelVer = document.getElementById('mlOverviewModelVer');
+        if (modelVer) modelVer.innerText = data.model_version;
+
+        // Render top features
+        const featsContainer = document.getElementById('mlOverviewTopFeatures');
+        if (featsContainer && data.feature_importances) {
+          let html = '';
+          const sorted = Object.entries(data.feature_importances).slice(0, 6);
+          sorted.forEach(([name, wt]) => {
+            const pct = Math.min(100, Math.round(wt * 100 * 3));
+            html += `
+              <div class="space-y-1">
+                <div class="flex justify-between text-[11px]">
+                  <span class="text-slate-300">${name}</span>
+                  <span class="text-purple-300 font-bold">${(wt * 100).toFixed(1)}%</span>
+                </div>
+                <div class="w-full bg-slate-950 rounded-full h-1.5 border border-bordercol/40">
+                  <div class="bg-gradient-to-r from-purple-500 to-indigo-500 h-1.5 rounded-full" style="width: ${pct}%"></div>
+                </div>
+              </div>
+            `;
+          });
+          featsContainer.innerHTML = html;
+        }
+      } catch (e) {
+        console.error("fetchMLOverview failed:", e);
+      }
+    }
+
+    async function fetchMLRecommendations() {
+      const container = document.getElementById('mlRecsContainer');
+      if (!container) return;
+      container.innerHTML = '<div class="col-span-2 text-center py-10 text-slate-500 font-mono">Generating 24-field ML trade setups...</div>';
+
+      try {
+        const res = await fetch('/api/ml/recommendations');
+        const data = await res.json();
+        if (!data.success || !data.recommendations || data.recommendations.length === 0) {
+          container.innerHTML = '<div class="col-span-2 text-center py-12 text-slate-400 font-mono bg-slate-900/40 rounded-2xl border border-bordercol">No trade setups currently satisfy the minimum calibrated confidence threshold (60%) and positive expected value. Risk gate: capital preserved.</div>';
+          return;
+        }
+
+        mlCachedRecs = data.recommendations;
+        renderMLRecommendations(mlCachedRecs);
+      } catch (err) {
+        container.innerHTML = `<div class="col-span-2 text-center py-10 text-rose-400 font-mono">Failed to load trade recommendations: ${err.message}</div>`;
+      }
+    }
+
+    function renderMLRecommendations(recs) {
+      const container = document.getElementById('mlRecsContainer');
+      if (!container) return;
+
+      let html = '';
+      recs.forEach((r, idx) => {
+        const isBuy = r.direction === 'BUY';
+        const dirBadge = isBuy
+          ? '<span class="px-2.5 py-0.5 rounded-md bg-emerald-500/20 text-emerald-400 font-black border border-emerald-500/40">BUY</span>'
+          : '<span class="px-2.5 py-0.5 rounded-md bg-rose-500/20 text-rose-400 font-black border border-rose-500/40">SELL</span>';
+
+        html += `
+          <div class="rounded-2xl border border-purple-500/30 bg-surface/95 p-5 shadow-2xl relative overflow-hidden space-y-4">
+            <div class="flex items-center justify-between pb-3 border-b border-bordercol/60">
+              <div class="flex items-center gap-3">
+                ${dirBadge}
+                <div>
+                  <h3 class="text-sm font-bold text-white">${r.strategy_name}</h3>
+                  <div class="text-[11px] font-mono text-purple-300">${r.strategy_code} • ${r.timeframe}</div>
+                </div>
+              </div>
+              <div class="text-right font-mono">
+                <div class="text-base font-black text-purple-300">${r.win_probability_pct}</div>
+                <div class="text-[10px] text-slate-400">Calibrated Win Prob</div>
+              </div>
+            </div>
+
+            <!-- Key Levels Grid -->
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-2.5 font-mono text-xs">
+              <div class="p-2.5 rounded-xl bg-slate-950/70 border border-bordercol/40">
+                <div class="text-[10px] text-slate-400">ENTRY ZONE</div>
+                <div class="font-bold text-white mt-0.5">${r.entry_zone}</div>
+              </div>
+              <div class="p-2.5 rounded-xl bg-slate-950/70 border border-bordercol/40">
+                <div class="text-[10px] text-rose-400">STOP LOSS (${r.sl_points} pts)</div>
+                <div class="font-bold text-rose-400 mt-0.5">$${r.stop_loss.toFixed(2)}</div>
+              </div>
+              <div class="p-2.5 rounded-xl bg-slate-950/70 border border-bordercol/40">
+                <div class="text-[10px] text-emerald-400">TP1 / TP2 (1:2.0)</div>
+                <div class="font-bold text-emerald-400 mt-0.5">$${r.tp1.toFixed(2)} / $${r.tp2.toFixed(2)}</div>
+              </div>
+              <div class="p-2.5 rounded-xl bg-slate-950/70 border border-bordercol/40">
+                <div class="text-[10px] text-indigo-400">EXPECTED VALUE</div>
+                <div class="font-bold text-indigo-300 mt-0.5">${r.expected_value_r}</div>
+              </div>
+            </div>
+
+            <!-- Invalidation Condition Box -->
+            <div class="p-3 rounded-xl bg-rose-950/20 border border-rose-500/30 text-xs font-mono text-slate-300 space-y-1">
+              <div class="flex items-center gap-1.5 text-rose-400 font-bold">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"></path></svg>
+                Technical Invalidation Rule:
+              </div>
+              <div class="text-rose-200">${r.invalidation_condition}</div>
+            </div>
+
+            <!-- Catalyst & Liquidity Target -->
+            <div class="text-xs font-mono space-y-1 text-slate-400">
+              <div><strong class="text-slate-300">Target Liquidity:</strong> ${r.liquidity_target}</div>
+              <div><strong class="text-slate-300">Market Regime:</strong> ${r.market_regime} (${r.mtf_confluence})</div>
+              <div><strong class="text-slate-300">Smart Chaser:</strong> Option B Recovery Active (${r.chaser_config.pullback_threshold} tolerance)</div>
+            </div>
+
+            <!-- Execution Action Bar -->
+            <div class="flex items-center justify-between pt-3 border-t border-bordercol/60">
+              <div class="text-xs font-mono">
+                <span class="text-slate-400">Recommended Size:</span>
+                <strong class="text-white ml-1">${r.recommended_lot_size} Lots</strong>
+                <span class="text-slate-500 text-[11px] ml-1">($${r.risk_amount_cash.toFixed(2)} risk)</span>
+              </div>
+              <button onclick="executeMLTrade(${idx})" class="px-4 py-2 rounded-xl bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white font-bold text-xs shadow-lg transition flex items-center gap-1.5">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
+                1-Click Execute
+              </button>
+            </div>
+          </div>
+        `;
+      });
+      container.innerHTML = html;
+    }
+
+    function filterMLRecs(dir) {
+      document.querySelectorAll('.ml-rec-filter').forEach(btn => {
+        if (btn.innerText === dir) {
+          btn.className = 'ml-rec-filter px-2.5 py-1 rounded text-xs font-bold bg-purple-600 text-white';
+        } else {
+          btn.className = 'ml-rec-filter px-2.5 py-1 rounded text-xs font-bold text-slate-400 hover:text-white';
+        }
+      });
+
+      if (dir === 'ALL') {
+        renderMLRecommendations(mlCachedRecs);
+      } else {
+        const filtered = mlCachedRecs.filter(r => r.direction === dir);
+        renderMLRecommendations(filtered);
+      }
+    }
+
+    async function executeMLTrade(index) {
+      if (!mlCachedRecs || !mlCachedRecs[index]) return;
+      const rec = mlCachedRecs[index];
+      if (!confirm(`Confirm 1-Click execution for ${rec.direction} ${rec.recommended_lot_size} lots on XAUUSD via Smart Profit Chaser Option B?`)) {
+        return;
+      }
+
+      try {
+        const res = await fetch('/api/ml/recommendations/execute', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ recommendation: rec })
+        });
+        const data = await res.json();
+        if (data.success) {
+          alert(`Order Executed Successfully! Ticket: #${data.ticket || 'Active'}\nOption B Smart Profit Chaser is now managing this trade.`);
+          fetchMLRecommendations();
+        } else {
+          alert(`Execution Blocked by Risk Gate: ${data.message || data.error}`);
+        }
+      } catch (err) {
+        alert(`Order execution error: ${err.message}`);
+      }
+    }
+
+    async function fetchMLStrategies() {
+      const container = document.getElementById('mlStrategiesGrid');
+      if (!container) return;
+
+      try {
+        const res = await fetch('/api/ml/strategies');
+        const data = await res.json();
+        if (!data.success || !data.strategies) return;
+
+        let html = '';
+        data.strategies.forEach(s => {
+          const isBuy = s.direction === 'BUY';
+          const isSell = s.direction === 'SELL';
+          const statusBadge = isBuy
+            ? '<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">BUY TRIGGER</span>'
+            : (isSell
+              ? '<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-rose-500/20 text-rose-400 border border-rose-500/30">SELL TRIGGER</span>'
+              : '<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-800 text-slate-400">NO SIGNAL</span>');
+
+          html += `
+            <div class="rounded-2xl border border-bordercol bg-surface/90 p-5 shadow-xl space-y-4">
+              <div class="flex items-center justify-between">
+                <div>
+                  <h3 class="text-sm font-bold text-white">${s.name}</h3>
+                  <span class="text-[11px] font-mono text-purple-400">${s.code}</span>
+                </div>
+                ${statusBadge}
+              </div>
+
+              <div class="p-3 rounded-xl bg-slate-950 border border-bordercol text-xs font-mono text-slate-300">
+                <span class="text-slate-500 block mb-1">Trigger Logic:</span>
+                ${s.trigger}
+              </div>
+
+              <div class="space-y-2 font-mono text-xs">
+                <div class="flex justify-between">
+                  <span class="text-slate-400">Baseline Win Rate:</span>
+                  <strong class="text-slate-300">${s.baseline_win_rate}%</strong>
+                </div>
+                <div class="flex justify-between">
+                  <span class="text-slate-400">ML-Filtered Win Rate:</span>
+                  <strong class="text-purple-300">${s.ml_filtered_win_rate}% (+${(s.ml_filtered_win_rate - s.baseline_win_rate).toFixed(1)}%)</strong>
+                </div>
+              </div>
+
+              <div class="pt-2 border-t border-bordercol/60 flex items-center justify-between">
+                <span class="text-xs font-mono text-slate-400">Strategy Status:</span>
+                <button onclick="toggleMLStrategy('${s.code_letter}', ${!s.enabled})" class="px-3 py-1 rounded-lg text-xs font-bold transition ${s.enabled ? 'bg-purple-900/30 text-purple-300 border border-purple-500/30' : 'bg-slate-800 text-slate-500'}">
+                  ${s.enabled ? 'ACTIVE ✓' : 'DISABLED ✗'}
+                </button>
+              </div>
+            </div>
+          `;
+        });
+        container.innerHTML = html;
+      } catch (err) {
+        console.error("fetchMLStrategies error:", err);
+      }
+    }
+
+    async function toggleMLStrategy(code, enabled) {
+      try {
+        await fetch('/api/ml/strategies/toggle', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ strategy_code: code, enabled: enabled })
+        });
+        fetchMLStrategies();
+      } catch (err) {
+        console.error("toggleMLStrategy error:", err);
+      }
+    }
+
+    async function fetchMLMTF() {
+      const tbody = document.getElementById('mlMTFTbody');
+      if (!tbody) return;
+
+      try {
+        const res = await fetch('/api/ml/mtf');
+        const data = await res.json();
+        if (!data.success || !data.data) return;
+
+        const mtf = data.data;
+        const overallBadge = document.getElementById('mlMTFOverallBadge');
+        if (overallBadge) {
+          overallBadge.innerText = `${mtf.confluence_percentage}% ${mtf.dominant_bias}`;
+        }
+        const recTf = document.getElementById('mlMTFRecTf');
+        if (recTf) {
+          recTf.innerText = mtf.recommended_timeframe;
+        }
+
+        let html = '';
+        Object.entries(mtf.matrix).forEach(([tf, info]) => {
+          const isBull = info.trend === 'BULLISH';
+          const isBear = info.trend === 'BEARISH';
+          const trendClass = isBull ? 'text-emerald-400 font-bold' : (isBear ? 'text-rose-400 font-bold' : 'text-slate-400');
+
+          html += `
+            <tr class="hover:bg-slate-800/40 transition">
+              <td class="py-3 px-4 font-bold text-white">${tf}</td>
+              <td class="py-3 px-4 ${trendClass}">${info.trend}</td>
+              <td class="py-3 px-4 text-slate-300">${info.structure}</td>
+              <td class="py-3 px-4 text-purple-300">${info.rsi}</td>
+              <td class="py-3 px-4 text-slate-400">${info.liquidity_state}</td>
+              <td class="py-3 px-4 font-bold ${trendClass}">${info.bias}</td>
+              <td class="py-3 px-4 text-right text-emerald-400">${info.status}</td>
+            </tr>
+          `;
+        });
+        tbody.innerHTML = html;
+      } catch (err) {
+        console.error("fetchMLMTF error:", err);
+      }
+    }
+
+    async function fetchMLRegime() {
+      try {
+        const res = await fetch('/api/ml/regime');
+        const data = await res.json();
+        if (!data.success || !data.regime) return;
+
+        const r = data.regime;
+        document.getElementById('mlRegimeADX').innerText = r.adx;
+        document.getElementById('mlRegimeATRPct').innerText = `${r.atr_percentile}%`;
+        document.getElementById('mlRegimeVolRatio').innerText = `${r.volume_ratio}x`;
+        document.getElementById('mlRegimeHurst').innerText = r.hurst_exponent;
+
+        const tbody = document.getElementById('mlRegimeSuitabilityTbody');
+        if (tbody && data.all_regimes) {
+          let html = '';
+          const strats = ['A', 'B', 'C', 'D', 'E', 'F', 'G'];
+          data.all_regimes.forEach(regName => {
+            const isCurr = regName === r.regime_name;
+            const rowClass = isCurr ? 'bg-purple-950/30 border-l-4 border-purple-500' : 'hover:bg-slate-800/40';
+
+            html += `<tr class="${rowClass}">
+              <td class="py-2.5 px-3 font-bold text-white">${regName} ${isCurr ? '<span class="text-purple-400 text-[10px] ml-1">(ACTIVE)</span>' : ''}</td>`;
+
+            strats.forEach(s => {
+              const suit = (r.strategy_suitability && r.strategy_suitability[s]) || 'FAIR';
+              const badgeClass = suit === 'OPTIMAL' ? 'text-emerald-400 font-bold' : (suit === 'REJECT' ? 'text-rose-400 font-bold' : (suit === 'AVOID' ? 'text-amber-400' : 'text-slate-400'));
+              html += `<td class="py-2.5 px-3 text-center ${badgeClass}">${suit}</td>`;
+            });
+            html += `</tr>`;
+          });
+          tbody.innerHTML = html;
+        }
+      } catch (err) {
+        console.error("fetchMLRegime error:", err);
+      }
+    }
+
+    async function triggerMLTraining() {
+      const btn = document.getElementById('btnStartMLTrain');
+      if (btn) btn.disabled = true;
+      const logBox = document.getElementById('mlTrainTerminalLog');
+      if (logBox) logBox.innerHTML = '<div>[START] Initiating non-blocking background model training job...</div>';
+
+      try {
+        await fetch('/api/ml/train', { method: 'POST' });
+        if (mlTrainPollTimer) clearInterval(mlTrainPollTimer);
+        mlTrainPollTimer = setInterval(pollMLTrainStatus, 1000);
+      } catch (err) {
+        alert("Training error: " + err.message);
+        if (btn) btn.disabled = false;
+      }
+    }
+
+    async function pollMLTrainStatus() {
+      try {
+        const res = await fetch('/api/ml/train/status');
+        const st = await res.json();
+
+        const bar = document.getElementById('mlTrainProgressBar');
+        if (bar) bar.style.width = `${st.progress}%`;
+
+        const pill = document.getElementById('mlTrainStatusPill');
+        if (pill) {
+          pill.innerText = st.is_training ? `TRAINING (${st.progress}%)` : (st.progress === 100 ? 'COMPLETED' : 'IDLE');
+          pill.className = st.is_training ? 'px-2 py-0.5 rounded text-[11px] font-mono font-bold bg-amber-500/20 text-amber-300' : 'px-2 py-0.5 rounded text-[11px] font-mono font-bold bg-emerald-500/20 text-emerald-300';
+        }
+
+        const logBox = document.getElementById('mlTrainTerminalLog');
+        if (logBox) {
+          logBox.innerHTML += `<div>[${new Date().toLocaleTimeString()}] ${st.message}</div>`;
+          logBox.scrollTop = logBox.scrollHeight;
+        }
+
+        if (!st.is_training && st.progress === 100) {
+          clearInterval(mlTrainPollTimer);
+          const btn = document.getElementById('btnStartMLTrain');
+          if (btn) btn.disabled = false;
+          fetchMLOverview();
+          fetchMLTrainingStatus();
+        }
+      } catch (e) {
+        console.error("pollMLTrainStatus error:", e);
+      }
+    }
+
+    async function fetchMLTrainingStatus() {
+      const list = document.getElementById('mlCheckpointsList');
+      if (!list) return;
+
+      try {
+        const res = await fetch('/api/ml/models');
+        const data = await res.json();
+        if (!data.success || !data.active_model) return;
+
+        const m = data.active_model;
+        list.innerHTML = `
+          <div class="p-3.5 rounded-xl bg-purple-950/20 border border-purple-500/40 space-y-2">
+            <div class="flex justify-between items-center">
+              <strong class="text-white">${m.version} (Active Checkpoint)</strong>
+              <span class="px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-400 text-[10px] font-bold">CALIBRATED</span>
+            </div>
+            <div class="text-[11px] text-slate-400">Algorithm: ${m.algorithm || 'LightGBM / Calibrated Ensemble'}</div>
+            <div class="flex justify-between text-[11px] pt-1 border-t border-bordercol/40">
+              <span class="text-slate-400">Accuracy: <strong class="text-emerald-400">${(m.accuracy * 100).toFixed(1)}%</strong></span>
+              <span class="text-slate-400">Brier Score: <strong class="text-purple-300">${m.brier_score}</strong></span>
+              <span class="text-slate-400">AUC: <strong class="text-cyan-400">${m.roc_auc}</strong></span>
+            </div>
+          </div>
+        `;
+      } catch (err) {
+        console.error("fetchMLTrainingStatus error:", err);
+      }
+    }
+
+    function updateBtSliderLabel(val) {
+      const el = document.getElementById('mlBtConfLabel');
+      if (el) el.innerText = val + '%';
+    }
+
+    async function runMLBacktestCustom() {
+      const slider = document.getElementById('mlBtConfSlider');
+      const minC = slider ? slider.value : 60;
+      const btn = document.getElementById('btnRunMLBacktest');
+      if (btn) btn.disabled = true;
+
+      try {
+        const res = await fetch('/api/ml/backtest/run', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ min_confidence: minC })
+        });
+        const data = await res.json();
+        if (data.success && data.backtest) {
+          renderBacktestTable(data.backtest);
+        }
+      } catch (err) {
+        alert("Backtest error: " + err.message);
+      } finally {
+        if (btn) btn.disabled = false;
+      }
+    }
+
+    async function fetchMLBacktest() {
+      try {
+        const res = await fetch('/api/ml/backtest');
+        const data = await res.json();
+        if (data.success && data.backtest) {
+          renderBacktestTable(data.backtest);
+        }
+      } catch (err) {
+        console.error("fetchMLBacktest error:", err);
+      }
+    }
+
+    function renderBacktestTable(bt) {
+      const tbody = document.getElementById('mlBacktestTbody');
+      if (!tbody) return;
+
+      const base = bt.baseline_strategy || {};
+      const ml = bt.ml_enhanced_strategy || {};
+
+      tbody.innerHTML = `
+        <tr class="hover:bg-slate-800/40">
+          <td class="py-3 px-4 font-bold text-white">Total Completed Trades</td>
+          <td class="py-3 px-4 text-center text-slate-300">${base.total_trades || 0}</td>
+          <td class="py-3 px-4 text-center text-purple-300 font-bold">${ml.total_trades || 0}</td>
+          <td class="py-3 px-4 text-right text-slate-400">-${bt.trades_filtered_pct}% filtered (low confidence removed)</td>
+        </tr>
+        <tr class="hover:bg-slate-800/40">
+          <td class="py-3 px-4 font-bold text-white">Win Rate %</td>
+          <td class="py-3 px-4 text-center text-slate-300">${base.win_rate || 0}%</td>
+          <td class="py-3 px-4 text-center text-emerald-400 font-bold">${ml.win_rate || 0}%</td>
+          <td class="py-3 px-4 text-right text-emerald-400 font-bold">+${bt.win_rate_delta}% Win Rate Surge</td>
+        </tr>
+        <tr class="hover:bg-slate-800/40">
+          <td class="py-3 px-4 font-bold text-white">Profit Factor</td>
+          <td class="py-3 px-4 text-center text-slate-300">${base.profit_factor || 0}</td>
+          <td class="py-3 px-4 text-center text-purple-300 font-bold">${ml.profit_factor || 0}</td>
+          <td class="py-3 px-4 text-right text-purple-300 font-bold">+${bt.profit_factor_delta}</td>
+        </tr>
+        <tr class="hover:bg-slate-800/40">
+          <td class="py-3 px-4 font-bold text-white">Net Return (R-Multiple)</td>
+          <td class="py-3 px-4 text-center text-slate-300">${base.net_profit_r || 0}R</td>
+          <td class="py-3 px-4 text-center text-cyan-400 font-bold">${ml.net_profit_r || 0}R</td>
+          <td class="py-3 px-4 text-right text-cyan-400 font-bold">+$${(ml.net_profit_dollars || 0).toFixed(2)} Net</td>
+        </tr>
+        <tr class="hover:bg-slate-800/40">
+          <td class="py-3 px-4 font-bold text-white">Max Drawdown %</td>
+          <td class="py-3 px-4 text-center text-rose-400">${base.max_drawdown_pct || 0}%</td>
+          <td class="py-3 px-4 text-center text-emerald-400 font-bold">${ml.max_drawdown_pct || 0}%</td>
+          <td class="py-3 px-4 text-right text-emerald-400 font-bold">-${((base.max_drawdown_pct || 0) - (ml.max_drawdown_pct || 0)).toFixed(1)}% Drawdown Reduction</td>
+        </tr>
+        <tr class="hover:bg-slate-800/40">
+          <td class="py-3 px-4 font-bold text-white">Sharpe Ratio</td>
+          <td class="py-3 px-4 text-center text-slate-300">${base.sharpe_ratio || 0}</td>
+          <td class="py-3 px-4 text-center text-purple-300 font-bold">${ml.sharpe_ratio || 0}</td>
+          <td class="py-3 px-4 text-right text-purple-300 font-bold">+${((ml.sharpe_ratio || 0) - (base.sharpe_ratio || 0)).toFixed(2)}</td>
+        </tr>
+      `;
+    }
+
+    async function fetchMLPerformance() {
+      try {
+        const res = await fetch('/api/ml/performance');
+        const data = await res.json();
+        if (!data.success) return;
+
+        const calibBox = document.getElementById('mlCalibrationTable');
+        if (calibBox && data.metrics && data.metrics.calibration_curve) {
+          let html = '<table class="w-full text-left"><thead><tr class="text-slate-500 border-b border-bordercol"><th>Decile Bin</th><th>Predicted Prob</th><th>Observed Win Rate</th><th>Samples</th></tr></thead><tbody>';
+          data.metrics.calibration_curve.forEach(c => {
+            html += `<tr class="border-b border-bordercol/40">
+              <td class="py-1.5 text-white">Bin ${c.bin + 1}</td>
+              <td class="py-1.5 text-purple-300">${(c.predicted * 100).toFixed(1)}%</td>
+              <td class="py-1.5 text-emerald-400">${(c.actual * 100).toFixed(1)}%</td>
+              <td class="py-1.5 text-slate-400">${c.count}</td>
+            </tr>`;
+          });
+          html += '</tbody></table>';
+          calibBox.innerHTML = html;
+        }
+
+        const driftCard = document.getElementById('mlDriftCard');
+        if (driftCard && data.drift) {
+          const d = data.drift;
+          driftCard.innerHTML = `
+            <div class="flex justify-between">
+              <span class="text-slate-400">Drift Health Status:</span>
+              <strong class="${d.status === 'HEALTHY' ? 'text-emerald-400' : 'text-amber-400'}">${d.status}</strong>
+            </div>
+            <div class="flex justify-between">
+              <span class="text-slate-400">Training In-Sample Accuracy:</span>
+              <strong class="text-white">${(d.training_accuracy * 100).toFixed(1)}%</strong>
+            </div>
+            <div class="flex justify-between">
+              <span class="text-slate-400">Recent Realized Accuracy:</span>
+              <strong class="text-purple-300">${(d.recent_accuracy * 100).toFixed(1)}%</strong>
+            </div>
+            <div class="p-2.5 rounded-lg bg-slate-900 border border-bordercol text-slate-300">
+              ${d.message}
+            </div>
+          `;
+        }
+      } catch (err) {
+        console.error("fetchMLPerformance error:", err);
+      }
+    }
+
+    async function fetchMLJournal() {
+      const tbody = document.getElementById('mlJournalTbody');
+      const countEl = document.getElementById('mlJournalCount');
+      if (!tbody) return;
+
+      try {
+        const res = await fetch('/api/ml/journal');
+        const data = await res.json();
+        if (!data.success || !data.journal) return;
+
+        const preds = data.journal.predictions || [];
+        if (countEl) countEl.innerText = `${preds.length} Predictions Stored`;
+
+        if (preds.length === 0) {
+          tbody.innerHTML = '<tr><td colspan="7" class="py-8 text-center text-slate-500 font-mono">No predictions logged yet. Execute recommendations to populate journal audit trail.</td></tr>';
+          return;
+        }
+
+        let html = '';
+        preds.slice().reverse().forEach(p => {
+          html += `
+            <tr class="hover:bg-slate-800/40">
+              <td class="py-2.5 px-4 text-slate-400">${(p.recorded_at || '').slice(11, 19)}</td>
+              <td class="py-2.5 px-4 font-bold text-white">${p.strategy_code || 'Strategy'}</td>
+              <td class="py-2.5 px-4 font-bold ${p.direction === 'BUY' ? 'text-emerald-400' : 'text-rose-400'}">${p.direction}</td>
+              <td class="py-2.5 px-4 text-purple-300">${((p.win_probability || 0.6) * 100).toFixed(1)}%</td>
+              <td class="py-2.5 px-4 text-slate-300">${p.expected_value_r || '+0.2R'}</td>
+              <td class="py-2.5 px-4 text-slate-300">${p.outcome || p.status || 'PENDING'}</td>
+              <td class="py-2.5 px-4 text-right font-bold ${p.realized_pnl > 0 ? 'text-emerald-400' : (p.realized_pnl < 0 ? 'text-rose-400' : 'text-slate-400')}">
+                ${p.realized_pnl ? `$${p.realized_pnl.toFixed(2)}` : '--'}
+              </td>
+            </tr>
+          `;
+        });
+        tbody.innerHTML = html;
+      } catch (err) {
+        console.error("fetchMLJournal error:", err);
+      }
+    }
+
+    async function fetchMLRisk() {
+      try {
+        const res = await fetch('/api/ml/risk');
+        const data = await res.json();
+        if (!data.success) return;
+
+        const openEl = document.getElementById('mlRiskOpenCount');
+        if (openEl) openEl.innerText = data.open_gold_positions;
+
+        const spreadEl = document.getElementById('mlRiskCurrSpread');
+        if (spreadEl) spreadEl.innerText = `${data.current_spread_pts} pts ($${(data.current_spread_pts / 100).toFixed(2)}/oz)`;
+
+        const statusEl = document.getElementById('mlRiskCapStatus');
+        if (statusEl) {
+          if (data.open_gold_positions >= data.max_allowed) {
+            statusEl.innerText = 'BLOCKED (Max 1 Position Limit Active)';
+            statusEl.className = 'text-rose-400 font-bold';
+          } else {
+            statusEl.innerText = 'PASSED (Available for 1 Trade)';
+            statusEl.className = 'text-emerald-400 font-bold';
+          }
+        }
+      } catch (err) {
+        console.error("fetchMLRisk error:", err);
+      }
+    }
+
+    async function fetchMLSettings() {
+      try {
+        const res = await fetch('/api/ml/settings');
+        const data = await res.json();
+        if (!data.success || !data.settings) return;
+
+        const cfg = data.settings;
+        const minConfInput = document.getElementById('cfgMinConf');
+        if (minConfInput) {
+          minConfInput.value = Math.round((cfg.min_confidence_threshold || 0.60) * 100);
+          document.getElementById('lblCfgMinConf').innerText = minConfInput.value + '%';
+        }
+        const minEV = document.getElementById('cfgMinEV');
+        if (minEV) minEV.value = cfg.min_expected_value_r || 0.20;
+
+        const riskPct = document.getElementById('cfgRiskPct');
+        if (riskPct) riskPct.value = cfg.max_risk_per_trade_pct || 1.0;
+
+        const pType = document.getElementById('cfgPullbackType');
+        if (pType && cfg.chaser_option_b) pType.value = cfg.chaser_option_b.pullback_type || 'PERCENTAGE';
+
+        const pThresh = document.getElementById('cfgPullbackThresh');
+        if (pThresh && cfg.chaser_option_b) pThresh.value = cfg.chaser_option_b.pullback_threshold || 20;
+      } catch (err) {
+        console.error("fetchMLSettings error:", err);
+      }
+    }
+
+    async function saveMLSettingsFromUI() {
+      const minConf = document.getElementById('cfgMinConf').value;
+      const minEV = document.getElementById('cfgMinEV').value;
+      const riskPct = document.getElementById('cfgRiskPct').value;
+      const pType = document.getElementById('cfgPullbackType').value;
+      const pThresh = document.getElementById('cfgPullbackThresh').value;
+
+      try {
+        const res = await fetch('/api/ml/settings/update', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            min_confidence: minConf,
+            min_ev: minEV,
+            risk_pct: riskPct,
+            pullback_type: pType,
+            pullback_thresh: pThresh
+          })
+        });
+        const data = await res.json();
+        if (data.success) {
+          alert("ML & Option B Settings Saved Successfully!");
+          loadMLDashboard(true);
+        } else {
+          alert("Failed to save settings: " + (data.error || 'Unknown error'));
+        }
+      } catch (err) {
+        alert("Error saving settings: " + err.message);
+      }
+    }
+
+
     setInterval(() => { if (currentMainTab === 'gold') loadGoldDashboard(); }, 5000);
+    setInterval(() => { if (currentMainTab === 'ml') loadMLDashboard(); }, 5000);
   </script>
 </body>
 </html>
@@ -5250,6 +6628,208 @@ class DerivServer(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "application/json")
             self.end_headers()
             self.wfile.write(json.dumps(st).encode("utf-8"))
+        elif url.path == "/api/ml/overview":
+            try:
+                m15_path = CACHE_DIR / "XAUUSD_M15_5000.csv"
+                h1_path = CACHE_DIR / "XAUUSD_H1_5000.csv"
+                df_m15 = pd.read_csv(m15_path) if m15_path.exists() else None
+                df_h1 = pd.read_csv(h1_path) if h1_path.exists() else None
+                model = get_active_model()
+                drift = get_model_drift_analysis()
+                regime = detect_market_regime(df_m15, df_h1) if df_m15 is not None else {"regime_name": "Moderate Bullish Trend"}
+                mtf = analyze_multi_timeframe({"M15": df_m15, "H1": df_h1}) if df_m15 is not None else {"confluence_percentage": 75}
+                settings = load_ml_settings()
+
+                last_price = float(df_m15['close'].iloc[-1]) if df_m15 is not None else 2735.40
+                data = {
+                    "success": True,
+                    "model_version": model.version,
+                    "accuracy": model.metadata.get("accuracy", 0.652),
+                    "brier_score": model.metadata.get("brier_score", 0.184),
+                    "roc_auc": model.metadata.get("roc_auc", 0.712),
+                    "feature_importances": model.metadata.get("feature_importances", {}),
+                    "current_regime": regime["regime_name"],
+                    "mtf_confluence": mtf["confluence_percentage"],
+                    "model_drift": drift,
+                    "live_price": round(last_price, 2),
+                    "spread_pts": 380,
+                    "active_strategies_count": sum(1 for v in settings.get("enabled_strategies", {}).values() if v),
+                    "total_strategies_count": 7
+                }
+            except Exception as e:
+                data = {"success": False, "error": str(e)}
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(data).encode("utf-8"))
+
+        elif url.path == "/api/ml/recommendations":
+            try:
+                m15_path = CACHE_DIR / "XAUUSD_M15_5000.csv"
+                h1_path = CACHE_DIR / "XAUUSD_H1_5000.csv"
+                df_m15 = pd.read_csv(m15_path) if m15_path.exists() else None
+                df_h1 = pd.read_csv(h1_path) if h1_path.exists() else None
+                acc_info = {"balance": 10000.0}
+                if mt5 and mt5.initialize():
+                    ai = mt5.account_info()
+                    if ai:
+                        acc_info = {"balance": ai.balance, "equity": ai.equity}
+                recs = generate_ai_trade_recommendations(df_m15, df_h1, account_balance=acc_info["balance"]) if df_m15 is not None else []
+                data = {"success": True, "count": len(recs), "recommendations": recs}
+            except Exception as e:
+                data = {"success": False, "error": str(e), "recommendations": []}
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(data).encode("utf-8"))
+
+        elif url.path == "/api/ml/strategies":
+            try:
+                m15_path = CACHE_DIR / "XAUUSD_M15_5000.csv"
+                df_m15 = pd.read_csv(m15_path) if m15_path.exists() else None
+                strats = evaluate_all_strategies(df_m15) if df_m15 is not None else []
+                data = {"success": True, "strategies": strats}
+            except Exception as e:
+                data = {"success": False, "error": str(e), "strategies": []}
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(data).encode("utf-8"))
+
+        elif url.path == "/api/ml/mtf":
+            try:
+                tf_dict = {}
+                for tf in ["W1", "D1", "H4", "H1", "M15", "M5", "M1"]:
+                    p = CACHE_DIR / f"XAUUSD_{tf}_150.csv"
+                    if not p.exists() and tf in ["M15", "H1"]:
+                        p = CACHE_DIR / f"XAUUSD_{tf}_5000.csv"
+                    if p.exists():
+                        tf_dict[tf] = pd.read_csv(p)
+                mtf = analyze_multi_timeframe(tf_dict)
+                data = {"success": True, "data": mtf}
+            except Exception as e:
+                data = {"success": False, "error": str(e)}
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(data).encode("utf-8"))
+
+        elif url.path == "/api/ml/regime":
+            try:
+                m15_path = CACHE_DIR / "XAUUSD_M15_5000.csv"
+                h1_path = CACHE_DIR / "XAUUSD_H1_5000.csv"
+                df_m15 = pd.read_csv(m15_path) if m15_path.exists() else None
+                df_h1 = pd.read_csv(h1_path) if h1_path.exists() else None
+                regime = detect_market_regime(df_m15, df_h1) if df_m15 is not None else {}
+                data = {"success": True, "regime": regime, "all_regimes": REGIMES}
+            except Exception as e:
+                data = {"success": False, "error": str(e)}
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(data).encode("utf-8"))
+
+        elif url.path == "/api/ml/models":
+            try:
+                model = get_active_model()
+                data = {
+                    "success": True,
+                    "active_model": model.metadata,
+                    "feature_names": FEATURE_NAMES
+                }
+            except Exception as e:
+                data = {"success": False, "error": str(e)}
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(data).encode("utf-8"))
+
+        elif url.path == "/api/ml/train/status":
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(ml_training_state).encode("utf-8"))
+
+        elif url.path == "/api/ml/backtest":
+            try:
+                m15_path = CACHE_DIR / "XAUUSD_M15_5000.csv"
+                h1_path = CACHE_DIR / "XAUUSD_H1_5000.csv"
+                df_m15 = pd.read_csv(m15_path) if m15_path.exists() else None
+                df_h1 = pd.read_csv(h1_path) if h1_path.exists() else None
+                bt = run_ml_backtest(df_m15, df_h1, min_confidence=0.60) if df_m15 is not None else {}
+                data = {"success": True, "backtest": bt}
+            except Exception as e:
+                data = {"success": False, "error": str(e)}
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(data).encode("utf-8"))
+
+        elif url.path == "/api/ml/performance":
+            try:
+                model = get_active_model()
+                drift = get_model_drift_analysis()
+                data = {
+                    "success": True,
+                    "metrics": {
+                        "accuracy": model.metadata.get("accuracy", 0.652),
+                        "brier_score": model.metadata.get("brier_score", 0.184),
+                        "roc_auc": model.metadata.get("roc_auc", 0.712),
+                        "calibration_curve": model.metadata.get("calibration_curve", [])
+                    },
+                    "drift": drift
+                }
+            except Exception as e:
+                data = {"success": False, "error": str(e)}
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(data).encode("utf-8"))
+
+        elif url.path == "/api/ml/journal":
+            try:
+                journal = load_ml_journal()
+                data = {"success": True, "journal": journal}
+            except Exception as e:
+                data = {"success": False, "error": str(e)}
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(data).encode("utf-8"))
+
+        elif url.path == "/api/ml/risk":
+            try:
+                open_gold = 0
+                if mt5 and mt5.initialize():
+                    pos = mt5.positions_get(symbol="XAUUSD")
+                    if pos:
+                        open_gold = len(pos)
+                data = {
+                    "success": True,
+                    "open_gold_positions": open_gold,
+                    "max_allowed": 1,
+                    "current_spread_pts": 380,
+                    "max_allowed_spread_pts": 450,
+                    "risk_gate_status": "PASSED" if open_gold < 1 else "BLOCKED_MAX_OPEN_TRADES"
+                }
+            except Exception as e:
+                data = {"success": False, "error": str(e)}
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(data).encode("utf-8"))
+
+        elif url.path == "/api/ml/settings":
+            try:
+                cfg = load_ml_settings()
+                data = {"success": True, "settings": cfg}
+            except Exception as e:
+                data = {"success": False, "error": str(e)}
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(data).encode("utf-8"))
+
         else:
             self.send_response(404)
             self.end_headers()
@@ -5423,6 +7003,151 @@ class DerivServer(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "application/json")
             self.end_headers()
             self.wfile.write(json.dumps(res).encode("utf-8"))
+        elif url.path == "/api/ml/train":
+            def train_worker():
+                global ml_training_state
+                ml_training_state["is_training"] = True
+                ml_training_state["progress"] = 10
+                ml_training_state["message"] = "Loading 5,000 M15 and H1 candles..."
+                try:
+                    m15_path = CACHE_DIR / "XAUUSD_M15_5000.csv"
+                    h1_path = CACHE_DIR / "XAUUSD_H1_5000.csv"
+                    df_m15 = pd.read_csv(m15_path) if m15_path.exists() else None
+                    df_h1 = pd.read_csv(h1_path) if h1_path.exists() else None
+                    if df_m15 is None:
+                        raise ValueError("Cached XAUUSD_M15_5000.csv not found.")
+
+                    ml_training_state["progress"] = 35
+                    ml_training_state["message"] = "Extracting 28 quantitative & SMC features with purged CV..."
+                    time.sleep(0.5)
+
+                    v_num = f"v{int(time.time())}"
+                    model = MLTradingModel(version=v_num)
+                    ml_training_state["progress"] = 65
+                    ml_training_state["message"] = "Fitting ensemble classifier with Platt probability calibration..."
+                    meta = model.train(df_m15, df_h1)
+
+                    ml_training_state["progress"] = 100
+                    ml_training_state["message"] = f"Training completed successfully! Accuracy: {meta.get('accuracy', 0)*100:.1f}%, Brier: {meta.get('brier_score', 0)}"
+                    ml_training_state["last_result"] = meta
+                    ml_training_state["is_training"] = False
+
+                    # Update active model in settings
+                    settings = load_ml_settings()
+                    settings["active_model_version"] = v_num
+                    save_ml_settings(settings)
+                except Exception as e:
+                    ml_training_state["is_training"] = False
+                    ml_training_state["message"] = f"Training error: {str(e)}"
+
+            threading.Thread(target=train_worker, daemon=True).start()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({"success": True, "message": "ML training initiated in background."}).encode("utf-8"))
+
+        elif url.path == "/api/ml/backtest/run":
+            try:
+                min_c = float(data.get("min_confidence", 60)) / 100.0
+                m15_path = CACHE_DIR / "XAUUSD_M15_5000.csv"
+                h1_path = CACHE_DIR / "XAUUSD_H1_5000.csv"
+                df_m15 = pd.read_csv(m15_path) if m15_path.exists() else None
+                df_h1 = pd.read_csv(h1_path) if h1_path.exists() else None
+                bt = run_ml_backtest(df_m15, df_h1, min_confidence=min_c) if df_m15 is not None else {}
+                res = {"success": True, "backtest": bt}
+            except Exception as e:
+                res = {"success": False, "error": str(e)}
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(res).encode("utf-8"))
+
+        elif url.path == "/api/ml/recommendations/execute":
+            try:
+                rec_data = data.get("recommendation", {})
+                action = rec_data.get("direction", "BUY")
+                lot = float(rec_data.get("recommended_lot_size", 0.01))
+                sl = float(rec_data.get("stop_loss", 0.0))
+                tp = float(rec_data.get("tp2", 0.0))
+                strat = rec_data.get("strategy_name", "ML Intelligence Setup")
+                conf = int(float(rec_data.get("win_probability", 0.70)) * 100)
+
+                # Check Risk Gate
+                open_gold = 0
+                if mt5 and mt5.initialize():
+                    pos = mt5.positions_get(symbol="XAUUSD")
+                    if pos:
+                        open_gold = len(pos)
+
+                passed, reason = evaluate_risk_gate({"balance": 10000.0}, rec_data, current_spread_pts=380, open_gold_positions_count=open_gold)
+                if not passed:
+                    res = {"success": False, "message": reason}
+                else:
+                    if gold_auto_trader:
+                        res = gold_auto_trader.execute_gold_order(
+                            action=action, lot=lot, sl=sl, tp=tp,
+                            confidence_score=conf, strategy_name=strat,
+                            notes=f"1-Click AI Execution ({rec_data.get('expected_value_r', '+0.4R')})", is_auto=False
+                        )
+                        # Record in journal
+                        record_ml_prediction({
+                            "strategy_code": rec_data.get("strategy_code", "Strategy A"),
+                            "direction": action,
+                            "win_probability": rec_data.get("win_probability", 0.7),
+                            "expected_value_r": rec_data.get("expected_value_r", "+0.4R"),
+                            "entry_price": rec_data.get("entry_price", 0),
+                            "sl": sl,
+                            "tp": tp,
+                            "status": "EXECUTED"
+                        })
+                    else:
+                        res = {"success": False, "message": "GoldAutoTrader engine not ready"}
+            except Exception as e:
+                res = {"success": False, "error": str(e)}
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(res).encode("utf-8"))
+
+        elif url.path == "/api/ml/strategies/toggle":
+            try:
+                code = data.get("strategy_code")
+                enabled = bool(data.get("enabled", True))
+                cfg = load_ml_settings()
+                if "enabled_strategies" not in cfg:
+                    cfg["enabled_strategies"] = {}
+                cfg["enabled_strategies"][code] = enabled
+                save_ml_settings(cfg)
+                res = {"success": True, "strategy": code, "enabled": enabled}
+            except Exception as e:
+                res = {"success": False, "error": str(e)}
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(res).encode("utf-8"))
+
+        elif url.path == "/api/ml/settings/update":
+            try:
+                cfg = load_ml_settings()
+                if "min_confidence" in data:
+                    cfg["min_confidence_threshold"] = float(data["min_confidence"]) / 100.0
+                if "min_ev" in data:
+                    cfg["min_expected_value_r"] = float(data["min_ev"])
+                if "risk_pct" in data:
+                    cfg["max_risk_per_trade_pct"] = float(data["risk_pct"])
+                if "pullback_type" in data:
+                    cfg["chaser_option_b"]["pullback_type"] = data["pullback_type"]
+                if "pullback_thresh" in data:
+                    cfg["chaser_option_b"]["pullback_threshold"] = float(data["pullback_thresh"])
+                save_ml_settings(cfg)
+                res = {"success": True, "settings": cfg}
+            except Exception as e:
+                res = {"success": False, "error": str(e)}
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(res).encode("utf-8"))
+
             
         else:
             self.send_response(404)

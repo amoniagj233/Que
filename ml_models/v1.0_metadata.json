@@ -1,0 +1,48 @@
+{
+  "version": "v1.0",
+  "algorithm": "LightGBM Classifier",
+  "trained_at": "2026-10-25T10:16:05.564368+00:00",
+  "train_samples": 3553,
+  "test_samples": 1185,
+  "accuracy": 0.6051,
+  "brier_score": 0.2402,
+  "roc_auc": 0.4892,
+  "feature_importances": {
+    "ema_ratio_50_200": 0.1484,
+    "ema_ratio_20_50": 0.1073,
+    "price_to_ema200": 0.0852,
+    "bb_width": 0.0791,
+    "volatility_percentile": 0.0739,
+    "stoch_k": 0.0549,
+    "fvg_distance": 0.0529,
+    "adx_14": 0.0524,
+    "atr_ratio": 0.0518,
+    "volume_ratio": 0.0513,
+    "macd_hist": 0.0488,
+    "price_to_ema20": 0.0436,
+    "asian_range_position": 0.04,
+    "bb_position": 0.0287,
+    "candle_body_ratio": 0.0257,
+    "lower_wick_ratio": 0.0226,
+    "upper_wick_ratio": 0.0149,
+    "regime_id": 0.0092,
+    "confluence_score": 0.0041,
+    "hurst_proxy": 0.0026,
+    "liquidity_sweep_high": 0.0015,
+    "liquidity_sweep_low": 0.0005,
+    "bos_bullish": 0.0005,
+    "rsi_14": 0.0,
+    "rsi_slope": 0.0,
+    "bos_bearish": 0.0,
+    "h1_trend_alignment": 0.0,
+    "h4_trend_alignment": 0.0
+  },
+  "calibration_curve": [
+    {
+      "bin": 4,
+      "predicted": 0.429,
+      "actual": 0.395,
+      "count": 1185
+    }
+  ]
+}
