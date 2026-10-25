@@ -626,7 +626,7 @@ class AutomatedSetupScanner:
       4. Dynamic setup lifecycle (ACTIVE, EXECUTED, INVALIDATED, MARKET CLOSED).
       5. Complete trade tracking journal with confidence and reasons.
     """
-    def __init__(self, interval_seconds=180):
+    def __init__(self, interval_seconds=60):
         self.interval = interval_seconds
         self.lock = threading.Lock()
         self.scan_id = 0
@@ -816,6 +816,7 @@ class AutomatedSetupScanner:
 
             valid_setups = []
             filtered_reasons = {}
+            auto_trade_executed_this_pass = False
 
             # Check journal cooldowns: do not duplicate active journal setups
             recent_executed = {
@@ -964,6 +965,11 @@ class AutomatedSetupScanner:
 
                 # ULTRA-HIGH CONFIDENCE AUTOMATIC EXECUTION (Rule 3: 90-100% Threshold Only - Exactly 1 Trade Per Symbol)
                 if is_open and confidence_score >= 90 and self.auto_trade_enabled:
+                    # Policy: Take trade automatically one symbol at a time per scan pass
+                    if auto_trade_executed_this_pass:
+                        setup_obj["notes"] += " [Queued: Taking 1 symbol at a time policy]"
+                        valid_setups.append(setup_obj)
+                        continue
                     # Risk gate: Disallow automatic execution on Priority 5 (AVOID) symbols with severe historical losses
                     if setup_obj.get("symbol_perf", {}).get("priority_num") == 5:
                         filtered_reasons[sym] = f"Auto-Execution blocked: {sym} has historical Priority 5 (AVOID) status (Severe Loss Skew/Drawdown). Manual confirmation required."
@@ -993,6 +999,9 @@ class AutomatedSetupScanner:
                         if order_res.get("success"):
                             setup_obj["status"] = "EXECUTED"
                             setup_obj["group_id"] = order_res.get("group_id")
+                            auto_trade_executed_this_pass = True
+                            valid_setups.append(setup_obj)
+                            print(f"[AutoTrader] Successfully opened 1 trade on {sym} ({bias}). Adhering to 1 symbol at a time.")
                             continue
                         else:
                             filtered_reasons[sym] = f"Auto-Execution Failed: {order_res.get('message')}"
@@ -1012,22 +1021,22 @@ class AutomatedSetupScanner:
                 self._update_status_message()
 
     def _run_loop(self):
-        """Initial startup scan, then re-scans ONLY if auto_rescan_enabled is True or user clicks Re-Scan."""
+        """Initial startup scan, then re-scans automatically when auto_trade_enabled or auto_rescan_enabled is True."""
         time.sleep(1)
         self.run_scan_now()
         
         while self.running:
-            if not self.auto_rescan_enabled:
+            if not self.auto_trade_enabled and not self.auto_rescan_enabled:
                 time.sleep(1.0)
                 continue
             for _ in range(self.interval):
-                if not self.running or not self.auto_rescan_enabled:
+                if not self.running or (not self.auto_trade_enabled and not self.auto_rescan_enabled):
                     break
                 time.sleep(1)
                 with self.lock:
                     if self.next_scan_seconds > 0:
                         self.next_scan_seconds -= 1
-            if self.running and self.auto_rescan_enabled:
+            if self.running and (self.auto_trade_enabled or self.auto_rescan_enabled):
                 self.run_scan_now()
 
     def get_state(self):
@@ -3748,7 +3757,7 @@ HTML_PAGE = """<!DOCTYPE html>
       if (enabled) {
         btn.className = 'px-2.5 py-1 rounded text-[11px] font-bold transition flex items-center gap-1.5 bg-emerald-500/20 text-emeraldaccent border border-emerald-500/50 shadow-sm shadow-emerald-500/20';
         dot.className = 'w-2 h-2 rounded-full bg-emeraldaccent animate-pulse';
-        txt.innerText = 'ENABLED (ACTIVE)';
+        txt.innerText = 'AUTO-TRADING ACTIVE (1 Symbol at a Time)';
       } else {
         btn.className = 'px-2.5 py-1 rounded text-[11px] font-bold transition flex items-center gap-1.5 bg-slate-800 text-slate-400 border border-slate-700';
         dot.className = 'w-2 h-2 rounded-full bg-slate-500';
