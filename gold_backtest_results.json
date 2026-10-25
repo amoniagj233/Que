@@ -1,0 +1,3734 @@
+{
+  "timestamp": "2026-10-25T09:54:02.312401+00:00",
+  "data_info": {
+    "symbol": "XAUUSD",
+    "timeframe": "M15 (Primary) with H1 Confluence",
+    "total_candles": 5000,
+    "start_date": "2026-08-10 13:30:00+00:00",
+    "end_date": "2026-10-23 23:45:00+00:00",
+    "spread_usd": 3.8,
+    "slippage_usd": 0.2,
+    "lot_size": 0.05,
+    "position_oz": 5.0,
+    "initial_balance": 10000.0
+  },
+  "strategies": {
+    "SMC_ORDER_BLOCKS": {
+      "strategy_id": "SMC_ORDER_BLOCKS",
+      "strategy_name": "SMC Order Block & FVG Mitigation",
+      "description": "Institutional order block retest following displacement and market structure break.",
+      "metrics": {
+        "total_trades": 125,
+        "winning_trades": 42,
+        "losing_trades": 83,
+        "win_rate_pct": 33.6,
+        "net_profit": -3133.25,
+        "net_profit_pct": -31.3,
+        "gross_profit": 5034.9,
+        "gross_loss": 8168.15,
+        "profit_factor": 0.62,
+        "max_drawdown": 3752.5,
+        "max_drawdown_pct": 35.3,
+        "avg_win": 119.88,
+        "avg_loss": 98.41,
+        "avg_rr": 1.22,
+        "expectancy": -25.07,
+        "sharpe_ratio": -2.46,
+        "recovery_factor": -0.83,
+        "max_consecutive_wins": 5,
+        "max_consecutive_losses": 11
+      },
+      "equity_curve": [
+        {
+          "trade": 0,
+          "time": "Start",
+          "balance": 10000.0,
+          "drawdown": 0.0
+        },
+        {
+          "trade": 1,
+          "time": "2026-08-11 08:00",
+          "balance": 9900.85,
+          "drawdown": 99.15
+        },
+        {
+          "trade": 2,
+          "time": "2026-08-12 04:15",
+          "balance": 10024.35,
+          "drawdown": 0.0
+        },
+        {
+          "trade": 3,
+          "time": "2026-08-12 15:30",
+          "balance": 10229.7,
+          "drawdown": 0.0
+        },
+        {
+          "trade": 4,
+          "time": "2026-08-13 03:30",
+          "balance": 10326.75,
+          "drawdown": 0.0
+        },
+        {
+          "trade": 5,
+          "time": "2026-08-13 14:30",
+          "balance": 10481.4,
+          "drawdown": 0.0
+        },
+        {
+          "trade": 6,
+          "time": "2026-08-14 02:30",
+          "balance": 10619.25,
+          "drawdown": 0.0
+        },
+        {
+          "trade": 7,
+          "time": "2026-08-14 12:30",
+          "balance": 10455.9,
+          "drawdown": 163.35
+        },
+        {
+          "trade": 8,
+          "time": "2026-08-14 16:30",
+          "balance": 10363.45,
+          "drawdown": 255.8
+        },
+        {
+          "trade": 9,
+          "time": "2026-08-17 03:15",
+          "balance": 10283.6,
+          "drawdown": 335.65
+        },
+        {
+          "trade": 10,
+          "time": "2026-08-17 15:30",
+          "balance": 10178.05,
+          "drawdown": 441.2
+        },
+        {
+          "trade": 11,
+          "time": "2026-08-18 04:30",
+          "balance": 10074.0,
+          "drawdown": 545.25
+        },
+        {
+          "trade": 12,
+          "time": "2026-08-18 16:30",
+          "balance": 9988.85,
+          "drawdown": 630.4
+        },
+        {
+          "trade": 13,
+          "time": "2026-08-18 17:45",
+          "balance": 9847.05,
+          "drawdown": 772.2
+        },
+        {
+          "trade": 14,
+          "time": "2026-08-19 15:30",
+          "balance": 10103.55,
+          "drawdown": 515.7
+        },
+        {
+          "trade": 15,
+          "time": "2026-08-19 22:15",
+          "balance": 9997.85,
+          "drawdown": 621.4
+        },
+        {
+          "trade": 16,
+          "time": "2026-08-20 04:00",
+          "balance": 9853.05,
+          "drawdown": 766.2
+        },
+        {
+          "trade": 17,
+          "time": "2026-08-20 14:00",
+          "balance": 9790.2,
+          "drawdown": 829.05
+        },
+        {
+          "trade": 18,
+          "time": "2026-08-20 14:45",
+          "balance": 9715.25,
+          "drawdown": 904.0
+        },
+        {
+          "trade": 19,
+          "time": "2026-08-20 18:00",
+          "balance": 9918.85,
+          "drawdown": 700.4
+        },
+        {
+          "trade": 20,
+          "time": "2026-08-21 04:30",
+          "balance": 9824.2,
+          "drawdown": 795.05
+        },
+        {
+          "trade": 21,
+          "time": "2026-08-21 05:30",
+          "balance": 9744.9,
+          "drawdown": 874.35
+        },
+        {
+          "trade": 22,
+          "time": "2026-08-21 18:45",
+          "balance": 9576.0,
+          "drawdown": 1043.25
+        },
+        {
+          "trade": 23,
+          "time": "2026-08-24 05:15",
+          "balance": 9777.15,
+          "drawdown": 842.1
+        },
+        {
+          "trade": 24,
+          "time": "2026-08-24 14:30",
+          "balance": 9636.05,
+          "drawdown": 983.2
+        },
+        {
+          "trade": 25,
+          "time": "2026-08-25 07:30",
+          "balance": 9549.6,
+          "drawdown": 1069.65
+        },
+        {
+          "trade": 26,
+          "time": "2026-08-25 19:00",
+          "balance": 9554.25,
+          "drawdown": 1065.0
+        },
+        {
+          "trade": 27,
+          "time": "2026-08-25 22:00",
+          "balance": 9433.05,
+          "drawdown": 1186.2
+        },
+        {
+          "trade": 28,
+          "time": "2026-08-27 04:30",
+          "balance": 9315.95,
+          "drawdown": 1303.3
+        },
+        {
+          "trade": 29,
+          "time": "2026-08-27 12:30",
+          "balance": 9157.05,
+          "drawdown": 1462.2
+        },
+        {
+          "trade": 30,
+          "time": "2026-08-27 18:45",
+          "balance": 9017.15,
+          "drawdown": 1602.1
+        },
+        {
+          "trade": 31,
+          "time": "2026-08-28 09:30",
+          "balance": 9104.25,
+          "drawdown": 1515.0
+        },
+        {
+          "trade": 32,
+          "time": "2026-08-28 09:45",
+          "balance": 8975.1,
+          "drawdown": 1644.15
+        },
+        {
+          "trade": 33,
+          "time": "2026-08-28 17:00",
+          "balance": 8870.65,
+          "drawdown": 1748.6
+        },
+        {
+          "trade": 34,
+          "time": "2026-08-31 02:45",
+          "balance": 8763.5,
+          "drawdown": 1855.75
+        },
+        {
+          "trade": 35,
+          "time": "2026-08-31 05:00",
+          "balance": 8606.9,
+          "drawdown": 2012.35
+        },
+        {
+          "trade": 36,
+          "time": "2026-08-31 19:00",
+          "balance": 8600.0,
+          "drawdown": 2019.25
+        },
+        {
+          "trade": 37,
+          "time": "2026-09-01 06:30",
+          "balance": 8594.7,
+          "drawdown": 2024.55
+        },
+        {
+          "trade": 38,
+          "time": "2026-09-01 10:30",
+          "balance": 8486.6,
+          "drawdown": 2132.65
+        },
+        {
+          "trade": 39,
+          "time": "2026-09-02 04:45",
+          "balance": 8646.0,
+          "drawdown": 1973.25
+        },
+        {
+          "trade": 40,
+          "time": "2026-09-02 15:15",
+          "balance": 8531.0,
+          "drawdown": 2088.25
+        },
+        {
+          "trade": 41,
+          "time": "2026-09-03 15:00",
+          "balance": 8675.75,
+          "drawdown": 1943.5
+        },
+        {
+          "trade": 42,
+          "time": "2026-09-04 10:45",
+          "balance": 8579.4,
+          "drawdown": 2039.85
+        },
+        {
+          "trade": 43,
+          "time": "2026-09-04 12:15",
+          "balance": 8476.05,
+          "drawdown": 2143.2
+        },
+        {
+          "trade": 44,
+          "time": "2026-09-04 15:30",
+          "balance": 8745.8,
+          "drawdown": 1873.45
+        },
+        {
+          "trade": 45,
+          "time": "2026-09-07 03:30",
+          "balance": 8679.35,
+          "drawdown": 1939.9
+        },
+        {
+          "trade": 46,
+          "time": "2026-09-07 14:30",
+          "balance": 8771.5,
+          "drawdown": 1847.75
+        },
+        {
+          "trade": 47,
+          "time": "2026-09-07 17:45",
+          "balance": 8859.6,
+          "drawdown": 1759.65
+        },
+        {
+          "trade": 48,
+          "time": "2026-09-08 21:45",
+          "balance": 8751.25,
+          "drawdown": 1868.0
+        },
+        {
+          "trade": 49,
+          "time": "2026-09-09 04:00",
+          "balance": 8641.15,
+          "drawdown": 1978.1
+        },
+        {
+          "trade": 50,
+          "time": "2026-09-09 08:30",
+          "balance": 8529.4,
+          "drawdown": 2089.85
+        },
+        {
+          "trade": 51,
+          "time": "2026-09-09 18:15",
+          "balance": 8406.45,
+          "drawdown": 2212.8
+        },
+        {
+          "trade": 52,
+          "time": "2026-09-10 06:30",
+          "balance": 8384.3,
+          "drawdown": 2234.95
+        },
+        {
+          "trade": 53,
+          "time": "2026-09-10 12:30",
+          "balance": 8269.0,
+          "drawdown": 2350.25
+        },
+        {
+          "trade": 54,
+          "time": "2026-09-10 13:30",
+          "balance": 8201.4,
+          "drawdown": 2417.85
+        },
+        {
+          "trade": 55,
+          "time": "2026-09-11 07:00",
+          "balance": 8386.2,
+          "drawdown": 2233.05
+        },
+        {
+          "trade": 56,
+          "time": "2026-09-14 10:00",
+          "balance": 8295.1,
+          "drawdown": 2324.15
+        },
+        {
+          "trade": 57,
+          "time": "2026-09-15 21:00",
+          "balance": 8180.8,
+          "drawdown": 2438.45
+        },
+        {
+          "trade": 58,
+          "time": "2026-09-16 06:15",
+          "balance": 8426.8,
+          "drawdown": 2192.45
+        },
+        {
+          "trade": 59,
+          "time": "2026-09-17 14:00",
+          "balance": 8264.7,
+          "drawdown": 2354.55
+        },
+        {
+          "trade": 60,
+          "time": "2026-09-18 04:00",
+          "balance": 8313.95,
+          "drawdown": 2305.3
+        },
+        {
+          "trade": 61,
+          "time": "2026-09-18 07:30",
+          "balance": 8207.7,
+          "drawdown": 2411.55
+        },
+        {
+          "trade": 62,
+          "time": "2026-09-18 15:15",
+          "balance": 8077.95,
+          "drawdown": 2541.3
+        },
+        {
+          "trade": 63,
+          "time": "2026-09-18 16:30",
+          "balance": 7975.0,
+          "drawdown": 2644.25
+        },
+        {
+          "trade": 64,
+          "time": "2026-09-18 20:15",
+          "balance": 8131.5,
+          "drawdown": 2487.75
+        },
+        {
+          "trade": 65,
+          "time": "2026-09-21 08:30",
+          "balance": 8244.65,
+          "drawdown": 2374.6
+        },
+        {
+          "trade": 66,
+          "time": "2026-09-22 02:30",
+          "balance": 8195.2,
+          "drawdown": 2424.05
+        },
+        {
+          "trade": 67,
+          "time": "2026-09-22 21:00",
+          "balance": 8041.0,
+          "drawdown": 2578.25
+        },
+        {
+          "trade": 68,
+          "time": "2026-09-23 10:30",
+          "balance": 8219.75,
+          "drawdown": 2399.5
+        },
+        {
+          "trade": 69,
+          "time": "2026-09-24 02:30",
+          "balance": 8292.1,
+          "drawdown": 2327.15
+        },
+        {
+          "trade": 70,
+          "time": "2026-09-24 19:00",
+          "balance": 8398.0,
+          "drawdown": 2221.25
+        },
+        {
+          "trade": 71,
+          "time": "2026-09-25 06:00",
+          "balance": 8491.65,
+          "drawdown": 2127.6
+        },
+        {
+          "trade": 72,
+          "time": "2026-09-25 08:00",
+          "balance": 8407.05,
+          "drawdown": 2212.2
+        },
+        {
+          "trade": 73,
+          "time": "2026-09-25 14:00",
+          "balance": 8576.8,
+          "drawdown": 2042.45
+        },
+        {
+          "trade": 74,
+          "time": "2026-09-28 03:30",
+          "balance": 8436.95,
+          "drawdown": 2182.3
+        },
+        {
+          "trade": 75,
+          "time": "2026-09-28 15:15",
+          "balance": 8316.4,
+          "drawdown": 2302.85
+        },
+        {
+          "trade": 76,
+          "time": "2026-09-29 02:30",
+          "balance": 8388.95,
+          "drawdown": 2230.3
+        },
+        {
+          "trade": 77,
+          "time": "2026-09-29 12:30",
+          "balance": 8465.6,
+          "drawdown": 2153.65
+        },
+        {
+          "trade": 78,
+          "time": "2026-09-29 17:00",
+          "balance": 8367.05,
+          "drawdown": 2252.2
+        },
+        {
+          "trade": 79,
+          "time": "2026-09-30 05:00",
+          "balance": 8419.8,
+          "drawdown": 2199.45
+        },
+        {
+          "trade": 80,
+          "time": "2026-09-30 17:15",
+          "balance": 8334.15,
+          "drawdown": 2285.1
+        },
+        {
+          "trade": 81,
+          "time": "2026-10-01 20:30",
+          "balance": 8206.6,
+          "drawdown": 2412.65
+        },
+        {
+          "trade": 82,
+          "time": "2026-10-02 06:00",
+          "balance": 8123.1,
+          "drawdown": 2496.15
+        },
+        {
+          "trade": 83,
+          "time": "2026-10-02 09:00",
+          "balance": 7987.1,
+          "drawdown": 2632.15
+        },
+        {
+          "trade": 84,
+          "time": "2026-10-02 10:45",
+          "balance": 7910.3,
+          "drawdown": 2708.95
+        },
+        {
+          "trade": 85,
+          "time": "2026-10-02 15:30",
+          "balance": 7832.1,
+          "drawdown": 2787.15
+        },
+        {
+          "trade": 86,
+          "time": "2026-10-05 05:45",
+          "balance": 7736.2,
+          "drawdown": 2883.05
+        },
+        {
+          "trade": 87,
+          "time": "2026-10-05 07:15",
+          "balance": 7656.55,
+          "drawdown": 2962.7
+        },
+        {
+          "trade": 88,
+          "time": "2026-10-05 08:45",
+          "balance": 7589.55,
+          "drawdown": 3029.7
+        },
+        {
+          "trade": 89,
+          "time": "2026-10-05 18:15",
+          "balance": 7460.7,
+          "drawdown": 3158.55
+        },
+        {
+          "trade": 90,
+          "time": "2026-10-06 05:30",
+          "balance": 7349.95,
+          "drawdown": 3269.3
+        },
+        {
+          "trade": 91,
+          "time": "2026-10-06 14:15",
+          "balance": 7464.95,
+          "drawdown": 3154.3
+        },
+        {
+          "trade": 92,
+          "time": "2026-10-06 18:30",
+          "balance": 7371.15,
+          "drawdown": 3248.1
+        },
+        {
+          "trade": 93,
+          "time": "2026-10-06 22:00",
+          "balance": 7275.3,
+          "drawdown": 3343.95
+        },
+        {
+          "trade": 94,
+          "time": "2026-10-07 07:30",
+          "balance": 7410.4,
+          "drawdown": 3208.85
+        },
+        {
+          "trade": 95,
+          "time": "2026-10-07 13:30",
+          "balance": 7503.55,
+          "drawdown": 3115.7
+        },
+        {
+          "trade": 96,
+          "time": "2026-10-08 16:00",
+          "balance": 7496.4,
+          "drawdown": 3122.85
+        },
+        {
+          "trade": 97,
+          "time": "2026-10-09 03:00",
+          "balance": 7575.0,
+          "drawdown": 3044.25
+        },
+        {
+          "trade": 98,
+          "time": "2026-10-09 19:00",
+          "balance": 7551.25,
+          "drawdown": 3068.0
+        },
+        {
+          "trade": 99,
+          "time": "2026-10-12 08:30",
+          "balance": 7411.6,
+          "drawdown": 3207.65
+        },
+        {
+          "trade": 100,
+          "time": "2026-10-12 18:30",
+          "balance": 7484.2,
+          "drawdown": 3135.05
+        },
+        {
+          "trade": 101,
+          "time": "2026-10-13 05:30",
+          "balance": 7447.9,
+          "drawdown": 3171.35
+        },
+        {
+          "trade": 102,
+          "time": "2026-10-13 15:30",
+          "balance": 7489.2,
+          "drawdown": 3130.05
+        },
+        {
+          "trade": 103,
+          "time": "2026-10-13 17:00",
+          "balance": 7407.6,
+          "drawdown": 3211.65
+        },
+        {
+          "trade": 104,
+          "time": "2026-10-14 04:00",
+          "balance": 7473.9,
+          "drawdown": 3145.35
+        },
+        {
+          "trade": 105,
+          "time": "2026-10-14 11:45",
+          "balance": 7404.0,
+          "drawdown": 3215.25
+        },
+        {
+          "trade": 106,
+          "time": "2026-10-14 22:00",
+          "balance": 7612.0,
+          "drawdown": 3007.25
+        },
+        {
+          "trade": 107,
+          "time": "2026-10-15 22:30",
+          "balance": 7497.4,
+          "drawdown": 3121.85
+        },
+        {
+          "trade": 108,
+          "time": "2026-10-16 03:00",
+          "balance": 7392.95,
+          "drawdown": 3226.3
+        },
+        {
+          "trade": 109,
+          "time": "2026-10-16 05:30",
+          "balance": 7293.25,
+          "drawdown": 3326.0
+        },
+        {
+          "trade": 110,
+          "time": "2026-10-16 10:15",
+          "balance": 7400.35,
+          "drawdown": 3218.9
+        },
+        {
+          "trade": 111,
+          "time": "2026-10-16 17:15",
+          "balance": 7285.7,
+          "drawdown": 3333.55
+        },
+        {
+          "trade": 112,
+          "time": "2026-10-19 04:30",
+          "balance": 7348.15,
+          "drawdown": 3271.1
+        },
+        {
+          "trade": 113,
+          "time": "2026-10-19 14:30",
+          "balance": 7315.0,
+          "drawdown": 3304.25
+        },
+        {
+          "trade": 114,
+          "time": "2026-10-20 01:30",
+          "balance": 7457.1,
+          "drawdown": 3162.15
+        },
+        {
+          "trade": 115,
+          "time": "2026-10-20 11:30",
+          "balance": 7506.85,
+          "drawdown": 3112.4
+        },
+        {
+          "trade": 116,
+          "time": "2026-10-20 21:30",
+          "balance": 7477.2,
+          "drawdown": 3142.05
+        },
+        {
+          "trade": 117,
+          "time": "2026-10-21 08:30",
+          "balance": 7472.25,
+          "drawdown": 3147.0
+        },
+        {
+          "trade": 118,
+          "time": "2026-10-21 18:30",
+          "balance": 7517.85,
+          "drawdown": 3101.4
+        },
+        {
+          "trade": 119,
+          "time": "2026-10-21 21:45",
+          "balance": 7426.0,
+          "drawdown": 3193.25
+        },
+        {
+          "trade": 120,
+          "time": "2026-10-22 03:15",
+          "balance": 7323.75,
+          "drawdown": 3295.5
+        },
+        {
+          "trade": 121,
+          "time": "2026-10-22 14:15",
+          "balance": 7160.3,
+          "drawdown": 3458.95
+        },
+        {
+          "trade": 122,
+          "time": "2026-10-22 16:30",
+          "balance": 7038.05,
+          "drawdown": 3581.2
+        },
+        {
+          "trade": 123,
+          "time": "2026-10-22 19:15",
+          "balance": 6936.95,
+          "drawdown": 3682.3
+        },
+        {
+          "trade": 124,
+          "time": "2026-10-23 10:00",
+          "balance": 6957.2,
+          "drawdown": 3662.05
+        },
+        {
+          "trade": 125,
+          "time": "2026-10-23 17:15",
+          "balance": 6866.75,
+          "drawdown": 3752.5
+        }
+      ],
+      "recent_trades": [
+        {
+          "direction": "SELL",
+          "entry": 4143.55,
+          "sl": 4172.36,
+          "tp": 4071.53,
+          "entry_time": "2026-10-14 12:00:00+00:00",
+          "entry_bar": 4308,
+          "strategy": "SMC_ORDER_BLOCKS",
+          "exit_time": "2026-10-14 22:00:00+00:00",
+          "exit_price": 4097.95,
+          "pnl": 208.0,
+          "result": "WIN"
+        },
+        {
+          "direction": "SELL",
+          "entry": 4148.39,
+          "sl": 4167.31,
+          "tp": 4101.09,
+          "entry_time": "2026-10-15 17:00:00+00:00",
+          "entry_bar": 4420,
+          "strategy": "SMC_ORDER_BLOCKS",
+          "exit_time": "2026-10-15 22:30:00+00:00",
+          "exit_price": 4167.31,
+          "pnl": -114.6,
+          "result": "LOSS"
+        },
+        {
+          "direction": "BUY",
+          "entry": 4169.92,
+          "sl": 4153.03,
+          "tp": 4212.15,
+          "entry_time": "2026-10-15 23:30:00+00:00",
+          "entry_bar": 4446,
+          "strategy": "SMC_ORDER_BLOCKS",
+          "exit_time": "2026-10-16 03:00:00+00:00",
+          "exit_price": 4153.03,
+          "pnl": -104.45,
+          "result": "LOSS"
+        },
+        {
+          "direction": "SELL",
+          "entry": 4149.77,
+          "sl": 4165.71,
+          "tp": 4109.92,
+          "entry_time": "2026-10-16 04:30:00+00:00",
+          "entry_bar": 4462,
+          "strategy": "SMC_ORDER_BLOCKS",
+          "exit_time": "2026-10-16 05:30:00+00:00",
+          "exit_price": 4165.71,
+          "pnl": -99.7,
+          "result": "LOSS"
+        },
+        {
+          "direction": "BUY",
+          "entry": 4162.66,
+          "sl": 4152.49,
+          "tp": 4188.08,
+          "entry_time": "2026-10-16 05:30:00+00:00",
+          "entry_bar": 4466,
+          "strategy": "SMC_ORDER_BLOCKS",
+          "exit_time": "2026-10-16 10:15:00+00:00",
+          "exit_price": 4188.08,
+          "pnl": 107.1,
+          "result": "WIN"
+        },
+        {
+          "direction": "SELL",
+          "entry": 4179.95,
+          "sl": 4198.88,
+          "tp": 4132.62,
+          "entry_time": "2026-10-16 12:30:00+00:00",
+          "entry_bar": 4494,
+          "strategy": "SMC_ORDER_BLOCKS",
+          "exit_time": "2026-10-16 17:15:00+00:00",
+          "exit_price": 4198.88,
+          "pnl": -114.65,
+          "result": "LOSS"
+        },
+        {
+          "direction": "SELL",
+          "entry": 4188.37,
+          "sl": 4203.25,
+          "tp": 4151.17,
+          "entry_time": "2026-10-16 17:30:00+00:00",
+          "entry_bar": 4514,
+          "strategy": "SMC_ORDER_BLOCKS",
+          "exit_time": "2026-10-19 04:30:00+00:00",
+          "exit_price": 4171.88,
+          "pnl": 62.45,
+          "result": "WIN"
+        },
+        {
+          "direction": "BUY",
+          "entry": 4171.88,
+          "sl": 4153.85,
+          "tp": 4216.96,
+          "entry_time": "2026-10-19 04:30:00+00:00",
+          "entry_bar": 4554,
+          "strategy": "SMC_ORDER_BLOCKS",
+          "exit_time": "2026-10-19 14:30:00+00:00",
+          "exit_price": 4169.25,
+          "pnl": -33.15,
+          "result": "LOSS"
+        },
+        {
+          "direction": "SELL",
+          "entry": 4169.25,
+          "sl": 4190.33,
+          "tp": 4116.55,
+          "entry_time": "2026-10-19 14:30:00+00:00",
+          "entry_bar": 4594,
+          "strategy": "SMC_ORDER_BLOCKS",
+          "exit_time": "2026-10-20 01:30:00+00:00",
+          "exit_price": 4136.83,
+          "pnl": 142.1,
+          "result": "WIN"
+        },
+        {
+          "direction": "SELL",
+          "entry": 4136.83,
+          "sl": 4158.47,
+          "tp": 4082.73,
+          "entry_time": "2026-10-20 01:30:00+00:00",
+          "entry_bar": 4634,
+          "strategy": "SMC_ORDER_BLOCKS",
+          "exit_time": "2026-10-20 11:30:00+00:00",
+          "exit_price": 4122.88,
+          "pnl": 49.75,
+          "result": "WIN"
+        },
+        {
+          "direction": "BUY",
+          "entry": 4122.88,
+          "sl": 4105.85,
+          "tp": 4165.46,
+          "entry_time": "2026-10-20 11:30:00+00:00",
+          "entry_bar": 4674,
+          "strategy": "SMC_ORDER_BLOCKS",
+          "exit_time": "2026-10-20 21:30:00+00:00",
+          "exit_price": 4120.95,
+          "pnl": -29.65,
+          "result": "LOSS"
+        },
+        {
+          "direction": "SELL",
+          "entry": 4120.95,
+          "sl": 4132.61,
+          "tp": 4091.8,
+          "entry_time": "2026-10-20 21:30:00+00:00",
+          "entry_bar": 4714,
+          "strategy": "SMC_ORDER_BLOCKS",
+          "exit_time": "2026-10-21 08:30:00+00:00",
+          "exit_price": 4117.94,
+          "pnl": -4.95,
+          "result": "LOSS"
+        },
+        {
+          "direction": "BUY",
+          "entry": 4117.94,
+          "sl": 4096.53,
+          "tp": 4171.46,
+          "entry_time": "2026-10-21 08:30:00+00:00",
+          "entry_bar": 4754,
+          "strategy": "SMC_ORDER_BLOCKS",
+          "exit_time": "2026-10-21 18:30:00+00:00",
+          "exit_price": 4131.06,
+          "pnl": 45.6,
+          "result": "WIN"
+        },
+        {
+          "direction": "BUY",
+          "entry": 4131.06,
+          "sl": 4116.69,
+          "tp": 4166.99,
+          "entry_time": "2026-10-21 18:30:00+00:00",
+          "entry_bar": 4794,
+          "strategy": "SMC_ORDER_BLOCKS",
+          "exit_time": "2026-10-21 21:45:00+00:00",
+          "exit_price": 4116.69,
+          "pnl": -91.85,
+          "result": "LOSS"
+        },
+        {
+          "direction": "BUY",
+          "entry": 4133.24,
+          "sl": 4116.79,
+          "tp": 4174.36,
+          "entry_time": "2026-10-21 22:30:00+00:00",
+          "entry_bar": 4810,
+          "strategy": "SMC_ORDER_BLOCKS",
+          "exit_time": "2026-10-22 03:15:00+00:00",
+          "exit_price": 4116.79,
+          "pnl": -102.25,
+          "result": "LOSS"
+        },
+        {
+          "direction": "BUY",
+          "entry": 4089.55,
+          "sl": 4060.86,
+          "tp": 4161.28,
+          "entry_time": "2026-10-22 09:30:00+00:00",
+          "entry_bar": 4850,
+          "strategy": "SMC_ORDER_BLOCKS",
+          "exit_time": "2026-10-22 14:15:00+00:00",
+          "exit_price": 4060.86,
+          "pnl": -163.45,
+          "result": "LOSS"
+        },
+        {
+          "direction": "BUY",
+          "entry": 4080.68,
+          "sl": 4060.23,
+          "tp": 4131.8,
+          "entry_time": "2026-10-22 15:30:00+00:00",
+          "entry_bar": 4874,
+          "strategy": "SMC_ORDER_BLOCKS",
+          "exit_time": "2026-10-22 16:30:00+00:00",
+          "exit_price": 4060.23,
+          "pnl": -122.25,
+          "result": "LOSS"
+        },
+        {
+          "direction": "BUY",
+          "entry": 4059.16,
+          "sl": 4042.94,
+          "tp": 4099.71,
+          "entry_time": "2026-10-22 16:30:00+00:00",
+          "entry_bar": 4878,
+          "strategy": "SMC_ORDER_BLOCKS",
+          "exit_time": "2026-10-22 19:15:00+00:00",
+          "exit_price": 4042.94,
+          "pnl": -101.1,
+          "result": "LOSS"
+        },
+        {
+          "direction": "SELL",
+          "entry": 4023.02,
+          "sl": 4038.43,
+          "tp": 3984.5,
+          "entry_time": "2026-10-22 23:00:00+00:00",
+          "entry_bar": 4904,
+          "strategy": "SMC_ORDER_BLOCKS",
+          "exit_time": "2026-10-23 10:00:00+00:00",
+          "exit_price": 4014.97,
+          "pnl": 20.25,
+          "result": "WIN"
+        },
+        {
+          "direction": "BUY",
+          "entry": 4014.97,
+          "sl": 4000.88,
+          "tp": 4050.19,
+          "entry_time": "2026-10-23 10:00:00+00:00",
+          "entry_bar": 4944,
+          "strategy": "SMC_ORDER_BLOCKS",
+          "exit_time": "2026-10-23 17:15:00+00:00",
+          "exit_price": 4000.88,
+          "pnl": -90.45,
+          "result": "LOSS"
+        }
+      ]
+    },
+    "ASIAN_LIQUIDITY_SWEEPS": {
+      "strategy_id": "ASIAN_LIQUIDITY_SWEEPS",
+      "strategy_name": "Asian Session Liquidity Sweep (London/NY)",
+      "description": "Exploits liquidity runs targeting Asian high/low stops during the European and US cash opens.",
+      "metrics": {
+        "total_trades": 47,
+        "winning_trades": 8,
+        "losing_trades": 39,
+        "win_rate_pct": 17.0,
+        "net_profit": -2281.95,
+        "net_profit_pct": -22.8,
+        "gross_profit": 1145.2,
+        "gross_loss": 3427.15,
+        "profit_factor": 0.33,
+        "max_drawdown": 2285.7,
+        "max_drawdown_pct": 22.9,
+        "avg_win": 143.15,
+        "avg_loss": 87.88,
+        "avg_rr": 1.63,
+        "expectancy": -48.55,
+        "sharpe_ratio": -3.49,
+        "recovery_factor": -1.0,
+        "max_consecutive_wins": 2,
+        "max_consecutive_losses": 14
+      },
+      "equity_curve": [
+        {
+          "trade": 0,
+          "time": "Start",
+          "balance": 10000.0,
+          "drawdown": 0.0
+        },
+        {
+          "trade": 1,
+          "time": "2026-08-11 18:30",
+          "balance": 9898.5,
+          "drawdown": 101.5
+        },
+        {
+          "trade": 2,
+          "time": "2026-08-12 15:30",
+          "balance": 9796.8,
+          "drawdown": 203.2
+        },
+        {
+          "trade": 3,
+          "time": "2026-08-13 08:30",
+          "balance": 9690.15,
+          "drawdown": 309.85
+        },
+        {
+          "trade": 4,
+          "time": "2026-08-13 16:15",
+          "balance": 9590.4,
+          "drawdown": 409.6
+        },
+        {
+          "trade": 5,
+          "time": "2026-08-18 16:30",
+          "balance": 9507.95,
+          "drawdown": 492.05
+        },
+        {
+          "trade": 6,
+          "time": "2026-08-20 14:30",
+          "balance": 9397.8,
+          "drawdown": 602.2
+        },
+        {
+          "trade": 7,
+          "time": "2026-08-21 01:30",
+          "balance": 9556.8,
+          "drawdown": 443.2
+        },
+        {
+          "trade": 8,
+          "time": "2026-08-25 22:15",
+          "balance": 9771.8,
+          "drawdown": 228.2
+        },
+        {
+          "trade": 9,
+          "time": "2026-08-26 12:15",
+          "balance": 9691.25,
+          "drawdown": 308.75
+        },
+        {
+          "trade": 10,
+          "time": "2026-08-26 15:30",
+          "balance": 9614.25,
+          "drawdown": 385.75
+        },
+        {
+          "trade": 11,
+          "time": "2026-08-26 17:45",
+          "balance": 9485.45,
+          "drawdown": 514.55
+        },
+        {
+          "trade": 12,
+          "time": "2026-08-28 03:30",
+          "balance": 9414.45,
+          "drawdown": 585.55
+        },
+        {
+          "trade": 13,
+          "time": "2026-09-03 15:00",
+          "balance": 9311.15,
+          "drawdown": 688.85
+        },
+        {
+          "trade": 14,
+          "time": "2026-09-04 15:30",
+          "balance": 9236.35,
+          "drawdown": 763.65
+        },
+        {
+          "trade": 15,
+          "time": "2026-09-08 10:45",
+          "balance": 9133.6,
+          "drawdown": 866.4
+        },
+        {
+          "trade": 16,
+          "time": "2026-09-08 19:00",
+          "balance": 8992.95,
+          "drawdown": 1007.05
+        },
+        {
+          "trade": 17,
+          "time": "2026-09-10 15:30",
+          "balance": 9279.95,
+          "drawdown": 720.05
+        },
+        {
+          "trade": 18,
+          "time": "2026-09-11 15:30",
+          "balance": 9193.05,
+          "drawdown": 806.95
+        },
+        {
+          "trade": 19,
+          "time": "2026-09-15 15:15",
+          "balance": 9112.75,
+          "drawdown": 887.25
+        },
+        {
+          "trade": 20,
+          "time": "2026-09-16 03:00",
+          "balance": 9072.9,
+          "drawdown": 927.1
+        },
+        {
+          "trade": 21,
+          "time": "2026-09-16 16:00",
+          "balance": 8978.65,
+          "drawdown": 1021.35
+        },
+        {
+          "trade": 22,
+          "time": "2026-09-16 18:45",
+          "balance": 8856.75,
+          "drawdown": 1143.25
+        },
+        {
+          "trade": 23,
+          "time": "2026-09-18 08:30",
+          "balance": 8786.95,
+          "drawdown": 1213.05
+        },
+        {
+          "trade": 24,
+          "time": "2026-09-18 20:00",
+          "balance": 8638.45,
+          "drawdown": 1361.55
+        },
+        {
+          "trade": 25,
+          "time": "2026-09-21 16:45",
+          "balance": 8518.2,
+          "drawdown": 1481.8
+        },
+        {
+          "trade": 26,
+          "time": "2026-09-22 17:30",
+          "balance": 8408.7,
+          "drawdown": 1591.3
+        },
+        {
+          "trade": 27,
+          "time": "2026-09-23 10:15",
+          "balance": 8335.65,
+          "drawdown": 1664.35
+        },
+        {
+          "trade": 28,
+          "time": "2026-09-24 17:30",
+          "balance": 8249.15,
+          "drawdown": 1750.85
+        },
+        {
+          "trade": 29,
+          "time": "2026-09-28 02:00",
+          "balance": 8215.5,
+          "drawdown": 1784.5
+        },
+        {
+          "trade": 30,
+          "time": "2026-09-29 13:00",
+          "balance": 8138.9,
+          "drawdown": 1861.1
+        },
+        {
+          "trade": 31,
+          "time": "2026-09-30 15:30",
+          "balance": 8064.35,
+          "drawdown": 1935.65
+        },
+        {
+          "trade": 32,
+          "time": "2026-10-01 01:30",
+          "balance": 8189.0,
+          "drawdown": 1811.0
+        },
+        {
+          "trade": 33,
+          "time": "2026-10-01 18:00",
+          "balance": 8251.3,
+          "drawdown": 1748.7
+        },
+        {
+          "trade": 34,
+          "time": "2026-10-02 15:30",
+          "balance": 8157.4,
+          "drawdown": 1842.6
+        },
+        {
+          "trade": 35,
+          "time": "2026-10-05 16:00",
+          "balance": 8205.75,
+          "drawdown": 1794.25
+        },
+        {
+          "trade": 36,
+          "time": "2026-10-06 03:15",
+          "balance": 8192.6,
+          "drawdown": 1807.4
+        },
+        {
+          "trade": 37,
+          "time": "2026-10-06 14:15",
+          "balance": 8109.75,
+          "drawdown": 1890.25
+        },
+        {
+          "trade": 38,
+          "time": "2026-10-09 15:30",
+          "balance": 8048.9,
+          "drawdown": 1951.1
+        },
+        {
+          "trade": 39,
+          "time": "2026-10-12 11:15",
+          "balance": 7967.5,
+          "drawdown": 2032.5
+        },
+        {
+          "trade": 40,
+          "time": "2026-10-13 18:15",
+          "balance": 8077.4,
+          "drawdown": 1922.6
+        },
+        {
+          "trade": 41,
+          "time": "2026-10-14 15:30",
+          "balance": 7986.0,
+          "drawdown": 2014.0
+        },
+        {
+          "trade": 42,
+          "time": "2026-10-15 22:45",
+          "balance": 7870.35,
+          "drawdown": 2129.65
+        },
+        {
+          "trade": 43,
+          "time": "2026-10-16 17:00",
+          "balance": 7794.7,
+          "drawdown": 2205.3
+        },
+        {
+          "trade": 44,
+          "time": "2026-10-19 16:30",
+          "balance": 7714.3,
+          "drawdown": 2285.7
+        },
+        {
+          "trade": 45,
+          "time": "2026-10-20 17:15",
+          "balance": 7853.3,
+          "drawdown": 2146.7
+        },
+        {
+          "trade": 46,
+          "time": "2026-10-21 23:15",
+          "balance": 7823.1,
+          "drawdown": 2176.9
+        },
+        {
+          "trade": 47,
+          "time": "2026-10-22 14:00",
+          "balance": 7718.05,
+          "drawdown": 2281.95
+        }
+      ],
+      "recent_trades": [
+        {
+          "direction": "BUY",
+          "entry": 4273.11,
+          "sl": 4259.81,
+          "tp": 4306.36,
+          "entry_time": "2026-09-24 16:30:00+00:00",
+          "entry_bar": 3038,
+          "strategy": "ASIAN_LIQUIDITY_SWEEPS",
+          "exit_time": "2026-09-24 17:30:00+00:00",
+          "exit_price": 4259.81,
+          "pnl": -86.5,
+          "result": "LOSS"
+        },
+        {
+          "direction": "BUY",
+          "entry": 4267.02,
+          "sl": 4245.73,
+          "tp": 4320.25,
+          "entry_time": "2026-09-25 17:00:00+00:00",
+          "entry_bar": 3132,
+          "strategy": "ASIAN_LIQUIDITY_SWEEPS",
+          "exit_time": "2026-09-28 02:00:00+00:00",
+          "exit_price": 4264.29,
+          "pnl": -33.65,
+          "result": "LOSS"
+        },
+        {
+          "direction": "SELL",
+          "entry": 4138.61,
+          "sl": 4149.93,
+          "tp": 4110.31,
+          "entry_time": "2026-09-29 08:45:00+00:00",
+          "entry_bar": 3283,
+          "strategy": "ASIAN_LIQUIDITY_SWEEPS",
+          "exit_time": "2026-09-29 13:00:00+00:00",
+          "exit_price": 4149.93,
+          "pnl": -76.6,
+          "result": "LOSS"
+        },
+        {
+          "direction": "SELL",
+          "entry": 4186.25,
+          "sl": 4197.16,
+          "tp": 4158.98,
+          "entry_time": "2026-09-30 14:30:00+00:00",
+          "entry_bar": 3398,
+          "strategy": "ASIAN_LIQUIDITY_SWEEPS",
+          "exit_time": "2026-09-30 15:30:00+00:00",
+          "exit_price": 4197.16,
+          "pnl": -74.55,
+          "result": "LOSS"
+        },
+        {
+          "direction": "SELL",
+          "entry": 4182.9,
+          "sl": 4203.66,
+          "tp": 4131.0,
+          "entry_time": "2026-09-30 16:30:00+00:00",
+          "entry_bar": 3406,
+          "strategy": "ASIAN_LIQUIDITY_SWEEPS",
+          "exit_time": "2026-10-01 01:30:00+00:00",
+          "exit_price": 4153.97,
+          "pnl": 124.65,
+          "result": "WIN"
+        },
+        {
+          "direction": "SELL",
+          "entry": 4172.42,
+          "sl": 4188.17,
+          "tp": 4133.04,
+          "entry_time": "2026-10-01 10:00:00+00:00",
+          "entry_bar": 3472,
+          "strategy": "ASIAN_LIQUIDITY_SWEEPS",
+          "exit_time": "2026-10-01 18:00:00+00:00",
+          "exit_price": 4155.96,
+          "pnl": 62.3,
+          "result": "WIN"
+        },
+        {
+          "direction": "SELL",
+          "entry": 4182.48,
+          "sl": 4197.26,
+          "tp": 4145.53,
+          "entry_time": "2026-10-02 07:30:00+00:00",
+          "entry_bar": 3554,
+          "strategy": "ASIAN_LIQUIDITY_SWEEPS",
+          "exit_time": "2026-10-02 15:30:00+00:00",
+          "exit_price": 4197.26,
+          "pnl": -93.9,
+          "result": "LOSS"
+        },
+        {
+          "direction": "BUY",
+          "entry": 4138.25,
+          "sl": 4124.16,
+          "tp": 4173.48,
+          "entry_time": "2026-10-05 08:00:00+00:00",
+          "entry_bar": 3648,
+          "strategy": "ASIAN_LIQUIDITY_SWEEPS",
+          "exit_time": "2026-10-05 16:00:00+00:00",
+          "exit_price": 4151.92,
+          "pnl": 48.35,
+          "result": "WIN"
+        },
+        {
+          "direction": "BUY",
+          "entry": 4139.19,
+          "sl": 4114.77,
+          "tp": 4200.24,
+          "entry_time": "2026-10-05 18:15:00+00:00",
+          "entry_bar": 3689,
+          "strategy": "ASIAN_LIQUIDITY_SWEEPS",
+          "exit_time": "2026-10-06 03:15:00+00:00",
+          "exit_price": 4140.56,
+          "pnl": -13.15,
+          "result": "LOSS"
+        },
+        {
+          "direction": "SELL",
+          "entry": 4150.15,
+          "sl": 4162.72,
+          "tp": 4118.72,
+          "entry_time": "2026-10-06 12:00:00+00:00",
+          "entry_bar": 3756,
+          "strategy": "ASIAN_LIQUIDITY_SWEEPS",
+          "exit_time": "2026-10-06 14:15:00+00:00",
+          "exit_price": 4162.72,
+          "pnl": -82.85,
+          "result": "LOSS"
+        },
+        {
+          "direction": "SELL",
+          "entry": 4179.31,
+          "sl": 4187.48,
+          "tp": 4158.89,
+          "entry_time": "2026-10-09 13:45:00+00:00",
+          "entry_bar": 4039,
+          "strategy": "ASIAN_LIQUIDITY_SWEEPS",
+          "exit_time": "2026-10-09 15:30:00+00:00",
+          "exit_price": 4187.48,
+          "pnl": -60.85,
+          "result": "LOSS"
+        },
+        {
+          "direction": "BUY",
+          "entry": 4187.08,
+          "sl": 4174.8,
+          "tp": 4217.78,
+          "entry_time": "2026-10-12 08:30:00+00:00",
+          "entry_bar": 4110,
+          "strategy": "ASIAN_LIQUIDITY_SWEEPS",
+          "exit_time": "2026-10-12 11:15:00+00:00",
+          "exit_price": 4174.8,
+          "pnl": -81.4,
+          "result": "LOSS"
+        },
+        {
+          "direction": "SELL",
+          "entry": 4187.96,
+          "sl": 4198.35,
+          "tp": 4161.98,
+          "entry_time": "2026-10-13 11:30:00+00:00",
+          "entry_bar": 4214,
+          "strategy": "ASIAN_LIQUIDITY_SWEEPS",
+          "exit_time": "2026-10-13 18:15:00+00:00",
+          "exit_price": 4161.98,
+          "pnl": 109.9,
+          "result": "WIN"
+        },
+        {
+          "direction": "BUY",
+          "entry": 4149.21,
+          "sl": 4134.93,
+          "tp": 4184.91,
+          "entry_time": "2026-10-14 15:00:00+00:00",
+          "entry_bar": 4320,
+          "strategy": "ASIAN_LIQUIDITY_SWEEPS",
+          "exit_time": "2026-10-14 15:30:00+00:00",
+          "exit_price": 4134.93,
+          "pnl": -91.4,
+          "result": "LOSS"
+        },
+        {
+          "direction": "SELL",
+          "entry": 4156.21,
+          "sl": 4175.34,
+          "tp": 4108.38,
+          "entry_time": "2026-10-15 16:15:00+00:00",
+          "entry_bar": 4417,
+          "strategy": "ASIAN_LIQUIDITY_SWEEPS",
+          "exit_time": "2026-10-15 22:45:00+00:00",
+          "exit_price": 4175.34,
+          "pnl": -115.65,
+          "result": "LOSS"
+        },
+        {
+          "direction": "SELL",
+          "entry": 4181.14,
+          "sl": 4192.27,
+          "tp": 4153.32,
+          "entry_time": "2026-10-16 11:00:00+00:00",
+          "entry_bar": 4488,
+          "strategy": "ASIAN_LIQUIDITY_SWEEPS",
+          "exit_time": "2026-10-16 17:00:00+00:00",
+          "exit_price": 4192.27,
+          "pnl": -75.65,
+          "result": "LOSS"
+        },
+        {
+          "direction": "BUY",
+          "entry": 4169.32,
+          "sl": 4157.24,
+          "tp": 4199.52,
+          "entry_time": "2026-10-19 13:45:00+00:00",
+          "entry_bar": 4591,
+          "strategy": "ASIAN_LIQUIDITY_SWEEPS",
+          "exit_time": "2026-10-19 16:30:00+00:00",
+          "exit_price": 4157.24,
+          "pnl": -80.4,
+          "result": "LOSS"
+        },
+        {
+          "direction": "BUY",
+          "entry": 4118.79,
+          "sl": 4106.07,
+          "tp": 4150.59,
+          "entry_time": "2026-10-20 13:15:00+00:00",
+          "entry_bar": 4681,
+          "strategy": "ASIAN_LIQUIDITY_SWEEPS",
+          "exit_time": "2026-10-20 17:15:00+00:00",
+          "exit_price": 4150.59,
+          "pnl": 139.0,
+          "result": "WIN"
+        },
+        {
+          "direction": "SELL",
+          "entry": 4131.26,
+          "sl": 4144.17,
+          "tp": 4098.99,
+          "entry_time": "2026-10-21 15:15:00+00:00",
+          "entry_bar": 4781,
+          "strategy": "ASIAN_LIQUIDITY_SWEEPS",
+          "exit_time": "2026-10-21 23:15:00+00:00",
+          "exit_price": 4133.3,
+          "pnl": -30.2,
+          "result": "LOSS"
+        },
+        {
+          "direction": "BUY",
+          "entry": 4090.23,
+          "sl": 4073.22,
+          "tp": 4132.76,
+          "entry_time": "2026-10-22 11:15:00+00:00",
+          "entry_bar": 4857,
+          "strategy": "ASIAN_LIQUIDITY_SWEEPS",
+          "exit_time": "2026-10-22 14:00:00+00:00",
+          "exit_price": 4073.22,
+          "pnl": -105.05,
+          "result": "LOSS"
+        }
+      ]
+    },
+    "MTF_EMA_PULLBACK": {
+      "strategy_id": "MTF_EMA_PULLBACK",
+      "strategy_name": "Multi-Timeframe Trend & EMA Cloud Pullback",
+      "description": "Aligns with institutional trend direction and enters on value retracements to the dynamic EMA cloud.",
+      "metrics": {
+        "total_trades": 127,
+        "winning_trades": 46,
+        "losing_trades": 81,
+        "win_rate_pct": 36.2,
+        "net_profit": -2259.2,
+        "net_profit_pct": -22.6,
+        "gross_profit": 3550.2,
+        "gross_loss": 5809.4,
+        "profit_factor": 0.61,
+        "max_drawdown": 2805.7,
+        "max_drawdown_pct": 27.4,
+        "avg_win": 77.18,
+        "avg_loss": 71.72,
+        "avg_rr": 1.08,
+        "expectancy": -17.79,
+        "sharpe_ratio": -2.68,
+        "recovery_factor": -0.81,
+        "max_consecutive_wins": 4,
+        "max_consecutive_losses": 9
+      },
+      "equity_curve": [
+        {
+          "trade": 0,
+          "time": "Start",
+          "balance": 10000.0,
+          "drawdown": 0.0
+        },
+        {
+          "trade": 1,
+          "time": "2026-08-13 03:15",
+          "balance": 10078.2,
+          "drawdown": 0.0
+        },
+        {
+          "trade": 2,
+          "time": "2026-08-13 08:30",
+          "balance": 9997.6,
+          "drawdown": 80.6
+        },
+        {
+          "trade": 3,
+          "time": "2026-08-13 15:30",
+          "balance": 9930.75,
+          "drawdown": 147.45
+        },
+        {
+          "trade": 4,
+          "time": "2026-08-13 17:00",
+          "balance": 10021.95,
+          "drawdown": 56.25
+        },
+        {
+          "trade": 5,
+          "time": "2026-08-14 03:15",
+          "balance": 10102.15,
+          "drawdown": 0.0
+        },
+        {
+          "trade": 6,
+          "time": "2026-08-14 10:45",
+          "balance": 10035.95,
+          "drawdown": 66.2
+        },
+        {
+          "trade": 7,
+          "time": "2026-08-14 12:30",
+          "balance": 9961.85,
+          "drawdown": 140.3
+        },
+        {
+          "trade": 8,
+          "time": "2026-08-17 03:30",
+          "balance": 10030.85,
+          "drawdown": 71.3
+        },
+        {
+          "trade": 9,
+          "time": "2026-08-17 10:30",
+          "balance": 10119.95,
+          "drawdown": 0.0
+        },
+        {
+          "trade": 10,
+          "time": "2026-08-17 15:15",
+          "balance": 10049.35,
+          "drawdown": 70.6
+        },
+        {
+          "trade": 11,
+          "time": "2026-08-17 16:45",
+          "balance": 10159.65,
+          "drawdown": 0.0
+        },
+        {
+          "trade": 12,
+          "time": "2026-08-18 03:00",
+          "balance": 10246.75,
+          "drawdown": 0.0
+        },
+        {
+          "trade": 13,
+          "time": "2026-08-18 05:00",
+          "balance": 10169.65,
+          "drawdown": 77.1
+        },
+        {
+          "trade": 14,
+          "time": "2026-08-19 09:30",
+          "balance": 10218.8,
+          "drawdown": 27.95
+        },
+        {
+          "trade": 15,
+          "time": "2026-08-19 10:30",
+          "balance": 10141.3,
+          "drawdown": 105.45
+        },
+        {
+          "trade": 16,
+          "time": "2026-08-19 13:15",
+          "balance": 10055.7,
+          "drawdown": 191.05
+        },
+        {
+          "trade": 17,
+          "time": "2026-08-20 10:30",
+          "balance": 10038.35,
+          "drawdown": 208.4
+        },
+        {
+          "trade": 18,
+          "time": "2026-08-20 14:30",
+          "balance": 9964.85,
+          "drawdown": 281.9
+        },
+        {
+          "trade": 19,
+          "time": "2026-08-21 04:30",
+          "balance": 10036.25,
+          "drawdown": 210.5
+        },
+        {
+          "trade": 20,
+          "time": "2026-08-24 02:45",
+          "balance": 10107.85,
+          "drawdown": 138.9
+        },
+        {
+          "trade": 21,
+          "time": "2026-08-25 16:15",
+          "balance": 10010.25,
+          "drawdown": 236.5
+        },
+        {
+          "trade": 22,
+          "time": "2026-08-26 03:30",
+          "balance": 9945.0,
+          "drawdown": 301.75
+        },
+        {
+          "trade": 23,
+          "time": "2026-08-26 05:30",
+          "balance": 10044.7,
+          "drawdown": 202.05
+        },
+        {
+          "trade": 24,
+          "time": "2026-08-27 01:15",
+          "balance": 9976.05,
+          "drawdown": 270.7
+        },
+        {
+          "trade": 25,
+          "time": "2026-08-27 02:15",
+          "balance": 9903.75,
+          "drawdown": 343.0
+        },
+        {
+          "trade": 26,
+          "time": "2026-08-28 02:45",
+          "balance": 9943.05,
+          "drawdown": 303.7
+        },
+        {
+          "trade": 27,
+          "time": "2026-08-28 09:45",
+          "balance": 9869.4,
+          "drawdown": 377.35
+        },
+        {
+          "trade": 28,
+          "time": "2026-08-28 16:45",
+          "balance": 9781.6,
+          "drawdown": 465.15
+        },
+        {
+          "trade": 29,
+          "time": "2026-08-28 17:00",
+          "balance": 9686.55,
+          "drawdown": 560.2
+        },
+        {
+          "trade": 30,
+          "time": "2026-08-31 14:00",
+          "balance": 9610.7,
+          "drawdown": 636.05
+        },
+        {
+          "trade": 31,
+          "time": "2026-08-31 14:15",
+          "balance": 9541.45,
+          "drawdown": 705.3
+        },
+        {
+          "trade": 32,
+          "time": "2026-08-31 16:00",
+          "balance": 9622.75,
+          "drawdown": 624.0
+        },
+        {
+          "trade": 33,
+          "time": "2026-08-31 22:45",
+          "balance": 9549.4,
+          "drawdown": 697.35
+        },
+        {
+          "trade": 34,
+          "time": "2026-09-01 03:00",
+          "balance": 9485.25,
+          "drawdown": 761.5
+        },
+        {
+          "trade": 35,
+          "time": "2026-09-01 10:30",
+          "balance": 9591.55,
+          "drawdown": 655.2
+        },
+        {
+          "trade": 36,
+          "time": "2026-09-02 13:30",
+          "balance": 9638.9,
+          "drawdown": 607.85
+        },
+        {
+          "trade": 37,
+          "time": "2026-09-02 15:00",
+          "balance": 9559.7,
+          "drawdown": 687.05
+        },
+        {
+          "trade": 38,
+          "time": "2026-09-04 07:00",
+          "balance": 9493.85,
+          "drawdown": 752.9
+        },
+        {
+          "trade": 39,
+          "time": "2026-09-04 12:00",
+          "balance": 9477.8,
+          "drawdown": 768.95
+        },
+        {
+          "trade": 40,
+          "time": "2026-09-04 15:30",
+          "balance": 9401.3,
+          "drawdown": 845.45
+        },
+        {
+          "trade": 41,
+          "time": "2026-09-07 11:15",
+          "balance": 9314.85,
+          "drawdown": 931.9
+        },
+        {
+          "trade": 42,
+          "time": "2026-09-07 14:30",
+          "balance": 9442.05,
+          "drawdown": 804.7
+        },
+        {
+          "trade": 43,
+          "time": "2026-09-07 17:45",
+          "balance": 9368.15,
+          "drawdown": 878.6
+        },
+        {
+          "trade": 44,
+          "time": "2026-09-08 02:30",
+          "balance": 9313.65,
+          "drawdown": 933.1
+        },
+        {
+          "trade": 45,
+          "time": "2026-09-08 19:00",
+          "balance": 9416.55,
+          "drawdown": 830.2
+        },
+        {
+          "trade": 46,
+          "time": "2026-09-09 05:45",
+          "balance": 9336.15,
+          "drawdown": 910.6
+        },
+        {
+          "trade": 47,
+          "time": "2026-09-09 08:30",
+          "balance": 9245.75,
+          "drawdown": 1001.0
+        },
+        {
+          "trade": 48,
+          "time": "2026-09-10 03:45",
+          "balance": 9215.6,
+          "drawdown": 1031.15
+        },
+        {
+          "trade": 49,
+          "time": "2026-09-10 08:30",
+          "balance": 9304.8,
+          "drawdown": 941.95
+        },
+        {
+          "trade": 50,
+          "time": "2026-09-10 11:45",
+          "balance": 9215.0,
+          "drawdown": 1031.75
+        },
+        {
+          "trade": 51,
+          "time": "2026-09-11 15:30",
+          "balance": 9130.95,
+          "drawdown": 1115.8
+        },
+        {
+          "trade": 52,
+          "time": "2026-09-14 07:30",
+          "balance": 9260.75,
+          "drawdown": 986.0
+        },
+        {
+          "trade": 53,
+          "time": "2026-09-15 03:15",
+          "balance": 9347.4,
+          "drawdown": 899.35
+        },
+        {
+          "trade": 54,
+          "time": "2026-09-15 05:00",
+          "balance": 9283.2,
+          "drawdown": 963.55
+        },
+        {
+          "trade": 55,
+          "time": "2026-09-15 10:45",
+          "balance": 9381.1,
+          "drawdown": 865.65
+        },
+        {
+          "trade": 56,
+          "time": "2026-09-15 16:45",
+          "balance": 9296.1,
+          "drawdown": 950.65
+        },
+        {
+          "trade": 57,
+          "time": "2026-09-15 21:00",
+          "balance": 9198.05,
+          "drawdown": 1048.7
+        },
+        {
+          "trade": 58,
+          "time": "2026-09-16 03:45",
+          "balance": 9285.55,
+          "drawdown": 961.2
+        },
+        {
+          "trade": 59,
+          "time": "2026-09-16 05:30",
+          "balance": 9209.1,
+          "drawdown": 1037.65
+        },
+        {
+          "trade": 60,
+          "time": "2026-09-16 21:00",
+          "balance": 9110.8,
+          "drawdown": 1135.95
+        },
+        {
+          "trade": 61,
+          "time": "2026-09-17 09:00",
+          "balance": 9014.65,
+          "drawdown": 1232.1
+        },
+        {
+          "trade": 62,
+          "time": "2026-09-18 04:00",
+          "balance": 9098.65,
+          "drawdown": 1148.1
+        },
+        {
+          "trade": 63,
+          "time": "2026-09-18 06:15",
+          "balance": 9023.35,
+          "drawdown": 1223.4
+        },
+        {
+          "trade": 64,
+          "time": "2026-09-18 15:15",
+          "balance": 8946.9,
+          "drawdown": 1299.85
+        },
+        {
+          "trade": 65,
+          "time": "2026-09-18 16:30",
+          "balance": 8850.9,
+          "drawdown": 1395.85
+        },
+        {
+          "trade": 66,
+          "time": "2026-09-21 03:00",
+          "balance": 8785.05,
+          "drawdown": 1461.7
+        },
+        {
+          "trade": 67,
+          "time": "2026-09-21 07:00",
+          "balance": 8705.05,
+          "drawdown": 1541.7
+        },
+        {
+          "trade": 68,
+          "time": "2026-09-22 01:45",
+          "balance": 8647.05,
+          "drawdown": 1599.7
+        },
+        {
+          "trade": 69,
+          "time": "2026-09-22 20:15",
+          "balance": 8614.7,
+          "drawdown": 1632.05
+        },
+        {
+          "trade": 70,
+          "time": "2026-09-23 04:45",
+          "balance": 8549.25,
+          "drawdown": 1697.5
+        },
+        {
+          "trade": 71,
+          "time": "2026-09-24 04:00",
+          "balance": 8491.1,
+          "drawdown": 1755.65
+        },
+        {
+          "trade": 72,
+          "time": "2026-09-24 10:30",
+          "balance": 8531.85,
+          "drawdown": 1714.9
+        },
+        {
+          "trade": 73,
+          "time": "2026-09-24 19:15",
+          "balance": 8439.0,
+          "drawdown": 1807.75
+        },
+        {
+          "trade": 74,
+          "time": "2026-09-25 04:00",
+          "balance": 8346.25,
+          "drawdown": 1900.5
+        },
+        {
+          "trade": 75,
+          "time": "2026-09-25 11:30",
+          "balance": 8270.9,
+          "drawdown": 1975.85
+        },
+        {
+          "trade": 76,
+          "time": "2026-09-29 08:45",
+          "balance": 8194.3,
+          "drawdown": 2052.45
+        },
+        {
+          "trade": 77,
+          "time": "2026-09-29 13:00",
+          "balance": 8122.55,
+          "drawdown": 2124.2
+        },
+        {
+          "trade": 78,
+          "time": "2026-09-29 21:30",
+          "balance": 8025.75,
+          "drawdown": 2221.0
+        },
+        {
+          "trade": 79,
+          "time": "2026-09-30 15:30",
+          "balance": 8104.05,
+          "drawdown": 2142.7
+        },
+        {
+          "trade": 80,
+          "time": "2026-10-01 06:00",
+          "balance": 8042.85,
+          "drawdown": 2203.9
+        },
+        {
+          "trade": 81,
+          "time": "2026-10-01 06:45",
+          "balance": 7964.3,
+          "drawdown": 2282.45
+        },
+        {
+          "trade": 82,
+          "time": "2026-10-01 14:45",
+          "balance": 7872.85,
+          "drawdown": 2373.9
+        },
+        {
+          "trade": 83,
+          "time": "2026-10-02 15:30",
+          "balance": 7985.05,
+          "drawdown": 2261.7
+        },
+        {
+          "trade": 84,
+          "time": "2026-10-05 06:00",
+          "balance": 8048.05,
+          "drawdown": 2198.7
+        },
+        {
+          "trade": 85,
+          "time": "2026-10-05 10:45",
+          "balance": 7958.25,
+          "drawdown": 2288.5
+        },
+        {
+          "trade": 86,
+          "time": "2026-10-05 16:45",
+          "balance": 8048.35,
+          "drawdown": 2198.4
+        },
+        {
+          "trade": 87,
+          "time": "2026-10-06 03:45",
+          "balance": 7986.35,
+          "drawdown": 2260.4
+        },
+        {
+          "trade": 88,
+          "time": "2026-10-06 11:00",
+          "balance": 7915.5,
+          "drawdown": 2331.25
+        },
+        {
+          "trade": 89,
+          "time": "2026-10-06 21:45",
+          "balance": 8003.3,
+          "drawdown": 2243.45
+        },
+        {
+          "trade": 90,
+          "time": "2026-10-07 03:30",
+          "balance": 7944.05,
+          "drawdown": 2302.7
+        },
+        {
+          "trade": 91,
+          "time": "2026-10-07 03:45",
+          "balance": 7889.25,
+          "drawdown": 2357.5
+        },
+        {
+          "trade": 92,
+          "time": "2026-10-08 01:15",
+          "balance": 7913.2,
+          "drawdown": 2333.55
+        },
+        {
+          "trade": 93,
+          "time": "2026-10-08 03:45",
+          "balance": 7857.2,
+          "drawdown": 2389.55
+        },
+        {
+          "trade": 94,
+          "time": "2026-10-08 16:00",
+          "balance": 7842.55,
+          "drawdown": 2404.2
+        },
+        {
+          "trade": 95,
+          "time": "2026-10-08 17:30",
+          "balance": 7756.55,
+          "drawdown": 2490.2
+        },
+        {
+          "trade": 96,
+          "time": "2026-10-08 20:15",
+          "balance": 7657.7,
+          "drawdown": 2589.05
+        },
+        {
+          "trade": 97,
+          "time": "2026-10-09 02:00",
+          "balance": 7565.4,
+          "drawdown": 2681.35
+        },
+        {
+          "trade": 98,
+          "time": "2026-10-09 15:45",
+          "balance": 7505.0,
+          "drawdown": 2741.75
+        },
+        {
+          "trade": 99,
+          "time": "2026-10-09 16:45",
+          "balance": 7578.2,
+          "drawdown": 2668.55
+        },
+        {
+          "trade": 100,
+          "time": "2026-10-09 22:45",
+          "balance": 7622.4,
+          "drawdown": 2624.35
+        },
+        {
+          "trade": 101,
+          "time": "2026-10-12 03:00",
+          "balance": 7667.1,
+          "drawdown": 2579.65
+        },
+        {
+          "trade": 102,
+          "time": "2026-10-12 08:00",
+          "balance": 7590.3,
+          "drawdown": 2656.45
+        },
+        {
+          "trade": 103,
+          "time": "2026-10-13 06:30",
+          "balance": 7503.95,
+          "drawdown": 2742.8
+        },
+        {
+          "trade": 104,
+          "time": "2026-10-13 16:00",
+          "balance": 7441.05,
+          "drawdown": 2805.7
+        },
+        {
+          "trade": 105,
+          "time": "2026-10-14 04:00",
+          "balance": 7473.25,
+          "drawdown": 2773.5
+        },
+        {
+          "trade": 106,
+          "time": "2026-10-14 04:30",
+          "balance": 7534.35,
+          "drawdown": 2712.4
+        },
+        {
+          "trade": 107,
+          "time": "2026-10-14 10:45",
+          "balance": 7606.95,
+          "drawdown": 2639.8
+        },
+        {
+          "trade": 108,
+          "time": "2026-10-14 15:30",
+          "balance": 7664.45,
+          "drawdown": 2582.3
+        },
+        {
+          "trade": 109,
+          "time": "2026-10-15 03:00",
+          "balance": 7598.45,
+          "drawdown": 2648.3
+        },
+        {
+          "trade": 110,
+          "time": "2026-10-15 15:30",
+          "balance": 7536.5,
+          "drawdown": 2710.25
+        },
+        {
+          "trade": 111,
+          "time": "2026-10-15 16:15",
+          "balance": 7624.3,
+          "drawdown": 2622.45
+        },
+        {
+          "trade": 112,
+          "time": "2026-10-16 01:30",
+          "balance": 7694.95,
+          "drawdown": 2551.8
+        },
+        {
+          "trade": 113,
+          "time": "2026-10-16 04:15",
+          "balance": 7639.1,
+          "drawdown": 2607.65
+        },
+        {
+          "trade": 114,
+          "time": "2026-10-16 05:45",
+          "balance": 7690.5,
+          "drawdown": 2556.25
+        },
+        {
+          "trade": 115,
+          "time": "2026-10-16 15:45",
+          "balance": 7621.1,
+          "drawdown": 2625.65
+        },
+        {
+          "trade": 116,
+          "time": "2026-10-19 03:00",
+          "balance": 7706.2,
+          "drawdown": 2540.55
+        },
+        {
+          "trade": 117,
+          "time": "2026-10-19 10:15",
+          "balance": 7766.5,
+          "drawdown": 2480.25
+        },
+        {
+          "trade": 118,
+          "time": "2026-10-19 15:00",
+          "balance": 7683.1,
+          "drawdown": 2563.65
+        },
+        {
+          "trade": 119,
+          "time": "2026-10-20 09:15",
+          "balance": 7770.9,
+          "drawdown": 2475.85
+        },
+        {
+          "trade": 120,
+          "time": "2026-10-20 17:15",
+          "balance": 7682.75,
+          "drawdown": 2564.0
+        },
+        {
+          "trade": 121,
+          "time": "2026-10-21 02:15",
+          "balance": 7714.15,
+          "drawdown": 2532.6
+        },
+        {
+          "trade": 122,
+          "time": "2026-10-21 11:15",
+          "balance": 7688.65,
+          "drawdown": 2558.1
+        },
+        {
+          "trade": 123,
+          "time": "2026-10-21 14:30",
+          "balance": 7615.0,
+          "drawdown": 2631.75
+        },
+        {
+          "trade": 124,
+          "time": "2026-10-22 16:45",
+          "balance": 7749.7,
+          "drawdown": 2497.05
+        },
+        {
+          "trade": 125,
+          "time": "2026-10-23 13:30",
+          "balance": 7726.5,
+          "drawdown": 2520.25
+        },
+        {
+          "trade": 126,
+          "time": "2026-10-23 16:15",
+          "balance": 7657.7,
+          "drawdown": 2589.05
+        },
+        {
+          "trade": 127,
+          "time": "2026-10-23 17:15",
+          "balance": 7740.8,
+          "drawdown": 2505.95
+        }
+      ],
+      "recent_trades": [
+        {
+          "direction": "SELL",
+          "entry": 4149.21,
+          "sl": 4156.96,
+          "tp": 4133.71,
+          "entry_time": "2026-10-14 15:00:00+00:00",
+          "entry_bar": 4320,
+          "strategy": "MTF_EMA_PULLBACK",
+          "exit_time": "2026-10-14 15:30:00+00:00",
+          "exit_price": 4133.71,
+          "pnl": 57.5,
+          "result": "WIN"
+        },
+        {
+          "direction": "SELL",
+          "entry": 4104.45,
+          "sl": 4113.65,
+          "tp": 4086.05,
+          "entry_time": "2026-10-15 01:00:00+00:00",
+          "entry_bar": 4356,
+          "strategy": "MTF_EMA_PULLBACK",
+          "exit_time": "2026-10-15 03:00:00+00:00",
+          "exit_price": 4113.65,
+          "pnl": -66.0,
+          "result": "LOSS"
+        },
+        {
+          "direction": "BUY",
+          "entry": 4145.28,
+          "sl": 4136.89,
+          "tp": 4162.06,
+          "entry_time": "2026-10-15 14:45:00+00:00",
+          "entry_bar": 4411,
+          "strategy": "MTF_EMA_PULLBACK",
+          "exit_time": "2026-10-15 15:30:00+00:00",
+          "exit_price": 4136.89,
+          "pnl": -61.95,
+          "result": "LOSS"
+        },
+        {
+          "direction": "BUY",
+          "entry": 4145.97,
+          "sl": 4135.19,
+          "tp": 4167.53,
+          "entry_time": "2026-10-15 15:30:00+00:00",
+          "entry_bar": 4414,
+          "strategy": "MTF_EMA_PULLBACK",
+          "exit_time": "2026-10-15 16:15:00+00:00",
+          "exit_price": 4167.53,
+          "pnl": 87.8,
+          "result": "WIN"
+        },
+        {
+          "direction": "BUY",
+          "entry": 4148.57,
+          "sl": 4134.12,
+          "tp": 4177.47,
+          "entry_time": "2026-10-15 19:30:00+00:00",
+          "entry_bar": 4430,
+          "strategy": "MTF_EMA_PULLBACK",
+          "exit_time": "2026-10-16 01:30:00+00:00",
+          "exit_price": 4166.7,
+          "pnl": 70.65,
+          "result": "WIN"
+        },
+        {
+          "direction": "BUY",
+          "entry": 4157.21,
+          "sl": 4150.04,
+          "tp": 4171.55,
+          "entry_time": "2026-10-16 02:30:00+00:00",
+          "entry_bar": 4454,
+          "strategy": "MTF_EMA_PULLBACK",
+          "exit_time": "2026-10-16 04:15:00+00:00",
+          "exit_price": 4150.04,
+          "pnl": -55.85,
+          "result": "LOSS"
+        },
+        {
+          "direction": "BUY",
+          "entry": 4152.82,
+          "sl": 4145.68,
+          "tp": 4167.1,
+          "entry_time": "2026-10-16 04:45:00+00:00",
+          "entry_bar": 4463,
+          "strategy": "MTF_EMA_PULLBACK",
+          "exit_time": "2026-10-16 05:45:00+00:00",
+          "exit_price": 4167.1,
+          "pnl": 51.4,
+          "result": "WIN"
+        },
+        {
+          "direction": "BUY",
+          "entry": 4174.23,
+          "sl": 4164.35,
+          "tp": 4193.99,
+          "entry_time": "2026-10-16 13:45:00+00:00",
+          "entry_bar": 4499,
+          "strategy": "MTF_EMA_PULLBACK",
+          "exit_time": "2026-10-16 15:45:00+00:00",
+          "exit_price": 4164.35,
+          "pnl": -69.4,
+          "result": "LOSS"
+        },
+        {
+          "direction": "BUY",
+          "entry": 4165.6,
+          "sl": 4155.09,
+          "tp": 4186.62,
+          "entry_time": "2026-10-16 22:00:00+00:00",
+          "entry_bar": 4532,
+          "strategy": "MTF_EMA_PULLBACK",
+          "exit_time": "2026-10-19 03:00:00+00:00",
+          "exit_price": 4186.62,
+          "pnl": 85.1,
+          "result": "WIN"
+        },
+        {
+          "direction": "BUY",
+          "entry": 4170.66,
+          "sl": 4158.41,
+          "tp": 4195.16,
+          "entry_time": "2026-10-19 05:15:00+00:00",
+          "entry_bar": 4557,
+          "strategy": "MTF_EMA_PULLBACK",
+          "exit_time": "2026-10-19 10:15:00+00:00",
+          "exit_price": 4186.72,
+          "pnl": 60.3,
+          "result": "WIN"
+        },
+        {
+          "direction": "BUY",
+          "entry": 4172.73,
+          "sl": 4160.05,
+          "tp": 4198.09,
+          "entry_time": "2026-10-19 10:45:00+00:00",
+          "entry_bar": 4579,
+          "strategy": "MTF_EMA_PULLBACK",
+          "exit_time": "2026-10-19 15:00:00+00:00",
+          "exit_price": 4160.05,
+          "pnl": -83.4,
+          "result": "LOSS"
+        },
+        {
+          "direction": "SELL",
+          "entry": 4139.56,
+          "sl": 4150.34,
+          "tp": 4118.0,
+          "entry_time": "2026-10-20 05:15:00+00:00",
+          "entry_bar": 4649,
+          "strategy": "MTF_EMA_PULLBACK",
+          "exit_time": "2026-10-20 09:15:00+00:00",
+          "exit_price": 4118.0,
+          "pnl": 87.8,
+          "result": "WIN"
+        },
+        {
+          "direction": "SELL",
+          "entry": 4129.63,
+          "sl": 4143.26,
+          "tp": 4102.37,
+          "entry_time": "2026-10-20 16:30:00+00:00",
+          "entry_bar": 4694,
+          "strategy": "MTF_EMA_PULLBACK",
+          "exit_time": "2026-10-20 17:15:00+00:00",
+          "exit_price": 4143.26,
+          "pnl": -88.15,
+          "result": "LOSS"
+        },
+        {
+          "direction": "SELL",
+          "entry": 4126.75,
+          "sl": 4131.89,
+          "tp": 4116.47,
+          "entry_time": "2026-10-21 01:00:00+00:00",
+          "entry_bar": 4724,
+          "strategy": "MTF_EMA_PULLBACK",
+          "exit_time": "2026-10-21 02:15:00+00:00",
+          "exit_price": 4116.47,
+          "pnl": 31.4,
+          "result": "WIN"
+        },
+        {
+          "direction": "SELL",
+          "entry": 4121.04,
+          "sl": 4131.9,
+          "tp": 4099.32,
+          "entry_time": "2026-10-21 06:15:00+00:00",
+          "entry_bar": 4745,
+          "strategy": "MTF_EMA_PULLBACK",
+          "exit_time": "2026-10-21 11:15:00+00:00",
+          "exit_price": 4122.14,
+          "pnl": -25.5,
+          "result": "LOSS"
+        },
+        {
+          "direction": "SELL",
+          "entry": 4122.14,
+          "sl": 4132.87,
+          "tp": 4100.68,
+          "entry_time": "2026-10-21 11:15:00+00:00",
+          "entry_bar": 4765,
+          "strategy": "MTF_EMA_PULLBACK",
+          "exit_time": "2026-10-21 14:30:00+00:00",
+          "exit_price": 4132.87,
+          "pnl": -73.65,
+          "result": "LOSS"
+        },
+        {
+          "direction": "SELL",
+          "entry": 4087.65,
+          "sl": 4103.12,
+          "tp": 4056.71,
+          "entry_time": "2026-10-22 15:45:00+00:00",
+          "entry_bar": 4875,
+          "strategy": "MTF_EMA_PULLBACK",
+          "exit_time": "2026-10-22 16:45:00+00:00",
+          "exit_price": 4056.71,
+          "pnl": 134.7,
+          "result": "WIN"
+        },
+        {
+          "direction": "SELL",
+          "entry": 4023.13,
+          "sl": 4035.42,
+          "tp": 3998.55,
+          "entry_time": "2026-10-23 08:30:00+00:00",
+          "entry_bar": 4938,
+          "strategy": "MTF_EMA_PULLBACK",
+          "exit_time": "2026-10-23 13:30:00+00:00",
+          "exit_price": 4023.77,
+          "pnl": -23.2,
+          "result": "LOSS"
+        },
+        {
+          "direction": "SELL",
+          "entry": 4023.77,
+          "sl": 4033.53,
+          "tp": 4004.25,
+          "entry_time": "2026-10-23 13:30:00+00:00",
+          "entry_bar": 4958,
+          "strategy": "MTF_EMA_PULLBACK",
+          "exit_time": "2026-10-23 16:15:00+00:00",
+          "exit_price": 4033.53,
+          "pnl": -68.8,
+          "result": "LOSS"
+        },
+        {
+          "direction": "SELL",
+          "entry": 4025.32,
+          "sl": 4035.63,
+          "tp": 4004.7,
+          "entry_time": "2026-10-23 16:15:00+00:00",
+          "entry_bar": 4969,
+          "strategy": "MTF_EMA_PULLBACK",
+          "exit_time": "2026-10-23 17:15:00+00:00",
+          "exit_price": 4004.7,
+          "pnl": 83.1,
+          "result": "WIN"
+        }
+      ]
+    },
+    "COMBINED_CONFLUENCE": {
+      "strategy_id": "COMBINED_CONFLUENCE",
+      "strategy_name": "Combined Multi-Strategy Institutional Confluence",
+      "description": "Composite engine requiring macro trend alignment, session liquidity sweeps, and dynamic EMA retests. Generates highest quality trades.",
+      "metrics": {
+        "total_trades": 112,
+        "winning_trades": 34,
+        "losing_trades": 78,
+        "win_rate_pct": 30.4,
+        "net_profit": -2891.05,
+        "net_profit_pct": -28.9,
+        "gross_profit": 3903.55,
+        "gross_loss": 6794.6,
+        "profit_factor": 0.57,
+        "max_drawdown": 3255.95,
+        "max_drawdown_pct": 32.6,
+        "avg_win": 114.81,
+        "avg_loss": 87.11,
+        "avg_rr": 1.32,
+        "expectancy": -25.81,
+        "sharpe_ratio": -2.76,
+        "recovery_factor": -0.89,
+        "max_consecutive_wins": 3,
+        "max_consecutive_losses": 11
+      },
+      "equity_curve": [
+        {
+          "trade": 0,
+          "time": "Start",
+          "balance": 10000.0,
+          "drawdown": 0.0
+        },
+        {
+          "trade": 1,
+          "time": "2026-08-13 05:30",
+          "balance": 9938.75,
+          "drawdown": 61.25
+        },
+        {
+          "trade": 2,
+          "time": "2026-08-13 08:45",
+          "balance": 9816.95,
+          "drawdown": 183.05
+        },
+        {
+          "trade": 3,
+          "time": "2026-08-13 15:30",
+          "balance": 9752.7,
+          "drawdown": 247.3
+        },
+        {
+          "trade": 4,
+          "time": "2026-08-13 22:00",
+          "balance": 9956.8,
+          "drawdown": 43.2
+        },
+        {
+          "trade": 5,
+          "time": "2026-08-14 11:15",
+          "balance": 9894.95,
+          "drawdown": 105.05
+        },
+        {
+          "trade": 6,
+          "time": "2026-08-14 13:00",
+          "balance": 9804.75,
+          "drawdown": 195.25
+        },
+        {
+          "trade": 7,
+          "time": "2026-08-17 15:30",
+          "balance": 9737.85,
+          "drawdown": 262.15
+        },
+        {
+          "trade": 8,
+          "time": "2026-08-17 17:15",
+          "balance": 9897.75,
+          "drawdown": 102.25
+        },
+        {
+          "trade": 9,
+          "time": "2026-08-18 16:30",
+          "balance": 9814.05,
+          "drawdown": 185.95
+        },
+        {
+          "trade": 10,
+          "time": "2026-08-18 17:30",
+          "balance": 9714.2,
+          "drawdown": 285.8
+        },
+        {
+          "trade": 11,
+          "time": "2026-08-19 13:15",
+          "balance": 9638.75,
+          "drawdown": 361.25
+        },
+        {
+          "trade": 12,
+          "time": "2026-08-20 08:30",
+          "balance": 9569.0,
+          "drawdown": 431.0
+        },
+        {
+          "trade": 13,
+          "time": "2026-08-20 14:45",
+          "balance": 9496.6,
+          "drawdown": 503.4
+        },
+        {
+          "trade": 14,
+          "time": "2026-08-20 18:00",
+          "balance": 9674.7,
+          "drawdown": 325.3
+        },
+        {
+          "trade": 15,
+          "time": "2026-08-24 14:30",
+          "balance": 9816.3,
+          "drawdown": 183.7
+        },
+        {
+          "trade": 16,
+          "time": "2026-08-24 18:45",
+          "balance": 9698.05,
+          "drawdown": 301.95
+        },
+        {
+          "trade": 17,
+          "time": "2026-08-25 11:00",
+          "balance": 9559.6,
+          "drawdown": 440.4
+        },
+        {
+          "trade": 18,
+          "time": "2026-08-25 16:15",
+          "balance": 9415.15,
+          "drawdown": 584.85
+        },
+        {
+          "trade": 19,
+          "time": "2026-08-26 03:45",
+          "balance": 9498.95,
+          "drawdown": 501.05
+        },
+        {
+          "trade": 20,
+          "time": "2026-08-26 12:15",
+          "balance": 9407.15,
+          "drawdown": 592.85
+        },
+        {
+          "trade": 21,
+          "time": "2026-08-26 18:00",
+          "balance": 9554.7,
+          "drawdown": 445.3
+        },
+        {
+          "trade": 22,
+          "time": "2026-08-27 12:30",
+          "balance": 9705.5,
+          "drawdown": 294.5
+        },
+        {
+          "trade": 23,
+          "time": "2026-08-27 16:45",
+          "balance": 9833.95,
+          "drawdown": 166.05
+        },
+        {
+          "trade": 24,
+          "time": "2026-08-27 18:45",
+          "balance": 9739.0,
+          "drawdown": 261.0
+        },
+        {
+          "trade": 25,
+          "time": "2026-08-28 09:45",
+          "balance": 9676.0,
+          "drawdown": 324.0
+        },
+        {
+          "trade": 26,
+          "time": "2026-08-28 16:45",
+          "balance": 9539.35,
+          "drawdown": 460.65
+        },
+        {
+          "trade": 27,
+          "time": "2026-08-31 13:45",
+          "balance": 9477.0,
+          "drawdown": 523.0
+        },
+        {
+          "trade": 28,
+          "time": "2026-08-31 14:15",
+          "balance": 9410.6,
+          "drawdown": 589.4
+        },
+        {
+          "trade": 29,
+          "time": "2026-09-01 01:30",
+          "balance": 9423.7,
+          "drawdown": 576.3
+        },
+        {
+          "trade": 30,
+          "time": "2026-09-01 10:30",
+          "balance": 9537.6,
+          "drawdown": 462.4
+        },
+        {
+          "trade": 31,
+          "time": "2026-09-02 15:00",
+          "balance": 9454.85,
+          "drawdown": 545.15
+        },
+        {
+          "trade": 32,
+          "time": "2026-09-02 16:15",
+          "balance": 9346.15,
+          "drawdown": 653.85
+        },
+        {
+          "trade": 33,
+          "time": "2026-09-04 15:30",
+          "balance": 9259.05,
+          "drawdown": 740.95
+        },
+        {
+          "trade": 34,
+          "time": "2026-09-07 11:00",
+          "balance": 9187.6,
+          "drawdown": 812.4
+        },
+        {
+          "trade": 35,
+          "time": "2026-09-07 13:45",
+          "balance": 9308.65,
+          "drawdown": 691.35
+        },
+        {
+          "trade": 36,
+          "time": "2026-09-07 17:45",
+          "balance": 9246.85,
+          "drawdown": 753.15
+        },
+        {
+          "trade": 37,
+          "time": "2026-09-08 18:00",
+          "balance": 9338.7,
+          "drawdown": 661.3
+        },
+        {
+          "trade": 38,
+          "time": "2026-09-08 22:45",
+          "balance": 9555.45,
+          "drawdown": 444.55
+        },
+        {
+          "trade": 39,
+          "time": "2026-09-09 08:00",
+          "balance": 9476.9,
+          "drawdown": 523.1
+        },
+        {
+          "trade": 40,
+          "time": "2026-09-09 13:45",
+          "balance": 9414.65,
+          "drawdown": 585.35
+        },
+        {
+          "trade": 41,
+          "time": "2026-09-09 16:00",
+          "balance": 9341.45,
+          "drawdown": 658.55
+        },
+        {
+          "trade": 42,
+          "time": "2026-09-10 05:30",
+          "balance": 9244.35,
+          "drawdown": 755.65
+        },
+        {
+          "trade": 43,
+          "time": "2026-09-10 08:45",
+          "balance": 9343.3,
+          "drawdown": 656.7
+        },
+        {
+          "trade": 44,
+          "time": "2026-09-10 11:30",
+          "balance": 9271.95,
+          "drawdown": 728.05
+        },
+        {
+          "trade": 45,
+          "time": "2026-09-10 13:30",
+          "balance": 9175.45,
+          "drawdown": 824.55
+        },
+        {
+          "trade": 46,
+          "time": "2026-09-11 08:45",
+          "balance": 9083.45,
+          "drawdown": 916.55
+        },
+        {
+          "trade": 47,
+          "time": "2026-09-11 15:45",
+          "balance": 8955.25,
+          "drawdown": 1044.75
+        },
+        {
+          "trade": 48,
+          "time": "2026-09-14 05:15",
+          "balance": 9027.25,
+          "drawdown": 972.75
+        },
+        {
+          "trade": 49,
+          "time": "2026-09-14 10:45",
+          "balance": 9136.35,
+          "drawdown": 863.65
+        },
+        {
+          "trade": 50,
+          "time": "2026-09-14 19:45",
+          "balance": 9011.85,
+          "drawdown": 988.15
+        },
+        {
+          "trade": 51,
+          "time": "2026-09-15 11:00",
+          "balance": 9170.2,
+          "drawdown": 829.8
+        },
+        {
+          "trade": 52,
+          "time": "2026-09-15 15:45",
+          "balance": 9087.65,
+          "drawdown": 912.35
+        },
+        {
+          "trade": 53,
+          "time": "2026-09-15 21:15",
+          "balance": 8998.35,
+          "drawdown": 1001.65
+        },
+        {
+          "trade": 54,
+          "time": "2026-09-16 21:00",
+          "balance": 8883.85,
+          "drawdown": 1116.15
+        },
+        {
+          "trade": 55,
+          "time": "2026-09-17 09:00",
+          "balance": 8775.5,
+          "drawdown": 1224.5
+        },
+        {
+          "trade": 56,
+          "time": "2026-09-17 14:00",
+          "balance": 8671.7,
+          "drawdown": 1328.3
+        },
+        {
+          "trade": 57,
+          "time": "2026-09-18 15:15",
+          "balance": 8609.35,
+          "drawdown": 1390.65
+        },
+        {
+          "trade": 58,
+          "time": "2026-09-18 17:15",
+          "balance": 8477.3,
+          "drawdown": 1522.7
+        },
+        {
+          "trade": 59,
+          "time": "2026-09-21 10:00",
+          "balance": 8387.7,
+          "drawdown": 1612.3
+        },
+        {
+          "trade": 60,
+          "time": "2026-09-21 12:30",
+          "balance": 8287.95,
+          "drawdown": 1712.05
+        },
+        {
+          "trade": 61,
+          "time": "2026-09-21 17:00",
+          "balance": 8180.4,
+          "drawdown": 1819.6
+        },
+        {
+          "trade": 62,
+          "time": "2026-09-22 01:45",
+          "balance": 8081.9,
+          "drawdown": 1918.1
+        },
+        {
+          "trade": 63,
+          "time": "2026-09-22 08:30",
+          "balance": 8182.8,
+          "drawdown": 1817.2
+        },
+        {
+          "trade": 64,
+          "time": "2026-09-22 20:45",
+          "balance": 8063.65,
+          "drawdown": 1936.35
+        },
+        {
+          "trade": 65,
+          "time": "2026-09-23 08:30",
+          "balance": 7987.15,
+          "drawdown": 2012.85
+        },
+        {
+          "trade": 66,
+          "time": "2026-09-24 11:15",
+          "balance": 8089.6,
+          "drawdown": 1910.4
+        },
+        {
+          "trade": 67,
+          "time": "2026-09-24 15:45",
+          "balance": 8007.4,
+          "drawdown": 1992.6
+        },
+        {
+          "trade": 68,
+          "time": "2026-09-24 18:00",
+          "balance": 8159.65,
+          "drawdown": 1840.35
+        },
+        {
+          "trade": 69,
+          "time": "2026-09-25 11:15",
+          "balance": 8096.8,
+          "drawdown": 1903.2
+        },
+        {
+          "trade": 70,
+          "time": "2026-09-25 13:00",
+          "balance": 8005.55,
+          "drawdown": 1994.45
+        },
+        {
+          "trade": 71,
+          "time": "2026-09-28 03:00",
+          "balance": 8176.4,
+          "drawdown": 1823.6
+        },
+        {
+          "trade": 72,
+          "time": "2026-09-29 08:45",
+          "balance": 8097.6,
+          "drawdown": 1902.4
+        },
+        {
+          "trade": 73,
+          "time": "2026-09-29 13:45",
+          "balance": 8008.05,
+          "drawdown": 1991.95
+        },
+        {
+          "trade": 74,
+          "time": "2026-09-29 21:30",
+          "balance": 7914.7,
+          "drawdown": 2085.3
+        },
+        {
+          "trade": 75,
+          "time": "2026-09-30 07:30",
+          "balance": 7849.4,
+          "drawdown": 2150.6
+        },
+        {
+          "trade": 76,
+          "time": "2026-09-30 09:45",
+          "balance": 7770.5,
+          "drawdown": 2229.5
+        },
+        {
+          "trade": 77,
+          "time": "2026-09-30 15:30",
+          "balance": 7901.3,
+          "drawdown": 2098.7
+        },
+        {
+          "trade": 78,
+          "time": "2026-09-30 16:45",
+          "balance": 7811.6,
+          "drawdown": 2188.4
+        },
+        {
+          "trade": 79,
+          "time": "2026-09-30 18:00",
+          "balance": 7722.55,
+          "drawdown": 2277.45
+        },
+        {
+          "trade": 80,
+          "time": "2026-10-01 08:15",
+          "balance": 7634.1,
+          "drawdown": 2365.9
+        },
+        {
+          "trade": 81,
+          "time": "2026-10-01 20:00",
+          "balance": 7620.4,
+          "drawdown": 2379.6
+        },
+        {
+          "trade": 82,
+          "time": "2026-10-02 15:30",
+          "balance": 7510.6,
+          "drawdown": 2489.4
+        },
+        {
+          "trade": 83,
+          "time": "2026-10-02 17:45",
+          "balance": 7395.05,
+          "drawdown": 2604.95
+        },
+        {
+          "trade": 84,
+          "time": "2026-10-05 10:45",
+          "balance": 7312.4,
+          "drawdown": 2687.6
+        },
+        {
+          "trade": 85,
+          "time": "2026-10-05 20:45",
+          "balance": 7412.75,
+          "drawdown": 2587.25
+        },
+        {
+          "trade": 86,
+          "time": "2026-10-06 10:15",
+          "balance": 7351.9,
+          "drawdown": 2648.1
+        },
+        {
+          "trade": 87,
+          "time": "2026-10-06 11:30",
+          "balance": 7254.85,
+          "drawdown": 2745.15
+        },
+        {
+          "trade": 88,
+          "time": "2026-10-06 14:15",
+          "balance": 7157.4,
+          "drawdown": 2842.6
+        },
+        {
+          "trade": 89,
+          "time": "2026-10-06 17:15",
+          "balance": 7093.35,
+          "drawdown": 2906.65
+        },
+        {
+          "trade": 90,
+          "time": "2026-10-06 21:45",
+          "balance": 7219.6,
+          "drawdown": 2780.4
+        },
+        {
+          "trade": 91,
+          "time": "2026-10-08 04:00",
+          "balance": 7097.05,
+          "drawdown": 2902.95
+        },
+        {
+          "trade": 92,
+          "time": "2026-10-08 18:30",
+          "balance": 7127.8,
+          "drawdown": 2872.2
+        },
+        {
+          "trade": 93,
+          "time": "2026-10-09 15:45",
+          "balance": 7058.15,
+          "drawdown": 2941.85
+        },
+        {
+          "trade": 94,
+          "time": "2026-10-12 02:45",
+          "balance": 7113.4,
+          "drawdown": 2886.6
+        },
+        {
+          "trade": 95,
+          "time": "2026-10-12 08:00",
+          "balance": 7046.1,
+          "drawdown": 2953.9
+        },
+        {
+          "trade": 96,
+          "time": "2026-10-12 11:45",
+          "balance": 6953.85,
+          "drawdown": 3046.15
+        },
+        {
+          "trade": 97,
+          "time": "2026-10-13 16:00",
+          "balance": 6883.2,
+          "drawdown": 3116.8
+        },
+        {
+          "trade": 98,
+          "time": "2026-10-14 15:30",
+          "balance": 6999.7,
+          "drawdown": 3000.3
+        },
+        {
+          "trade": 99,
+          "time": "2026-10-16 02:30",
+          "balance": 7035.9,
+          "drawdown": 2964.1
+        },
+        {
+          "trade": 100,
+          "time": "2026-10-16 16:15",
+          "balance": 6968.2,
+          "drawdown": 3031.8
+        },
+        {
+          "trade": 101,
+          "time": "2026-10-16 18:45",
+          "balance": 6886.4,
+          "drawdown": 3113.6
+        },
+        {
+          "trade": 102,
+          "time": "2026-10-19 05:45",
+          "balance": 6910.15,
+          "drawdown": 3089.85
+        },
+        {
+          "trade": 103,
+          "time": "2026-10-19 13:30",
+          "balance": 6836.0,
+          "drawdown": 3164.0
+        },
+        {
+          "trade": 104,
+          "time": "2026-10-19 16:30",
+          "balance": 6744.05,
+          "drawdown": 3255.95
+        },
+        {
+          "trade": 105,
+          "time": "2026-10-20 11:45",
+          "balance": 6862.9,
+          "drawdown": 3137.1
+        },
+        {
+          "trade": 106,
+          "time": "2026-10-20 17:15",
+          "balance": 6784.4,
+          "drawdown": 3215.6
+        },
+        {
+          "trade": 107,
+          "time": "2026-10-21 04:45",
+          "balance": 6885.6,
+          "drawdown": 3114.4
+        },
+        {
+          "trade": 108,
+          "time": "2026-10-21 14:15",
+          "balance": 6822.35,
+          "drawdown": 3177.65
+        },
+        {
+          "trade": 109,
+          "time": "2026-10-21 14:30",
+          "balance": 6761.1,
+          "drawdown": 3238.9
+        },
+        {
+          "trade": 110,
+          "time": "2026-10-22 02:15",
+          "balance": 6762.45,
+          "drawdown": 3237.55
+        },
+        {
+          "trade": 111,
+          "time": "2026-10-22 17:00",
+          "balance": 6940.85,
+          "drawdown": 3059.15
+        },
+        {
+          "trade": 112,
+          "time": "2026-10-23 17:15",
+          "balance": 7108.95,
+          "drawdown": 2891.05
+        }
+      ],
+      "recent_trades": [
+        {
+          "direction": "BUY",
+          "entry": 4179.01,
+          "sl": 4169.08,
+          "tp": 4204.83,
+          "entry_time": "2026-10-09 14:00:00+00:00",
+          "entry_bar": 4040,
+          "strategy": "COMBINED_CONFLUENCE",
+          "confidence": 95,
+          "exit_time": "2026-10-09 15:45:00+00:00",
+          "exit_price": 4169.08,
+          "pnl": -69.65,
+          "result": "LOSS"
+        },
+        {
+          "direction": "BUY",
+          "entry": 4175.45,
+          "sl": 4161.62,
+          "tp": 4211.41,
+          "entry_time": "2026-10-09 15:45:00+00:00",
+          "entry_bar": 4047,
+          "strategy": "COMBINED_CONFLUENCE",
+          "confidence": 95,
+          "exit_time": "2026-10-12 02:45:00+00:00",
+          "exit_price": 4190.5,
+          "pnl": 55.25,
+          "result": "WIN"
+        },
+        {
+          "direction": "BUY",
+          "entry": 4198.6,
+          "sl": 4189.14,
+          "tp": 4223.2,
+          "entry_time": "2026-10-12 07:00:00+00:00",
+          "entry_bar": 4104,
+          "strategy": "COMBINED_CONFLUENCE",
+          "confidence": 95,
+          "exit_time": "2026-10-12 08:00:00+00:00",
+          "exit_price": 4189.14,
+          "pnl": -67.3,
+          "result": "LOSS"
+        },
+        {
+          "direction": "BUY",
+          "entry": 4187.08,
+          "sl": 4172.63,
+          "tp": 4224.65,
+          "entry_time": "2026-10-12 08:30:00+00:00",
+          "entry_bar": 4110,
+          "strategy": "COMBINED_CONFLUENCE",
+          "confidence": 95,
+          "exit_time": "2026-10-12 11:45:00+00:00",
+          "exit_price": 4172.63,
+          "pnl": -92.25,
+          "result": "LOSS"
+        },
+        {
+          "direction": "BUY",
+          "entry": 4184.53,
+          "sl": 4174.4,
+          "tp": 4210.87,
+          "entry_time": "2026-10-13 12:30:00+00:00",
+          "entry_bar": 4218,
+          "strategy": "COMBINED_CONFLUENCE",
+          "confidence": 95,
+          "exit_time": "2026-10-13 16:00:00+00:00",
+          "exit_price": 4174.4,
+          "pnl": -70.65,
+          "result": "LOSS"
+        },
+        {
+          "direction": "SELL",
+          "entry": 4161.15,
+          "sl": 4171.65,
+          "tp": 4133.85,
+          "entry_time": "2026-10-14 07:15:00+00:00",
+          "entry_bar": 4289,
+          "strategy": "COMBINED_CONFLUENCE",
+          "confidence": 95,
+          "exit_time": "2026-10-14 15:30:00+00:00",
+          "exit_price": 4133.85,
+          "pnl": 116.5,
+          "result": "WIN"
+        },
+        {
+          "direction": "BUY",
+          "entry": 4145.97,
+          "sl": 4122.64,
+          "tp": 4206.63,
+          "entry_time": "2026-10-15 15:30:00+00:00",
+          "entry_bar": 4414,
+          "strategy": "COMBINED_CONFLUENCE",
+          "confidence": 95,
+          "exit_time": "2026-10-16 02:30:00+00:00",
+          "exit_price": 4157.21,
+          "pnl": 36.2,
+          "result": "WIN"
+        },
+        {
+          "direction": "BUY",
+          "entry": 4169.33,
+          "sl": 4159.79,
+          "tp": 4194.13,
+          "entry_time": "2026-10-16 09:00:00+00:00",
+          "entry_bar": 4480,
+          "strategy": "COMBINED_CONFLUENCE",
+          "confidence": 95,
+          "exit_time": "2026-10-16 16:15:00+00:00",
+          "exit_price": 4159.79,
+          "pnl": -67.7,
+          "result": "LOSS"
+        },
+        {
+          "direction": "BUY",
+          "entry": 4179.92,
+          "sl": 4167.56,
+          "tp": 4212.06,
+          "entry_time": "2026-10-16 18:00:00+00:00",
+          "entry_bar": 4516,
+          "strategy": "COMBINED_CONFLUENCE",
+          "confidence": 95,
+          "exit_time": "2026-10-16 18:45:00+00:00",
+          "exit_price": 4167.56,
+          "pnl": -81.8,
+          "result": "LOSS"
+        },
+        {
+          "direction": "BUY",
+          "entry": 4167.7,
+          "sl": 4154.94,
+          "tp": 4200.88,
+          "entry_time": "2026-10-16 18:45:00+00:00",
+          "entry_bar": 4519,
+          "strategy": "COMBINED_CONFLUENCE",
+          "confidence": 95,
+          "exit_time": "2026-10-19 05:45:00+00:00",
+          "exit_price": 4176.45,
+          "pnl": 23.75,
+          "result": "WIN"
+        },
+        {
+          "direction": "BUY",
+          "entry": 4174.93,
+          "sl": 4164.1,
+          "tp": 4203.09,
+          "entry_time": "2026-10-19 07:15:00+00:00",
+          "entry_bar": 4565,
+          "strategy": "COMBINED_CONFLUENCE",
+          "confidence": 95,
+          "exit_time": "2026-10-19 13:30:00+00:00",
+          "exit_price": 4164.1,
+          "pnl": -74.15,
+          "result": "LOSS"
+        },
+        {
+          "direction": "BUY",
+          "entry": 4169.32,
+          "sl": 4154.93,
+          "tp": 4206.73,
+          "entry_time": "2026-10-19 13:45:00+00:00",
+          "entry_bar": 4591,
+          "strategy": "COMBINED_CONFLUENCE",
+          "confidence": 95,
+          "exit_time": "2026-10-19 16:30:00+00:00",
+          "exit_price": 4154.93,
+          "pnl": -91.95,
+          "result": "LOSS"
+        },
+        {
+          "direction": "SELL",
+          "entry": 4144.13,
+          "sl": 4154.81,
+          "tp": 4116.36,
+          "entry_time": "2026-10-20 07:00:00+00:00",
+          "entry_bar": 4656,
+          "strategy": "COMBINED_CONFLUENCE",
+          "confidence": 95,
+          "exit_time": "2026-10-20 11:45:00+00:00",
+          "exit_price": 4116.36,
+          "pnl": 118.85,
+          "result": "WIN"
+        },
+        {
+          "direction": "SELL",
+          "entry": 4123.7,
+          "sl": 4135.4,
+          "tp": 4093.28,
+          "entry_time": "2026-10-20 15:30:00+00:00",
+          "entry_bar": 4690,
+          "strategy": "COMBINED_CONFLUENCE",
+          "confidence": 95,
+          "exit_time": "2026-10-20 17:15:00+00:00",
+          "exit_price": 4135.4,
+          "pnl": -78.5,
+          "result": "LOSS"
+        },
+        {
+          "direction": "SELL",
+          "entry": 4142.99,
+          "sl": 4164.58,
+          "tp": 4086.86,
+          "entry_time": "2026-10-20 17:45:00+00:00",
+          "entry_bar": 4699,
+          "strategy": "COMBINED_CONFLUENCE",
+          "confidence": 95,
+          "exit_time": "2026-10-21 04:45:00+00:00",
+          "exit_price": 4118.75,
+          "pnl": 101.2,
+          "result": "WIN"
+        },
+        {
+          "direction": "SELL",
+          "entry": 4122.72,
+          "sl": 4131.37,
+          "tp": 4100.23,
+          "entry_time": "2026-10-21 07:00:00+00:00",
+          "entry_bar": 4748,
+          "strategy": "COMBINED_CONFLUENCE",
+          "confidence": 95,
+          "exit_time": "2026-10-21 14:15:00+00:00",
+          "exit_price": 4131.37,
+          "pnl": -63.25,
+          "result": "LOSS"
+        },
+        {
+          "direction": "SELL",
+          "entry": 4130.37,
+          "sl": 4138.62,
+          "tp": 4108.92,
+          "entry_time": "2026-10-21 14:15:00+00:00",
+          "entry_bar": 4777,
+          "strategy": "COMBINED_CONFLUENCE",
+          "confidence": 95,
+          "exit_time": "2026-10-21 14:30:00+00:00",
+          "exit_price": 4138.62,
+          "pnl": -61.25,
+          "result": "LOSS"
+        },
+        {
+          "direction": "SELL",
+          "entry": 4131.26,
+          "sl": 4146.71,
+          "tp": 4091.09,
+          "entry_time": "2026-10-21 15:15:00+00:00",
+          "entry_bar": 4781,
+          "strategy": "COMBINED_CONFLUENCE",
+          "confidence": 95,
+          "exit_time": "2026-10-22 02:15:00+00:00",
+          "exit_price": 4126.99,
+          "pnl": 1.35,
+          "result": "WIN"
+        },
+        {
+          "direction": "SELL",
+          "entry": 4087.65,
+          "sl": 4102.91,
+          "tp": 4047.97,
+          "entry_time": "2026-10-22 15:45:00+00:00",
+          "entry_bar": 4875,
+          "strategy": "COMBINED_CONFLUENCE",
+          "confidence": 95,
+          "exit_time": "2026-10-22 17:00:00+00:00",
+          "exit_price": 4047.97,
+          "pnl": 178.4,
+          "result": "WIN"
+        },
+        {
+          "direction": "SELL",
+          "entry": 4023.13,
+          "sl": 4037.6,
+          "tp": 3985.51,
+          "entry_time": "2026-10-23 08:30:00+00:00",
+          "entry_bar": 4938,
+          "strategy": "COMBINED_CONFLUENCE",
+          "confidence": 95,
+          "exit_time": "2026-10-23 17:15:00+00:00",
+          "exit_price": 3985.51,
+          "pnl": 168.1,
+          "result": "WIN"
+        }
+      ]
+    }
+  },
+  "leaderboard": [
+    {
+      "strategy": "SMC_ORDER_BLOCKS",
+      "name": "SMC Order Block & FVG Mitigation",
+      "win_rate": 33.6,
+      "profit_factor": 0.62,
+      "net_profit": -3133.25,
+      "max_drawdown_pct": 35.3,
+      "total_trades": 125,
+      "expectancy": -25.07,
+      "recovery_factor": -0.83
+    },
+    {
+      "strategy": "MTF_EMA_PULLBACK",
+      "name": "Multi-Timeframe Trend & EMA Cloud Pullback",
+      "win_rate": 36.2,
+      "profit_factor": 0.61,
+      "net_profit": -2259.2,
+      "max_drawdown_pct": 27.4,
+      "total_trades": 127,
+      "expectancy": -17.79,
+      "recovery_factor": -0.81
+    },
+    {
+      "strategy": "COMBINED_CONFLUENCE",
+      "name": "Combined Multi-Strategy Institutional Confluence",
+      "win_rate": 30.4,
+      "profit_factor": 0.57,
+      "net_profit": -2891.05,
+      "max_drawdown_pct": 32.6,
+      "total_trades": 112,
+      "expectancy": -25.81,
+      "recovery_factor": -0.89
+    },
+    {
+      "strategy": "ASIAN_LIQUIDITY_SWEEPS",
+      "name": "Asian Session Liquidity Sweep (London/NY)",
+      "win_rate": 17.0,
+      "profit_factor": 0.33,
+      "net_profit": -2281.95,
+      "max_drawdown_pct": 22.9,
+      "total_trades": 47,
+      "expectancy": -48.55,
+      "recovery_factor": -1.0
+    }
+  ],
+  "best_strategy": "SMC_ORDER_BLOCKS"
+}

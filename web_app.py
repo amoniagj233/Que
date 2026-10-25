@@ -5,7 +5,7 @@ import sys
 import threading
 import time
 from collections import defaultdict
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -23,6 +23,21 @@ except ImportError:
 from smart_profit_chaser import (
     SmartProfitChaser, ProfitChaserConfig, ProfitMode, PullbackMethod, TrailingMethod, PositionState
 )
+
+from gold_intelligence import (
+    get_gold_candles,
+    compute_atr,
+    compute_rsi,
+    detect_order_blocks,
+    detect_fair_value_gaps,
+    detect_asian_session_levels,
+    analyze_market_regime,
+    get_multi_timeframe_matrix,
+    generate_gold_trade_setups,
+    get_gold_macro_events,
+    GOLD_SPEC
+)
+from gold_backtester import GoldBacktester, BACKTEST_RESULTS_FILE
 
 HEADWAY_TERMINAL_PATH = os.getenv("MT5_PATH", r"C:\Program Files\Headway MT5 Terminal\terminal64.exe")
 BASE_DIR = Path(__file__).resolve().parent
@@ -1917,6 +1932,11 @@ HTML_PAGE = """<!DOCTYPE html>
         Symbol Performance & Analytics
         <span id="p1TopBadge" class="px-1.5 py-0.2 rounded-full bg-emerald-500/20 text-emeraldaccent text-[10px] font-mono">P1 FOCUS</span>
       </button>
+      <button id="navTabGold" onclick="switchMainTab('gold')" class="px-3.5 py-1.5 rounded-lg text-xs font-bold transition text-amber-400 hover:text-amber-300 hover:bg-slate-800 flex items-center gap-2">
+        <svg class="w-3.5 h-3.5 text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+        Gold Intelligence
+        <span class="px-1.5 py-0.2 rounded-full bg-amber-500/20 text-amber-300 text-[10px] font-mono border border-amber-500/30">XAUUSD</span>
+      </button>
     </nav>
 
     <div class="flex items-center space-x-3">
@@ -2637,6 +2657,202 @@ HTML_PAGE = """<!DOCTYPE html>
       </section>
 
     </div> <!-- End performanceView -->
+
+    <!-- ================================================================= -->
+    <!-- GOLD TRADING INTELLIGENCE DASHBOARD (XAUUSD)                      -->
+    <!-- ================================================================= -->
+    <div id="goldView" class="space-y-6 hidden">
+      <!-- 1. Gold Live Overview Hero Header -->
+      <div class="rounded-2xl bg-gradient-to-r from-amber-950/40 via-slate-900/90 to-slate-900 border border-amber-500/30 p-6 shadow-2xl relative overflow-hidden">
+        <div class="absolute -right-10 -top-10 w-64 h-64 bg-amber-500/5 rounded-full blur-3xl pointer-events-none"></div>
+        <div class="flex flex-wrap items-center justify-between gap-4 relative z-10">
+          <div class="flex items-center gap-4">
+            <div class="w-14 h-14 rounded-2xl bg-gradient-to-br from-amber-400 to-yellow-600 flex items-center justify-center text-2xl shadow-lg shadow-amber-500/20 font-black text-slate-950">
+              Au
+            </div>
+            <div>
+              <div class="flex items-center gap-2">
+                <h2 class="text-xl font-black text-white tracking-tight flex items-center gap-2">
+                  GOLD (XAUUSD) INTELLIGENCE & RESEARCH
+                </h2>
+                <span id="goldRegimeBadge" class="px-2.5 py-0.5 rounded-full text-[10px] font-bold font-mono bg-amber-500/20 text-amber-300 border border-amber-500/30">ANALYZING...</span>
+              </div>
+              <p class="text-xs text-slate-400 mt-0.5">
+                Institutional Market Structure &bull; Smart Money Concepts (SMC) &bull; Asian Sweeps &bull; Multi-Timeframe Alignment
+              </p>
+            </div>
+          </div>
+          <div class="flex items-center gap-3">
+            <div class="text-right px-4 py-2 rounded-xl bg-slate-950/60 border border-bordercol">
+              <span class="text-[10px] uppercase tracking-wider text-slate-400 font-bold block">Live Spread</span>
+              <span id="goldSpreadDisplay" class="text-sm font-mono font-black text-amber-400">$3.80 (380 pts)</span>
+            </div>
+            <button onclick="loadGoldDashboard(true)" class="px-4 py-2.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-black transition shadow-lg shadow-amber-500/20 flex items-center gap-2">
+              <svg id="goldSyncIcon" class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg>
+              Refresh Gold Analytics
+            </button>
+          </div>
+        </div>
+
+        <!-- Metric Strips -->
+        <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 mt-6 pt-5 border-t border-slate-800/80">
+          <div class="p-3 rounded-xl bg-slate-950/50 border border-bordercol">
+            <span class="text-[10px] text-slate-400 font-mono uppercase block">Live Bid / Ask</span>
+            <span id="goldBidAsk" class="text-sm font-mono font-bold text-slate-200">-- / --</span>
+          </div>
+          <div class="p-3 rounded-xl bg-slate-950/50 border border-bordercol">
+            <span class="text-[10px] text-slate-400 font-mono uppercase block">Market Regime</span>
+            <span id="goldRegimeText" class="text-xs font-mono font-bold text-amber-300">--</span>
+          </div>
+          <div class="p-3 rounded-xl bg-slate-950/50 border border-bordercol">
+            <span class="text-[10px] text-slate-400 font-mono uppercase block">M15 ATR (14)</span>
+            <span id="goldAtrDisplay" class="text-sm font-mono font-bold text-blue-400">--</span>
+          </div>
+          <div class="p-3 rounded-xl bg-slate-950/50 border border-bordercol">
+            <span class="text-[10px] text-slate-400 font-mono uppercase block">M15 RSI (14)</span>
+            <span id="goldRsiDisplay" class="text-sm font-mono font-bold text-slate-200">--</span>
+          </div>
+          <div class="p-3 rounded-xl bg-slate-950/50 border border-bordercol">
+            <span class="text-[10px] text-slate-400 font-mono uppercase block">Asian High / Low</span>
+            <span id="goldAsianRange" class="text-xs font-mono font-bold text-slate-200">-- / --</span>
+          </div>
+          <div class="p-3 rounded-xl bg-slate-950/50 border border-bordercol">
+            <span class="text-[10px] text-slate-400 font-mono uppercase block">Asian State</span>
+            <span id="goldAsianStatus" class="text-xs font-mono font-bold text-emeraldaccent">--</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- 2. Recommended Trade Setups & Technical Invalidation Notes (User Requirement #2) -->
+      <section class="space-y-3">
+        <div class="flex items-center justify-between">
+          <div>
+            <h3 class="text-base font-bold text-white flex items-center gap-2">
+              <svg class="w-5 h-5 text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+              Recommended Trade Setups &amp; Technical Invalidation Notes
+            </h3>
+            <p class="text-xs text-slate-400">Actionable institutional signals with explicit setup, stop-loss, and time-based invalidation boundaries.</p>
+          </div>
+          <span class="px-2.5 py-1 rounded-lg text-xs font-mono bg-slate-900 border border-bordercol text-slate-300">
+            Min Confidence: <strong class="text-emeraldaccent">90%</strong>
+          </span>
+        </div>
+
+        <div id="goldSetupsContainer" class="grid grid-cols-1 gap-4">
+          <!-- Rendered dynamically -->
+        </div>
+      </section>
+
+      <!-- 3. Multi-Timeframe Trading Analysis Matrix (User Requirement #2B) -->
+      <section class="rounded-2xl bg-panel border border-bordercol p-6 shadow-xl space-y-4">
+        <div class="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h3 class="text-sm font-bold text-white flex items-center gap-2">
+              <svg class="w-4 h-4 text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 10h16M4 14h16M4 18h16"></path></svg>
+              Multi-Timeframe Trading Analysis Matrix (M1 – W1)
+            </h3>
+            <p class="text-xs text-slate-400">Combines higher-timeframe directional bias with lower-timeframe execution triggers.</p>
+          </div>
+          <div class="flex items-center gap-2">
+            <span class="text-xs text-slate-400 font-mono">Confluence Score:</span>
+            <span id="goldMtfScore" class="px-3 py-1 rounded-full text-xs font-mono font-bold bg-blue-500/20 text-blue-400 border border-blue-500/30">--</span>
+          </div>
+        </div>
+
+        <div id="goldMtfGrid" class="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-3">
+          <!-- Rendered dynamically -->
+        </div>
+      </section>
+
+      <!-- 4. Algorithmic Backtesting & Strategy Leaderboard (User Requirement #5) -->
+      <section class="rounded-2xl bg-panel border border-bordercol p-6 shadow-xl space-y-6">
+        <div class="flex flex-wrap items-center justify-between gap-4">
+          <div>
+            <h3 class="text-base font-bold text-white flex items-center gap-2">
+              <svg class="w-5 h-5 text-emeraldaccent" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6"></path></svg>
+              Gold Algorithmic Backtesting &amp; Strategy Leaderboard
+            </h3>
+            <p class="text-xs text-slate-400">Benchmarked on 5,000 real M15 bars with broker spread ($3.80/oz) and execution slippage.</p>
+          </div>
+          <div class="flex items-center gap-3">
+            <button onclick="triggerGoldBacktest()" id="btnRunGoldBacktest" class="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold transition shadow-lg shadow-emerald-600/20 flex items-center gap-2">
+              <svg id="backtestSpinner" class="w-4 h-4 hidden animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg>
+              Run Full Backtest
+            </button>
+          </div>
+        </div>
+
+        <!-- Leaderboard Table -->
+        <div class="overflow-x-auto rounded-xl border border-bordercol">
+          <table class="w-full text-left text-xs">
+            <thead class="bg-slate-950 text-slate-400 uppercase font-mono tracking-wider border-b border-bordercol">
+              <tr>
+                <th class="py-3 px-4">Rank &amp; Strategy</th>
+                <th class="py-3 px-4">Win Rate %</th>
+                <th class="py-3 px-4">Profit Factor</th>
+                <th class="py-3 px-4">Net P&amp;L ($)</th>
+                <th class="py-3 px-4">Max DD (%)</th>
+                <th class="py-3 px-4">Trades</th>
+                <th class="py-3 px-4">Expectancy</th>
+                <th class="py-3 px-4">Recovery Factor</th>
+                <th class="py-3 px-4 text-right">View Curve</th>
+              </tr>
+            </thead>
+            <tbody id="goldLeaderboardTbody" class="divide-y divide-bordercol/60">
+              <!-- Rendered dynamically -->
+            </tbody>
+          </table>
+        </div>
+
+        <!-- Equity Curve Viewer -->
+        <div class="p-5 rounded-xl bg-slate-950/60 border border-bordercol space-y-3">
+          <div class="flex items-center justify-between">
+            <h4 id="goldEquityCurveTitle" class="text-xs font-bold text-white font-mono">EQUITY CURVE &amp; DRAWDOWN VISUALIZER</h4>
+            <span class="text-[11px] text-slate-400 font-mono">Sampled across 5,000 bars</span>
+          </div>
+          <div id="goldEquitySvgContainer" class="w-full h-48 flex items-center justify-center">
+            <!-- SVG rendered dynamically -->
+          </div>
+        </div>
+      </section>
+
+      <!-- 5. Economic News & Event Risk Calendar (User Requirement #6) -->
+      <section class="rounded-2xl bg-panel border border-bordercol p-6 shadow-xl space-y-4">
+        <div>
+          <h3 class="text-base font-bold text-white flex items-center gap-2">
+            <svg class="w-5 h-5 text-rose-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"></path></svg>
+            Gold High-Impact Economic News &amp; Event Risk Calendar
+          </h3>
+          <p class="text-xs text-slate-400">Automated event blackout windows protect capital during high-impact US macro announcements.</p>
+        </div>
+
+        <div id="goldMacroEventsContainer" class="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <!-- Rendered dynamically -->
+        </div>
+      </section>
+
+      <!-- 6. Integrated GitHub Open-Source Repositories Reference (User Requirement #1A) -->
+      <section class="rounded-2xl bg-slate-950/60 border border-slate-800 p-5 space-y-3">
+        <h4 class="text-xs font-bold text-slate-300 font-mono uppercase tracking-wider flex items-center gap-2">
+          <svg class="w-4 h-4 text-slate-400" fill="currentColor" viewBox="0 0 24 24"><path fill-rule="evenodd" clip-rule="evenodd" d="M12 2C6.477 2 2 6.484 2 12.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.008-.868-.013-1.703-2.782.605-3.369-1.343-3.369-1.343-.454-1.158-1.11-1.466-1.11-1.466-.908-.62.069-.608.069-.608 1.003.07 1.53 1.032 1.53 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0112 6.844c.85.004 1.705.115 2.504.337 1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.202 2.398.1 2.651.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.943.359.309.678.92.678 1.855 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482A10.019 10.019 0 0022 12.017C22 6.484 17.522 2 12 2z"></path></svg>
+          Integrated Open-Source Trading Repositories &amp; Quantitative Foundations
+        </h4>
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-3 text-[11px] text-slate-400">
+          <div class="p-3 rounded-xl bg-slate-900 border border-slate-800">
+            <span class="font-bold text-amber-300 block">smartmoneyconcepts (smtlab)</span>
+            Institutional Order Blocks, Fair Value Gaps (FVG), Liquidity Sweeps, and Break of Structure (BOS).
+          </div>
+          <div class="p-3 rounded-xl bg-slate-900 border border-slate-800">
+            <span class="font-bold text-blue-300 block">Quantitative-XAUUSD-Strategy</span>
+            ATR volatility channel expansion, session liquidity sweeps (Asian 00:00-07:00 UTC), and execution timing.
+          </div>
+          <div class="p-3 rounded-xl bg-slate-900 border border-slate-800">
+            <span class="font-bold text-emerald-300 block">backtrader-pullback-window-xauusd</span>
+            Multi-timeframe EMA cloud pullbacks, RSI divergence filters, and quantitative risk management.
+          </div>
+        </div>
+      </section>
+    </div> <!-- End goldView -->
 
   </main>
 
@@ -3486,20 +3702,32 @@ HTML_PAGE = """<!DOCTYPE html>
       currentMainTab = tab;
       const stationView = document.getElementById('stationView');
       const perfView = document.getElementById('performanceView');
+      const goldView = document.getElementById('goldView');
       const tabStationBtn = document.getElementById('navTabStation');
       const tabPerfBtn = document.getElementById('navTabPerformance');
+      const tabGoldBtn = document.getElementById('navTabGold');
+
+      // Hide all views
+      if (stationView) stationView.classList.add('hidden');
+      if (perfView) perfView.classList.add('hidden');
+      if (goldView) goldView.classList.add('hidden');
+
+      // Reset button styles
+      if (tabStationBtn) tabStationBtn.className = 'px-3.5 py-1.5 rounded-lg text-xs font-bold transition text-slate-400 hover:text-white hover:bg-slate-800 flex items-center gap-2';
+      if (tabPerfBtn) tabPerfBtn.className = 'px-3.5 py-1.5 rounded-lg text-xs font-bold transition text-slate-400 hover:text-white hover:bg-slate-800 flex items-center gap-2';
+      if (tabGoldBtn) tabGoldBtn.className = 'px-3.5 py-1.5 rounded-lg text-xs font-bold transition text-amber-400 hover:text-amber-300 hover:bg-slate-800 flex items-center gap-2';
 
       if (tab === 'station') {
-        stationView.classList.remove('hidden');
-        perfView.classList.add('hidden');
-        tabStationBtn.className = 'px-3.5 py-1.5 rounded-lg text-xs font-bold transition bg-brand text-white shadow flex items-center gap-2';
-        tabPerfBtn.className = 'px-3.5 py-1.5 rounded-lg text-xs font-bold transition text-slate-400 hover:text-white hover:bg-slate-800 flex items-center gap-2';
-      } else {
-        stationView.classList.add('hidden');
-        perfView.classList.remove('hidden');
-        tabPerfBtn.className = 'px-3.5 py-1.5 rounded-lg text-xs font-bold transition bg-brand text-white shadow flex items-center gap-2';
-        tabStationBtn.className = 'px-3.5 py-1.5 rounded-lg text-xs font-bold transition text-slate-400 hover:text-white hover:bg-slate-800 flex items-center gap-2';
+        if (stationView) stationView.classList.remove('hidden');
+        if (tabStationBtn) tabStationBtn.className = 'px-3.5 py-1.5 rounded-lg text-xs font-bold transition bg-brand text-white shadow flex items-center gap-2';
+      } else if (tab === 'performance') {
+        if (perfView) perfView.classList.remove('hidden');
+        if (tabPerfBtn) tabPerfBtn.className = 'px-3.5 py-1.5 rounded-lg text-xs font-bold transition bg-brand text-white shadow flex items-center gap-2';
         loadPerformanceDashboard();
+      } else if (tab === 'gold') {
+        if (goldView) goldView.classList.remove('hidden');
+        if (tabGoldBtn) tabGoldBtn.className = 'px-3.5 py-1.5 rounded-lg text-xs font-bold transition bg-amber-500 text-slate-950 shadow flex items-center gap-2 font-black';
+        loadGoldDashboard();
       }
     }
 
@@ -4228,6 +4456,374 @@ HTML_PAGE = """<!DOCTYPE html>
       }
     }
 
+    // ==============================================================================
+    // GOLD TRADING INTELLIGENCE CONTROLLER
+    // ==============================================================================
+    let goldBacktestData = null;
+
+    async function loadGoldDashboard(force=false) {
+      const syncIcon = document.getElementById('goldSyncIcon');
+      if (syncIcon) syncIcon.classList.add('animate-spin');
+
+      try {
+        // 1. Fetch Overview
+        const overviewRes = await fetch('/api/gold/overview');
+        if (overviewRes.ok) {
+          const ov = await overviewRes.json();
+          renderGoldOverview(ov);
+        }
+
+        // 2. Fetch Setups
+        const setupsRes = await fetch('/api/gold/setups');
+        if (setupsRes.ok) {
+          const setups = await setupsRes.json();
+          renderGoldSetups(setups);
+        }
+
+        // 3. Fetch Multi-Timeframe Matrix
+        const matrixRes = await fetch('/api/gold/matrix');
+        if (matrixRes.ok) {
+          const matrix = await matrixRes.json();
+          renderGoldMtfMatrix(matrix);
+        }
+
+        // 4. Fetch Backtest Results
+        const btRes = await fetch('/api/gold/backtest/results');
+        if (btRes.ok) {
+          goldBacktestData = await btRes.json();
+          renderGoldBacktest(goldBacktestData);
+        }
+
+        // 5. Fetch Macro Events
+        const macroRes = await fetch('/api/gold/macro');
+        if (macroRes.ok) {
+          const events = await macroRes.json();
+          renderGoldMacroEvents(events);
+        }
+      } catch (err) {
+        console.error('Error loading Gold dashboard:', err);
+      } finally {
+        if (syncIcon) syncIcon.classList.remove('animate-spin');
+      }
+    }
+
+    function renderGoldOverview(ov) {
+      const bidAskEl = document.getElementById('goldBidAsk');
+      if (bidAskEl) bidAskEl.innerText = `${ov.bid} / ${ov.ask}`;
+      const spreadEl = document.getElementById('goldSpreadDisplay');
+      if (spreadEl) spreadEl.innerText = `$${ov.spread_usd.toFixed(2)} (${ov.spread_points} pts)`;
+      const regimeTextEl = document.getElementById('goldRegimeText');
+      if (regimeTextEl) regimeTextEl.innerText = ov.regime.replace(/_/g, ' ');
+      const atrEl = document.getElementById('goldAtrDisplay');
+      if (atrEl) atrEl.innerText = `$${ov.atr_14.toFixed(2)}`;
+      const rsiEl = document.getElementById('goldRsiDisplay');
+      if (rsiEl) rsiEl.innerText = ov.rsi_14.toFixed(1);
+      const asianRangeEl = document.getElementById('goldAsianRange');
+      if (asianRangeEl) asianRangeEl.innerText = `$${ov.asian_low} - $${ov.asian_high}`;
+      const asianStatusEl = document.getElementById('goldAsianStatus');
+      if (asianStatusEl) asianStatusEl.innerText = ov.asian_status.replace(/_/g, ' ');
+
+      const badge = document.getElementById('goldRegimeBadge');
+      if (badge) {
+        if (ov.bias === 'BULLISH') {
+          badge.className = 'px-2.5 py-0.5 rounded-full text-[10px] font-bold font-mono bg-emerald-500/20 text-emeraldaccent border border-emerald-500/30';
+          badge.innerText = 'BULLISH BIAS';
+        } else if (ov.bias === 'BEARISH') {
+          badge.className = 'px-2.5 py-0.5 rounded-full text-[10px] font-bold font-mono bg-rose-500/20 text-rose-400 border border-rose-500/30';
+          badge.innerText = 'BEARISH BIAS';
+        } else {
+          badge.className = 'px-2.5 py-0.5 rounded-full text-[10px] font-bold font-mono bg-amber-500/20 text-amber-300 border border-amber-500/30';
+          badge.innerText = 'NEUTRAL / RANGE';
+        }
+      }
+    }
+
+    function renderGoldSetups(setups) {
+      const container = document.getElementById('goldSetupsContainer');
+      if (!container) return;
+      if (!setups || setups.length === 0) {
+        container.innerHTML = `<div class="p-6 rounded-xl bg-slate-900 border border-bordercol text-center text-slate-400 text-xs">No active Gold trade setups currently qualifying for strict 90%+ institutional criteria.</div>`;
+        return;
+      }
+
+      container.innerHTML = setups.map(s => {
+        const isBuy = s.direction === 'BUY';
+        const isSell = s.direction === 'SELL';
+        const badgeBg = isBuy ? 'bg-emerald-500 text-slate-950' : (isSell ? 'bg-rose-600 text-white' : 'bg-slate-700 text-slate-300');
+
+        return `
+          <div class="rounded-2xl bg-panel border ${isBuy ? 'border-emerald-500/30' : (isSell ? 'border-rose-500/30' : 'border-bordercol')} p-6 shadow-xl space-y-4">
+            <div class="flex flex-wrap items-center justify-between gap-3 border-b border-bordercol/80 pb-4">
+              <div class="flex items-center gap-3">
+                <span class="px-3 py-1 rounded-lg text-xs font-black font-mono tracking-wider ${badgeBg}">
+                  ${s.direction}
+                </span>
+                <div>
+                  <h4 class="text-base font-bold text-white flex items-center gap-2">
+                    ${s.strategy}
+                    <span class="text-xs font-mono font-normal text-slate-400">(${s.methodology})</span>
+                  </h4>
+                  <span class="text-xs text-slate-400 font-mono">Timeframe: <strong class="text-slate-200">${s.timeframe}</strong> &bull; R:R: <strong class="text-amber-400">${s.rr_ratio}</strong></span>
+                </div>
+              </div>
+              <div class="flex items-center gap-3">
+                <div class="text-right">
+                  <span class="text-[10px] uppercase tracking-wider text-slate-400 font-bold block">Validated Confidence</span>
+                  <span class="text-sm font-mono font-black text-emeraldaccent">${s.confidence_score}%</span>
+                </div>
+                ${s.direction !== 'NO TRADE' ? `
+                  <button onclick="executeGoldSetup('${s.direction}', ${s.entry}, ${s.sl}, ${s.tp1})" class="px-4 py-2 rounded-xl bg-brand hover:bg-blue-500 text-white text-xs font-bold transition shadow-lg shadow-blue-500/20 flex items-center gap-1.5">
+                    Execute Trade
+                  </button>
+                ` : ''}
+              </div>
+            </div>
+
+            <!-- Price Level Grid -->
+            <div class="grid grid-cols-2 sm:grid-cols-5 gap-3">
+              <div class="p-3 rounded-xl bg-slate-950/70 border border-bordercol">
+                <span class="text-[10px] text-slate-400 font-mono uppercase block">Entry Zone</span>
+                <span class="text-xs font-mono font-bold text-white">${s.entry_zone || s.entry}</span>
+              </div>
+              <div class="p-3 rounded-xl bg-slate-950/70 border border-rose-500/20">
+                <span class="text-[10px] text-rose-400 font-mono uppercase block">Stop Loss (SL)</span>
+                <span class="text-xs font-mono font-bold text-rose-300">${s.sl}</span>
+              </div>
+              <div class="p-3 rounded-xl bg-slate-950/70 border border-emerald-500/20">
+                <span class="text-[10px] text-emeraldaccent font-mono uppercase block">Take Profit 1</span>
+                <span class="text-xs font-mono font-bold text-emeraldaccent">${s.tp1}</span>
+              </div>
+              <div class="p-3 rounded-xl bg-slate-950/70 border border-emerald-500/20">
+                <span class="text-[10px] text-emeraldaccent font-mono uppercase block">Take Profit 2</span>
+                <span class="text-xs font-mono font-bold text-emeraldaccent">${s.tp2}</span>
+              </div>
+              <div class="p-3 rounded-xl bg-slate-950/70 border border-emerald-500/20">
+                <span class="text-[10px] text-emeraldaccent font-mono uppercase block">Take Profit 3</span>
+                <span class="text-xs font-mono font-bold text-emeraldaccent">${s.tp3}</span>
+              </div>
+            </div>
+
+            <!-- Technical Invalidation Box (Requirement 2C) -->
+            <div class="p-4 rounded-xl bg-slate-950 border border-rose-500/30 space-y-2">
+              <div class="flex items-center gap-2">
+                <span class="w-2 h-2 rounded-full bg-rose-500"></span>
+                <h5 class="text-xs font-bold uppercase tracking-wider text-rose-400 font-mono">Technical Invalidation Notes</h5>
+              </div>
+              <div class="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs">
+                <div class="p-2.5 rounded-lg bg-slate-900 border border-bordercol/80">
+                  <span class="text-[10px] text-slate-400 font-bold block mb-1">🚫 SETUP INVALIDATION</span>
+                  <p class="text-slate-300">${s.invalidation ? s.invalidation.setup_invalidation : '--'}</p>
+                </div>
+                <div class="p-2.5 rounded-lg bg-slate-900 border border-bordercol/80">
+                  <span class="text-[10px] text-rose-400 font-bold block mb-1">🛑 STOP-LOSS INVALIDATION</span>
+                  <p class="text-slate-300">${s.invalidation ? s.invalidation.stop_loss_invalidation : '--'}</p>
+                </div>
+                <div class="p-2.5 rounded-lg bg-slate-900 border border-bordercol/80">
+                  <span class="text-[10px] text-amber-400 font-bold block mb-1">⏳ TIME-BASED INVALIDATION</span>
+                  <p class="text-slate-300">${s.invalidation ? s.invalidation.time_invalidation : '--'}</p>
+                </div>
+              </div>
+            </div>
+
+            <!-- Supporting Indicators & Rationale -->
+            <div class="p-3 rounded-xl bg-slate-950/40 border border-bordercol/60 text-xs text-slate-300 space-y-1.5">
+              <span class="text-[10px] uppercase font-bold text-slate-400 font-mono block">Institutional Thesis & Confluence</span>
+              <p class="text-slate-300">${s.rationale}</p>
+              ${s.supporting_signals && s.supporting_signals.length > 0 ? `
+                <div class="flex flex-wrap gap-2 pt-1">
+                  ${s.supporting_signals.map(sig => `<span class="px-2 py-0.5 rounded bg-slate-900 text-slate-400 border border-bordercol text-[10px] font-mono">&bull; ${sig}</span>`).join('')}
+                </div>
+              ` : ''}
+            </div>
+          </div>
+        `;
+      }).join('');
+    }
+
+    function renderGoldMtfMatrix(matrix) {
+      const grid = document.getElementById('goldMtfGrid');
+      const scoreEl = document.getElementById('goldMtfScore');
+      if (!matrix || !matrix.timeframes || !grid) return;
+
+      if (scoreEl) {
+        scoreEl.innerText = `${matrix.composite_score}% (${matrix.overall_bias})`;
+        if (matrix.overall_bias === 'BULLISH') {
+          scoreEl.className = 'px-3 py-1 rounded-full text-xs font-mono font-bold bg-emerald-500/20 text-emeraldaccent border border-emerald-500/30';
+        } else if (matrix.overall_bias === 'BEARISH') {
+          scoreEl.className = 'px-3 py-1 rounded-full text-xs font-mono font-bold bg-rose-500/20 text-rose-400 border border-rose-500/30';
+        } else {
+          scoreEl.className = 'px-3 py-1 rounded-full text-xs font-mono font-bold bg-blue-500/20 text-blue-400 border border-blue-500/30';
+        }
+      }
+
+      const tfs = ['M1', 'M5', 'M15', 'M30', 'H1', 'H4', 'D1', 'W1'];
+      grid.innerHTML = tfs.map(tf => {
+        const item = matrix.timeframes[tf] || { trend: 'NEUTRAL', rsi: 50.0, atr: 0.0, structure: 'Neutral' };
+        const isBull = item.trend === 'BULLISH';
+        const isBear = item.trend === 'BEARISH';
+        const badgeColor = isBull ? 'text-emeraldaccent bg-emerald-500/10 border-emerald-500/30' : (isBear ? 'text-rose-400 bg-rose-500/10 border-rose-500/30' : 'text-slate-400 bg-slate-800 border-bordercol');
+
+        return `
+          <div class="p-3.5 rounded-xl bg-slate-950/70 border border-bordercol space-y-2 text-center">
+            <span class="text-xs font-black font-mono text-white block">${tf}</span>
+            <span class="px-2 py-0.5 rounded text-[10px] font-bold font-mono border block ${badgeColor}">
+              ${item.trend}
+            </span>
+            <div class="text-[10px] font-mono text-slate-400 space-y-0.5 pt-1">
+              <div>RSI: <strong class="text-slate-200">${item.rsi || 50}</strong></div>
+              <div>ATR: <strong class="text-slate-200">$${item.atr ? item.atr.toFixed(1) : '--'}</strong></div>
+              <div class="truncate text-[9px] text-slate-500">${item.structure || '--'}</div>
+            </div>
+          </div>
+        `;
+      }).join('');
+    }
+
+    function renderGoldBacktest(data) {
+      if (!data || !data.leaderboard) return;
+      const tbody = document.getElementById('goldLeaderboardTbody');
+      if (!tbody) return;
+      tbody.innerHTML = data.leaderboard.map((item, idx) => {
+        const isPositive = item.net_profit >= 0;
+        return `
+          <tr class="hover:bg-slate-900/60 font-mono transition">
+            <td class="py-3 px-4 font-bold text-white flex items-center gap-2">
+              <span class="w-5 h-5 rounded-full ${idx === 0 ? 'bg-amber-500 text-slate-950' : 'bg-slate-800 text-slate-400'} flex items-center justify-center text-[10px] font-black">${idx + 1}</span>
+              ${item.name}
+            </td>
+            <td class="py-3 px-4 font-bold ${item.win_rate >= 50 ? 'text-emeraldaccent' : 'text-slate-300'}">${item.win_rate.toFixed(1)}%</td>
+            <td class="py-3 px-4 font-bold ${item.profit_factor >= 1.0 ? 'text-emeraldaccent' : 'text-slate-400'}">${item.profit_factor.toFixed(2)}</td>
+            <td class="py-3 px-4 font-bold ${isPositive ? 'text-emeraldaccent' : 'text-rose-400'}">${isPositive ? '+' : ''}$${item.net_profit.toFixed(2)}</td>
+            <td class="py-3 px-4 text-rose-400">${item.max_drawdown_pct.toFixed(1)}%</td>
+            <td class="py-3 px-4 text-slate-300">${item.total_trades}</td>
+            <td class="py-3 px-4 text-slate-300">$${item.expectancy.toFixed(2)}</td>
+            <td class="py-3 px-4 text-slate-300">${item.recovery_factor.toFixed(2)}</td>
+            <td class="py-3 px-4 text-right">
+              <button onclick="selectGoldStrategyCurve('${item.strategy}')" class="px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 text-[10px] font-bold transition border border-bordercol">
+                View Curve
+              </button>
+            </td>
+          </tr>
+        `;
+      }).join('');
+
+      const best = data.best_strategy || (data.leaderboard[0] ? data.leaderboard[0].strategy : null);
+      if (best) {
+        selectGoldStrategyCurve(best);
+      }
+    }
+
+    function selectGoldStrategyCurve(strategyKey) {
+      if (!goldBacktestData || !goldBacktestData.strategies || !goldBacktestData.strategies[strategyKey]) return;
+      const strat = goldBacktestData.strategies[strategyKey];
+      const titleEl = document.getElementById('goldEquityCurveTitle');
+      if (titleEl) titleEl.innerText = `${strat.strategy_name.toUpperCase()} — EQUITY CURVE (5,000 BARS)`;
+      renderGoldEquitySvg(strat.equity_curve || []);
+    }
+
+    function renderGoldEquitySvg(curve) {
+      const container = document.getElementById('goldEquitySvgContainer');
+      if (!container) return;
+      if (!curve || curve.length < 2) {
+        container.innerHTML = `<span class="text-xs text-slate-500 font-mono">No curve points available</span>`;
+        return;
+      }
+
+      const balances = curve.map(p => p.balance);
+      const minB = Math.min(...balances);
+      const maxB = Math.max(...balances);
+      const range = (maxB - minB) || 1.0;
+
+      const w = 800;
+      const h = 160;
+      const pad = 15;
+
+      const pts = curve.map((p, idx) => {
+        const x = pad + (idx / (curve.length - 1)) * (w - 2 * pad);
+        const y = h - pad - ((p.balance - minB) / range) * (h - 2 * pad);
+        return `${x.toFixed(1)},${y.toFixed(1)}`;
+      });
+
+      const pathStr = `M ${pts.join(' L ')}`;
+      const fillStr = `M ${pts[0]} L ${pts.join(' L ')} L ${w - pad},${h - pad} L ${pad},${h - pad} Z`;
+      const isProfitable = balances[balances.length - 1] >= balances[0];
+      const strokeColor = isProfitable ? '#10b981' : '#f43f5e';
+
+      container.innerHTML = `
+        <svg viewBox="0 0 ${w} ${h}" class="w-full h-full overflow-visible">
+          <defs>
+            <linearGradient id="curveGrad" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stop-color="${strokeColor}" stop-opacity="0.25"/>
+              <stop offset="100%" stop-color="${strokeColor}" stop-opacity="0.0"/>
+            </linearGradient>
+          </defs>
+          <path d="${fillStr}" fill="url(#curveGrad)"/>
+          <path d="${pathStr}" fill="none" stroke="${strokeColor}" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+          <text x="${pad}" y="${h - 2}" fill="#64748b" font-size="10" font-family="monospace">Start: $${balances[0].toFixed(2)}</text>
+          <text x="${w - pad}" y="${h - 2}" text-anchor="end" fill="${strokeColor}" font-size="10" font-family="monospace" font-weight="bold">End: $${balances[balances.length - 1].toFixed(2)}</text>
+        </svg>
+      `;
+    }
+
+    async function triggerGoldBacktest() {
+      const btn = document.getElementById('btnRunGoldBacktest');
+      const spinner = document.getElementById('backtestSpinner');
+      if (btn) btn.disabled = true;
+      if (spinner) spinner.classList.remove('hidden');
+
+      try {
+        const res = await fetch('/api/gold/backtest/run', { method: 'POST' });
+        if (res.ok) {
+          goldBacktestData = await res.json();
+          renderGoldBacktest(goldBacktestData);
+          alert('Gold historical backtest completed across 5,000 real M15 bars!');
+        } else {
+          alert('Failed to execute backtest');
+        }
+      } catch (err) {
+        alert('Backtest error: ' + err);
+      } finally {
+        if (btn) btn.disabled = false;
+        if (spinner) spinner.classList.add('hidden');
+      }
+    }
+
+    function renderGoldMacroEvents(events) {
+      const container = document.getElementById('goldMacroEventsContainer');
+      if (!container || !events || events.length === 0) return;
+
+      container.innerHTML = events.map(ev => {
+        const isCritical = ev.impact === 'CRITICAL';
+        return `
+          <div class="p-4 rounded-xl bg-slate-950 border ${isCritical ? 'border-rose-500/40' : 'border-amber-500/30'} space-y-2">
+            <div class="flex items-center justify-between">
+              <span class="text-xs font-bold text-white">${ev.event}</span>
+              <span class="px-2 py-0.5 rounded text-[10px] font-mono font-bold ${isCritical ? 'bg-rose-500/20 text-rose-400 border border-rose-500/30' : 'bg-amber-500/20 text-amber-300 border border-amber-500/30'}">
+                ${ev.impact} IMPACT
+              </span>
+            </div>
+            <div class="text-[11px] font-mono text-slate-400">Scheduled: <strong class="text-slate-200">${ev.time_utc}</strong> &bull; Currency: <strong class="text-amber-400">${ev.currency}</strong></div>
+            <p class="text-xs text-slate-300">${ev.historical_impact}</p>
+            <div class="p-2 rounded bg-slate-900 border border-bordercol text-[11px] text-amber-300 font-mono">
+              <strong>Rule:</strong> ${ev.rule}
+            </div>
+          </div>
+        `;
+      }).join('');
+    }
+
+    function executeGoldSetup(action, entry, sl, tp) {
+      switchMainTab('station');
+      fetchAndApplySymbolQuote('XAUUSD');
+      const actionInput = document.getElementById('orderAction');
+      const slInput = document.getElementById('orderSl');
+      const tpInput = document.getElementById('orderTp');
+      if (actionInput) actionInput.value = action;
+      if (slInput) slInput.value = sl;
+      if (tpInput) tpInput.value = tp;
+      alert(`Pre-filled order form with Gold ${action} setup at ${entry} (SL: ${sl}, TP: ${tp})`);
+    }
+
     loadSymbolsCatalog();
     fetchAndApplySymbolQuote('BTCUSD');
     fetchSetups();
@@ -4244,6 +4840,41 @@ HTML_PAGE = """<!DOCTYPE html>
 </body>
 </html>
 """
+
+def get_gold_overview_data():
+    quote = get_symbol_quote("XAUUSD")
+    df_m15 = get_gold_candles("M15", 150, prefer_cache=True)
+    df_h1 = get_gold_candles("H1", 100, prefer_cache=True)
+    
+    regime = analyze_market_regime(df_h1) if not df_h1.empty else {"regime": "NEUTRAL", "bias": "NEUTRAL", "direction": "NO TRADE"}
+    asian = detect_asian_session_levels(df_m15) if not df_m15.empty else {"asian_high": 0, "asian_low": 0}
+    atr = compute_atr(df_m15, 14).iloc[-1] if not df_m15.empty else 8.0
+    rsi = compute_rsi(df_m15, 14).iloc[-1] if not df_m15.empty else 50.0
+    
+    bid = quote.get("bid", 2740.0) if quote else 2740.0
+    ask = quote.get("ask", 2743.8) if quote else 2743.8
+    spread_pts = quote.get("spread", 380) if quote else 380
+    spread_usd = round(spread_pts * 0.01, 2)
+    
+    return {
+        "symbol": "XAUUSD",
+        "name": "Gold / US Dollar",
+        "bid": bid,
+        "ask": ask,
+        "spread_points": spread_pts,
+        "spread_usd": spread_usd,
+        "atr_14": round(float(atr), 2),
+        "rsi_14": round(float(rsi), 1),
+        "regime": regime.get("regime", "RANGING_CONSOLIDATION"),
+        "bias": regime.get("bias", "NEUTRAL"),
+        "direction": regime.get("direction", "NO TRADE"),
+        "volatility": regime.get("volatility", "NORMAL"),
+        "asian_high": asian.get("asian_high", 0.0),
+        "asian_low": asian.get("asian_low", 0.0),
+        "asian_range_pts": asian.get("asian_range_pts", 0.0),
+        "asian_status": asian.get("status", "INSIDE_ASIAN_RANGE"),
+        "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    }
 
 class DerivServer(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -4327,6 +4958,44 @@ class DerivServer(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "application/json")
             self.end_headers()
             self.wfile.write(json.dumps(st).encode("utf-8"))
+        elif url.path == "/api/gold/overview":
+            data = get_gold_overview_data()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(data).encode("utf-8"))
+        elif url.path == "/api/gold/setups":
+            setups = generate_gold_trade_setups()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(setups).encode("utf-8"))
+        elif url.path == "/api/gold/matrix":
+            matrix = get_multi_timeframe_matrix()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(matrix).encode("utf-8"))
+        elif url.path == "/api/gold/macro":
+            events = get_gold_macro_events()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(events).encode("utf-8"))
+        elif url.path == "/api/gold/backtest/results":
+            if BACKTEST_RESULTS_FILE.exists():
+                try:
+                    data = json.loads(BACKTEST_RESULTS_FILE.read_text(encoding="utf-8"))
+                except Exception:
+                    bt = GoldBacktester()
+                    data = bt.run_all_strategies(5000)
+            else:
+                bt = GoldBacktester()
+                data = bt.run_all_strategies(5000)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(data).encode("utf-8"))
         else:
             self.send_response(404)
             self.end_headers()
@@ -4461,6 +5130,14 @@ class DerivServer(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "application/json")
             self.end_headers()
             self.wfile.write(json.dumps(res).encode("utf-8"))
+
+        elif url.path == "/api/gold/backtest/run":
+            bt = GoldBacktester()
+            data = bt.run_all_strategies(5000)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(data).encode("utf-8"))
             
         else:
             self.send_response(404)

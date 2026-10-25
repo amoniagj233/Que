@@ -1,5 +1,22 @@
 [
   {
+    "setup_id": "GRP-1792921519068589300-VOL_20",
+    "symbol": "VOL_20",
+    "direction": "SELL",
+    "entry_price": 807658.0,
+    "sl": 808834.0,
+    "tp": 805044.0,
+    "volume": 0.01,
+    "tickets": [
+      1368160016
+    ],
+    "confidence": "Unscored manual entry",
+    "reason": "Fixed-target group; estimated stop exposure 11.76 USD before costs. Setup: VOL_20 Bearish Momentum (Short) (90/100 rule score) - M15 EMA20 at 808400.0, RSI(14) at 57.7, ATR(14) at 715.0 | Confluence: Price below EMA20; Negative EMA slope",
+    "execution_type": "MULTI_TP_2_TRADES",
+    "execution_time": "2026-10-25 09:45:19 UTC",
+    "status": "OPEN"
+  },
+  {
     "setup_id": "GRP-1792920255207553600-ETH",
     "symbol": "ETH",
     "direction": "SELL",
@@ -31,7 +48,7 @@
     "reason": "Fixed-target group; estimated stop exposure 11.73 USD before costs. Auto-Execution (88-100 rule score): M15 EMA20 at 316951.0, RSI(14) at 31.6, ATR(14) at 658.0 | Confluence: Price below EMA20; Negative EMA slope",
     "execution_type": "MULTI_TP_2_TRADES",
     "execution_time": "2026-10-25 09:24:15 UTC",
-    "status": "OPEN"
+    "status": "CLOSED"
   },
   {
     "setup_id": "GRP-1792920254233777300-BOOM_1",
