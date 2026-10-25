@@ -1,0 +1,11 @@
+{
+  "enabled": false,
+  "min_confidence": 92,
+  "lot_size": 0.02,
+  "tp_mode": "RANDOM_TP1_TP2",
+  "news_filter_enabled": true,
+  "max_daily_trades": 3,
+  "single_trade_enforcement": true,
+  "enable_profit_chaser": true,
+  "scan_interval_seconds": 15
+}

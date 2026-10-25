@@ -157,5 +157,27 @@ class TestGoldIntelligence(unittest.TestCase):
         self.assertAlmostEqual(metrics["win_rate_pct"], 66.7, places=1)
         self.assertGreater(metrics["profit_factor"], 1.0)
 
+    def test_gold_auto_trader_module(self):
+        """Test GoldAutoTrader configuration, toggling, and gating."""
+        from gold_auto_trader import GoldAutoTrader
+        trader = GoldAutoTrader()
+        status = trader.get_status()
+        self.assertIn("enabled", status)
+        self.assertIn("config", status)
+        self.assertIn("status", status)
+        self.assertEqual(status["config"]["min_confidence"], 90)
+
+        # Test toggle
+        curr_state = trader.config.get("enabled", False)
+        new_state = trader.toggle_auto_trade()
+        self.assertEqual(new_state, not curr_state)
+        # Restore
+        trader.toggle_auto_trade()
+
+        # Test news blackout function
+        is_blackout, msg = trader.is_news_blackout_active()
+        self.assertIsInstance(is_blackout, bool)
+        self.assertIsInstance(msg, str)
+
 if __name__ == "__main__":
     unittest.main()

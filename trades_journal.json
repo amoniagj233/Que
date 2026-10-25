@@ -1,5 +1,39 @@
 [
   {
+    "setup_id": "GRP-1792922788849381200-VOL_10",
+    "symbol": "VOL_10",
+    "direction": "BUY",
+    "entry_price": 1044709.0,
+    "sl": 1043979.0,
+    "tp": 1046331.0,
+    "volume": 0.01,
+    "tickets": [
+      1368237451
+    ],
+    "confidence": "97/100 rule score",
+    "reason": "Fixed-target group; estimated stop exposure 7.30 USD before costs. Auto-Execution (88-100 rule score): M15 EMA20 at 1043586.0, RSI(14) at 63.7, ATR(14) at 399.0 | Confluence: Price above EMA20; Positive EMA slope",
+    "execution_type": "MULTI_TP_2_TRADES",
+    "execution_time": "2026-10-25 10:06:29 UTC",
+    "status": "OPEN"
+  },
+  {
+    "setup_id": "GRP-1792922788369115600-CRASH_",
+    "symbol": "CRASH_100",
+    "direction": "SELL",
+    "entry_price": 313625.0,
+    "sl": 314791.0,
+    "tp": 312459.0,
+    "volume": 0.01,
+    "tickets": [
+      1368237425
+    ],
+    "confidence": "97/100 rule score",
+    "reason": "Fixed-target group; estimated stop exposure 11.66 USD before costs. Auto-Execution (88-100 rule score): M15 EMA20 at 316439.0, RSI(14) at 32.7, ATR(14) at 647.0 | Confluence: Price below EMA20; Negative EMA slope",
+    "execution_type": "MULTI_TP_2_TRADES",
+    "execution_time": "2026-10-25 10:06:28 UTC",
+    "status": "OPEN"
+  },
+  {
     "setup_id": "GRP-1792921519068589300-VOL_20",
     "symbol": "VOL_20",
     "direction": "SELL",
@@ -14,7 +48,7 @@
     "reason": "Fixed-target group; estimated stop exposure 11.76 USD before costs. Setup: VOL_20 Bearish Momentum (Short) (90/100 rule score) - M15 EMA20 at 808400.0, RSI(14) at 57.7, ATR(14) at 715.0 | Confluence: Price below EMA20; Negative EMA slope",
     "execution_type": "MULTI_TP_2_TRADES",
     "execution_time": "2026-10-25 09:45:19 UTC",
-    "status": "OPEN"
+    "status": "CLOSED"
   },
   {
     "setup_id": "GRP-1792920255207553600-ETH",
@@ -137,7 +171,7 @@
     "reason": "Fixed-target group; estimated stop exposure 11.87 USD before costs. Auto-Execution (88-100 rule score): M15 EMA20 at 1041728.0, RSI(14) at 50.4, ATR(14) at 335.0 | Confluence: Price above EMA20; Positive EMA slope",
     "execution_type": "MULTI_TP_2_TRADES",
     "execution_time": "2026-10-25 09:08:52 UTC",
-    "status": "OPEN"
+    "status": "CLOSED"
   },
   {
     "setup_id": "GRP-1792919330346932700-CRASH_",

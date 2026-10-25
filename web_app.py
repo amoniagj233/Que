@@ -38,6 +38,7 @@ from gold_intelligence import (
     GOLD_SPEC
 )
 from gold_backtester import GoldBacktester, BACKTEST_RESULTS_FILE
+from gold_auto_trader import GoldAutoTrader
 
 HEADWAY_TERMINAL_PATH = os.getenv("MT5_PATH", r"C:\Program Files\Headway MT5 Terminal\terminal64.exe")
 BASE_DIR = Path(__file__).resolve().parent
@@ -1260,6 +1261,7 @@ class ProfitGuardian:
 
 guardian = None
 profit_chaser = SmartProfitChaser()
+gold_auto_trader = GoldAutoTrader(profit_chaser=profit_chaser, mt5_lock=mt5_lock)
 
 scanner = None
 
@@ -2723,6 +2725,83 @@ HTML_PAGE = """<!DOCTYPE html>
         </div>
       </div>
 
+      <!-- GOLD AUTONOMOUS EXECUTION CONTROL STATION -->
+      <section class="rounded-2xl bg-gradient-to-r from-slate-900 via-panel to-slate-900 border border-amber-500/40 p-5 shadow-2xl space-y-4">
+        <div class="flex flex-wrap items-center justify-between gap-4">
+          <div class="flex items-center gap-3.5">
+            <div id="goldAutoTradePulse" class="w-10 h-10 rounded-xl bg-slate-800 border border-slate-700 flex items-center justify-center text-lg shadow-inner">
+              🤖
+            </div>
+            <div>
+              <div class="flex items-center gap-2">
+                <h3 class="text-sm font-black text-white tracking-tight flex items-center gap-2">
+                  GOLD AUTONOMOUS EXECUTION ENGINE
+                </h3>
+                <span id="goldAutoTradeBadge" class="px-2 py-0.5 rounded-full text-[10px] font-bold font-mono bg-slate-800 text-slate-400 border border-slate-700">STANDBY / DISABLED</span>
+              </div>
+              <p id="goldAutoStatusMsg" class="text-xs text-slate-400 mt-0.5 font-mono">
+                Engine ready &bull; Awaiting activation
+              </p>
+            </div>
+          </div>
+
+          <div class="flex flex-wrap items-center gap-3">
+            <button id="btnToggleGoldAuto" onclick="toggleGoldAutoTrade()" class="px-4 py-2.5 rounded-xl text-xs font-black transition shadow-lg flex items-center gap-2 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700">
+              <span id="goldAutoDot" class="w-2.5 h-2.5 rounded-full bg-slate-500"></span>
+              <span id="goldAutoBtnText">ENABLE GOLD AUTO-TRADE</span>
+            </button>
+            <div class="flex items-center gap-2 bg-slate-950/80 p-1 rounded-xl border border-bordercol">
+              <span class="text-[10px] font-mono text-slate-400 px-2">Lots:</span>
+              <select id="goldLotSelect" onchange="updateGoldAutoSettings()" class="bg-slate-900 text-white font-mono text-xs px-2 py-1 rounded border border-slate-800">
+                <option value="0.01">0.01 Lot (1 oz)</option>
+                <option value="0.02">0.02 Lot (2 oz)</option>
+                <option value="0.05">0.05 Lot (5 oz)</option>
+              </select>
+              <span class="text-[10px] font-mono text-slate-400 px-2">Min Conf:</span>
+              <select id="goldConfSelect" onchange="updateGoldAutoSettings()" class="bg-slate-900 text-emeraldaccent font-mono text-xs px-2 py-1 rounded border border-slate-800 font-bold">
+                <option value="90">≥ 90% Confidence</option>
+                <option value="92">≥ 92% Confidence</option>
+                <option value="95">≥ 95% Confidence</option>
+              </select>
+              <span class="text-[10px] font-mono text-slate-400 px-2">TP Mode:</span>
+              <select id="goldTpSelect" onchange="updateGoldAutoSettings()" class="bg-slate-900 text-amber-300 font-mono text-xs px-2 py-1 rounded border border-slate-800 font-bold">
+                <option value="RANDOM_TP1_TP2">Random TP1/TP2 (Rule #2)</option>
+                <option value="TP1_CONSERVATIVE">TP1 (1.8R Conservative)</option>
+                <option value="TP2_RUNNER">TP2 (4.0R Runner)</option>
+              </select>
+            </div>
+          </div>
+        </div>
+
+        <!-- Inline Settings & Status Metrics -->
+        <div class="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-6 gap-2.5 pt-3 border-t border-slate-800/80 text-xs font-mono">
+          <div class="p-2.5 rounded-lg bg-slate-950/60 border border-bordercol">
+            <span class="text-[10px] text-slate-400 uppercase block">Min Confidence</span>
+            <span id="goldCfgConf" class="font-bold text-emeraldaccent">≥ 90%</span>
+          </div>
+          <div class="p-2.5 rounded-lg bg-slate-950/60 border border-bordercol">
+            <span class="text-[10px] text-slate-400 uppercase block">Lot Size</span>
+            <span id="goldCfgLot" class="font-bold text-white">0.01 Lot (1 oz)</span>
+          </div>
+          <div class="p-2.5 rounded-lg bg-slate-950/60 border border-bordercol">
+            <span class="text-[10px] text-slate-400 uppercase block">TP Target Mode</span>
+            <span id="goldCfgTp" class="font-bold text-amber-300">Random TP1/TP2</span>
+          </div>
+          <div class="p-2.5 rounded-lg bg-slate-950/60 border border-bordercol">
+            <span class="text-[10px] text-slate-400 uppercase block">Today's Trades</span>
+            <span id="goldDailyTrades" class="font-bold text-blue-400">0 / 3 max</span>
+          </div>
+          <div class="p-2.5 rounded-lg bg-slate-950/60 border border-bordercol">
+            <span class="text-[10px] text-slate-400 uppercase block">Open Gold Position</span>
+            <span id="goldOpenPosStatus" class="font-bold text-slate-300">None (0/1)</span>
+          </div>
+          <div class="p-2.5 rounded-lg bg-slate-950/60 border border-bordercol">
+            <span class="text-[10px] text-slate-400 uppercase block">Macro News Gate</span>
+            <span id="goldCfgNews" class="font-bold text-emeraldaccent">ACTIVE (30m)</span>
+          </div>
+        </div>
+      </section>
+
       <!-- 2. Recommended Trade Setups & Technical Invalidation Notes (User Requirement #2) -->
       <section class="space-y-3">
         <div class="flex items-center justify-between">
@@ -2850,6 +2929,24 @@ HTML_PAGE = """<!DOCTYPE html>
             <span class="font-bold text-emerald-300 block">backtrader-pullback-window-xauusd</span>
             Multi-timeframe EMA cloud pullbacks, RSI divergence filters, and quantitative risk management.
           </div>
+        </div>
+      </section>
+
+      <!-- 7. Gold Auto-Execution Activity & Audit Trail -->
+      <section class="rounded-2xl bg-panel border border-bordercol p-6 shadow-xl space-y-4">
+        <div class="flex items-center justify-between">
+          <div>
+            <h3 class="text-base font-bold text-white flex items-center gap-2">
+              <svg class="w-5 h-5 text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"></path></svg>
+              Gold Autonomous Execution Log &amp; Audit Trail
+            </h3>
+            <p class="text-xs text-slate-400">Chronological history of real-time market checks, safety gates, and executed orders.</p>
+          </div>
+          <span class="text-xs font-mono text-slate-400">Updates live</span>
+        </div>
+
+        <div id="goldAuditLogContainer" class="divide-y divide-bordercol/60 rounded-xl border border-bordercol bg-slate-950/50 max-h-60 overflow-y-auto custom-scroll text-xs font-mono">
+          <!-- Rendered dynamically -->
         </div>
       </section>
     </div> <!-- End goldView -->
@@ -4466,6 +4563,13 @@ HTML_PAGE = """<!DOCTYPE html>
       if (syncIcon) syncIcon.classList.add('animate-spin');
 
       try {
+        // 0. Fetch Auto-Trade Status
+        const autoRes = await fetch('/api/gold/auto_trade/status');
+        if (autoRes.ok) {
+          const autoSt = await autoRes.json();
+          renderGoldAutoStatus(autoSt);
+        }
+
         // 1. Fetch Overview
         const overviewRes = await fetch('/api/gold/overview');
         if (overviewRes.ok) {
@@ -4504,6 +4608,149 @@ HTML_PAGE = """<!DOCTYPE html>
         console.error('Error loading Gold dashboard:', err);
       } finally {
         if (syncIcon) syncIcon.classList.remove('animate-spin');
+      }
+    }
+
+    function renderGoldAutoStatus(st) {
+      if (!st) return;
+      const badge = document.getElementById('goldAutoTradeBadge');
+      const dot = document.getElementById('goldAutoDot');
+      const btnText = document.getElementById('goldAutoBtnText');
+      const pulse = document.getElementById('goldAutoTradePulse');
+      const msg = document.getElementById('goldAutoStatusMsg');
+      const btn = document.getElementById('btnToggleGoldAuto');
+
+      if (badge && dot && btnText && btn) {
+        if (st.enabled) {
+          badge.className = 'px-2.5 py-0.5 rounded-full text-[10px] font-bold font-mono bg-emerald-500/20 text-emeraldaccent border border-emerald-500/30';
+          badge.innerText = 'AUTONOMOUS TRADING: ACTIVE';
+          dot.className = 'w-2.5 h-2.5 rounded-full bg-emeraldaccent animate-pulse';
+          btnText.innerText = 'PAUSE GOLD AUTO-TRADE';
+          btn.className = 'px-4 py-2.5 rounded-xl text-xs font-black transition shadow-lg flex items-center gap-2 bg-emerald-600 hover:bg-emerald-500 text-white shadow-emerald-500/20';
+          if (pulse) pulse.className = 'w-10 h-10 rounded-xl bg-emerald-500/20 border border-emerald-500/40 flex items-center justify-center text-lg shadow-inner animate-pulse';
+        } else {
+          badge.className = 'px-2.5 py-0.5 rounded-full text-[10px] font-bold font-mono bg-slate-800 text-slate-400 border border-slate-700';
+          badge.innerText = 'STANDBY / DISABLED';
+          dot.className = 'w-2.5 h-2.5 rounded-full bg-slate-500';
+          btnText.innerText = 'ENABLE GOLD AUTO-TRADE';
+          btn.className = 'px-4 py-2.5 rounded-xl text-xs font-black transition shadow-lg flex items-center gap-2 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700';
+          if (pulse) pulse.className = 'w-10 h-10 rounded-xl bg-slate-800 border border-slate-700 flex items-center justify-center text-lg shadow-inner';
+        }
+      }
+
+      if (msg && st.status_message) {
+        msg.innerText = `${st.status_message} (Check: ${st.last_eval_time || 'Just now'})`;
+      }
+
+      if (st.config) {
+        const confEl = document.getElementById('goldCfgConf');
+        if (confEl) confEl.innerText = `≥ ${st.config.min_confidence}%`;
+        const lotEl = document.getElementById('goldCfgLot');
+        if (lotEl) lotEl.innerText = `${st.config.lot_size} Lot`;
+        const tpEl = document.getElementById('goldCfgTp');
+        if (tpEl) tpEl.innerText = st.config.tp_mode.replace(/_/g, ' ');
+
+        const lotSel = document.getElementById('goldLotSelect');
+        if (lotSel && document.activeElement !== lotSel) lotSel.value = String(st.config.lot_size);
+        const confSel = document.getElementById('goldConfSelect');
+        if (confSel && document.activeElement !== confSel) confSel.value = String(st.config.min_confidence);
+        const tpSel = document.getElementById('goldTpSelect');
+        if (tpSel && document.activeElement !== tpSel) tpSel.value = st.config.tp_mode;
+      }
+
+      const dailyEl = document.getElementById('goldDailyTrades');
+      if (dailyEl) dailyEl.innerText = `${st.daily_trades_count || 0} / ${st.max_daily_trades || 3} max`;
+
+      const openPosEl = document.getElementById('goldOpenPosStatus');
+      if (openPosEl) {
+        if (st.open_gold_positions && st.open_gold_positions.length > 0) {
+          const p = st.open_gold_positions[0];
+          openPosEl.className = 'font-bold text-emeraldaccent';
+          openPosEl.innerText = `#${p.ticket} ${p.direction} (P&L: $${p.profit})`;
+        } else {
+          openPosEl.className = 'font-bold text-slate-400';
+          openPosEl.innerText = 'None (0/1 max)';
+        }
+      }
+
+      const logContainer = document.getElementById('goldAuditLogContainer');
+      if (logContainer && st.recent_logs) {
+        if (st.recent_logs.length === 0) {
+          logContainer.innerHTML = `<div class="p-4 text-center text-slate-500">No autonomous activity recorded yet. Engine initialized and standing by.</div>`;
+        } else {
+          logContainer.innerHTML = st.recent_logs.map(log => {
+            const isFilled = log.status === 'FILLED';
+            const isErr = log.status === 'ERROR';
+            const statusColor = isFilled ? 'text-emeraldaccent' : (isErr ? 'text-rose-400' : 'text-blue-400');
+            return `
+              <div class="p-2.5 px-4 flex items-center justify-between gap-4 hover:bg-slate-900/60 transition">
+                <div class="flex items-center gap-3">
+                  <span class="w-2 h-2 rounded-full ${isFilled ? 'bg-emeraldaccent' : (isErr ? 'bg-rose-500' : 'bg-blue-400')}"></span>
+                  <span class="text-slate-400 font-mono text-[11px]">${log.time || '--'}</span>
+                  <span class="font-bold ${statusColor} text-[11px]">[${log.type || 'INFO'}]</span>
+                  <span class="text-slate-200">${log.message || ''}</span>
+                </div>
+                ${log.ticket ? `<span class="px-2 py-0.5 rounded bg-slate-900 border border-bordercol text-[10px] text-amber-300 font-bold">Ticket #${log.ticket}</span>` : ''}
+              </div>
+            `;
+          }).join('');
+        }
+      }
+    }
+
+    async function toggleGoldAutoTrade() {
+      try {
+        const res = await fetch('/api/gold/auto_trade/toggle', { method: 'POST' });
+        const out = await res.json();
+        loadGoldDashboard();
+      } catch (err) {
+        alert('Toggle error: ' + err);
+      }
+    }
+
+    async function updateGoldAutoSettings() {
+      const lot = parseFloat(document.getElementById('goldLotSelect').value);
+      const conf = parseInt(document.getElementById('goldConfSelect').value);
+      const tpMode = document.getElementById('goldTpSelect').value;
+      try {
+        await fetch('/api/gold/auto_trade/config', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            lot_size: lot,
+            min_confidence: conf,
+            tp_mode: tpMode
+          })
+        });
+        loadGoldDashboard();
+      } catch (err) {
+        console.error('Failed to update Gold auto settings:', err);
+      }
+    }
+
+    async function executeGoldSetupNow(direction, entry, sl, tp, confidence, strategy) {
+      if (!confirm(`Execute 1 Gold trade (${direction} 0.01 lot XAUUSD)?\nEntry: ~${entry}\nSL: ${sl}\nTP: ${tp}\nConfidence: ${confidence}%\nStrategy: ${strategy}\nProtected by Smart Profit Chaser Option B.`)) {
+        return;
+      }
+      try {
+        const lotVal = parseFloat(document.getElementById('goldLotSelect') ? document.getElementById('goldLotSelect').value : 0.01);
+        const res = await fetch('/api/gold/execute_now', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            direction: direction,
+            lot: lotVal,
+            sl: sl,
+            tp: tp,
+            confidence: confidence,
+            strategy: strategy
+          })
+        });
+        const out = await res.json();
+        alert(out.message);
+        loadGoldDashboard();
+      } catch (err) {
+        alert('Execution error: ' + err);
       }
     }
 
@@ -4572,8 +4819,8 @@ HTML_PAGE = """<!DOCTYPE html>
                   <span class="text-sm font-mono font-black text-emeraldaccent">${s.confidence_score}%</span>
                 </div>
                 ${s.direction !== 'NO TRADE' ? `
-                  <button onclick="executeGoldSetup('${s.direction}', ${s.entry}, ${s.sl}, ${s.tp1})" class="px-4 py-2 rounded-xl bg-brand hover:bg-blue-500 text-white text-xs font-bold transition shadow-lg shadow-blue-500/20 flex items-center gap-1.5">
-                    Execute Trade
+                  <button onclick="executeGoldSetupNow('${s.direction}', ${s.entry}, ${s.sl}, ${s.tp1}, ${s.confidence_score}, '${(s.strategy||'').replace(/'/g, "\\'")}')" class="px-4 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-black transition shadow-lg shadow-amber-500/20 flex items-center gap-1.5">
+                    ⚡ Instant Execute (1 Trade)
                   </button>
                 ` : ''}
               </div>
@@ -4836,6 +5083,7 @@ HTML_PAGE = """<!DOCTYPE html>
     setInterval(updateCountdown, 1000);
     setInterval(fetchSetups, 15000);
     setInterval(fetchMultiTpGroups, 3000);
+    setInterval(() => { if (currentMainTab === 'gold') loadGoldDashboard(); }, 5000);
   </script>
 </body>
 </html>
@@ -4996,6 +5244,12 @@ class DerivServer(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "application/json")
             self.end_headers()
             self.wfile.write(json.dumps(data).encode("utf-8"))
+        elif url.path == "/api/gold/auto_trade/status":
+            st = gold_auto_trader.get_status() if gold_auto_trader else {}
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(st).encode("utf-8"))
         else:
             self.send_response(404)
             self.end_headers()
@@ -5138,6 +5392,37 @@ class DerivServer(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "application/json")
             self.end_headers()
             self.wfile.write(json.dumps(data).encode("utf-8"))
+
+        elif url.path == "/api/gold/auto_trade/toggle":
+            new_state = gold_auto_trader.toggle_auto_trade() if gold_auto_trader else False
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({"success": True, "enabled": new_state}).encode("utf-8"))
+
+        elif url.path == "/api/gold/auto_trade/config":
+            cfg = gold_auto_trader.update_config(data) if gold_auto_trader else {}
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({"success": True, "config": cfg}).encode("utf-8"))
+
+        elif url.path == "/api/gold/execute_now":
+            action = data.get("direction", "BUY")
+            lot = float(data.get("lot", 0.01))
+            sl = float(data.get("sl", 0.0))
+            tp = float(data.get("tp", 0.0))
+            conf = int(data.get("confidence", 90))
+            strat = data.get("strategy", "Gold Intelligence Setup")
+            res = gold_auto_trader.execute_gold_order(
+                action=action, lot=lot, sl=sl, tp=tp,
+                confidence_score=conf, strategy_name=strat,
+                notes="Manual Instant Execution via Gold Page", is_auto=False
+            ) if gold_auto_trader else {"success": False, "message": "GoldAutoTrader not initialized"}
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(res).encode("utf-8"))
             
         else:
             self.send_response(404)
