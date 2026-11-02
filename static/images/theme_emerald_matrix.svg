@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 450" width="100%" height="100%">
+  <defs>
+    <radialGradient id="emeraldBg" cx="50%" cy="30%" r="75%">
+      <stop offset="0%" stop-color="#0a291a"/>
+      <stop offset="50%" stop-color="#05140d"/>
+      <stop offset="100%" stop-color="#030805"/>
+    </radialGradient>
+    <linearGradient id="mintLaser" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#00f59b" stop-opacity="0"/>
+      <stop offset="50%" stop-color="#00f59b" stop-opacity="1"/>
+      <stop offset="100%" stop-color="#10b981" stop-opacity="0"/>
+    </linearGradient>
+    <filter id="emeraldGlow">
+      <feGaussianBlur stdDeviation="8" result="coloredBlur"/>
+      <feMerge><feMergeNode in="coloredBlur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <rect width="800" height="450" fill="url(#emeraldBg)"/>
+
+  <!-- Binary Data Streams -->
+  <g font-family="monospace" font-size="9" fill="#10b981" opacity="0.15">
+    <text x="40" y="80">01010011 01001101 01000011</text>
+    <text x="40" y="100">01011000 01000001 01010101</text>
+    <text x="40" y="120">WIN_RATE=94.2% PROFIT=1.06</text>
+    <text x="600" y="80">ORDER_BLOCK_MITIGATED</text>
+    <text x="600" y="100">LIQUIDITY_POOLS_CAPTURED</text>
+    <text x="600" y="120">ALGO_ALPHA_ACTIVE</text>
+  </g>
+
+  <!-- 3D Geometric Crystal Prism -->
+  <g transform="translate(400, 210)" filter="url(#emeraldGlow)">
+    <polygon points="0,-100 80,-20 0,60 -80,-20" fill="#00f59b" fill-opacity="0.3" stroke="#00f59b" stroke-width="2"/>
+    <polygon points="0,60 80,-20 0,110 -80,-20" fill="#10b981" fill-opacity="0.4" stroke="#34d399" stroke-width="2"/>
+    <polygon points="0,-100 0,110" stroke="#fff" stroke-width="1.5" opacity="0.7"/>
+    <circle cx="0" cy="-20" r="15" fill="#fff" filter="url(#emeraldGlow)"/>
+  </g>
+
+  <!-- Massive Upward Profit Vector -->
+  <path d="M 50,340 Q 250,360 400,240 T 750,70" fill="none" stroke="#00f59b" stroke-width="4" filter="url(#emeraldGlow)"/>
+  <path d="M 50,340 Q 250,360 400,240 T 750,70 L 750,450 L 50,450 Z" fill="#10b981" fill-opacity="0.08"/>
+
+  <polygon points="750,70 730,75 745,90" fill="#00f59b"/>
+</svg>

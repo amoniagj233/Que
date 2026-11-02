@@ -1,0 +1,75 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "CRTGoldProSyncState",
+  "type": "object",
+  "properties": {
+    "version": { "type": "string" },
+    "bot_name": { "type": "string" },
+    "magic": { "type": "integer" },
+    "symbol": { "type": "string" },
+    "timestamp_utc": { "type": "string" },
+    "state": { "type": "string" },
+    "bot_status": { "type": "string" },
+    "crt_range": {
+      "type": "object",
+      "properties": {
+        "active": { "type": "boolean" },
+        "time_open": { "type": "string" },
+        "time_close": { "type": "string" },
+        "high": { "type": "number" },
+        "low": { "type": "number" },
+        "midpoint": { "type": "number" },
+        "range_size": { "type": "number" }
+      }
+    },
+    "sweep": {
+      "type": "object",
+      "properties": {
+        "confirmed": { "type": "boolean" },
+        "direction": { "type": "string" },
+        "sweep_price": { "type": "number" },
+        "time": { "type": "string" },
+        "reclaim_status": { "type": "string" }
+      }
+    },
+    "signal": {
+      "type": "object",
+      "properties": {
+        "ready": { "type": "boolean" },
+        "direction": { "type": "string" },
+        "time": { "type": "string" },
+        "planned_entry": { "type": "number" },
+        "planned_sl": { "type": "number" },
+        "planned_tp1": { "type": "number" },
+        "planned_tp2": { "type": "number" },
+        "planned_rr": { "type": "number" }
+      }
+    },
+    "position": {
+      "type": "object",
+      "properties": {
+        "active": { "type": "boolean" },
+        "ticket": { "type": "integer" },
+        "direction": { "type": "string" },
+        "volume": { "type": "number" },
+        "entry_price": { "type": "number" },
+        "sl": { "type": "number" },
+        "tp1": { "type": "number" },
+        "tp2": { "type": "number" },
+        "floating_pnl": { "type": "number" },
+        "tp1_reached": { "type": "boolean" },
+        "open_time": { "type": "string" }
+      }
+    },
+    "metrics": {
+      "type": "object",
+      "properties": {
+        "trades_today": { "type": "integer" },
+        "daily_pnl": { "type": "number" },
+        "win_rate": { "type": "number" },
+        "risk_pct": { "type": "number" }
+      }
+    }
+  },
+  "required": ["version", "bot_name", "magic", "symbol", "state", "bot_status"]
+}

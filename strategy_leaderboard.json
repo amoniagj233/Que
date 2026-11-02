@@ -1,0 +1,62 @@
+{
+  "top_strategies": [
+    {
+      "dna": {
+        "name": "Mut-6495",
+        "timeframe": "M5",
+        "trend_indicator": "EMA_21_55",
+        "entry_trigger": "CANDLE_DIRECTION",
+        "spacing_mode": "ASYMMETRIC_ATR",
+        "atr_mult": 2.18,
+        "asym_growth": 1.4,
+        "waterfall_freeze": true,
+        "waterfall_thresh": 2.2,
+        "lot_mode": "clamped",
+        "max_layers": 5,
+        "tp_mode": "DYNAMIC_ATR",
+        "tp_atr_mult": 1.3,
+        "target_usd": 4.5,
+        "disaster_sl": 150.0
+      },
+      "net_profit": 1926.56,
+      "roi_pct": 192.7,
+      "win_rate": 97.2,
+      "total_cycles": 281,
+      "profit_factor": 4.83,
+      "max_drawdown": 265.57,
+      "max_dd_pct": 9.1,
+      "disaster_stops": 3,
+      "fitness": 4741.75
+    },
+    {
+      "dna": {
+        "name": "Mut-5327",
+        "timeframe": "M5",
+        "trend_indicator": "EMA_21_55",
+        "entry_trigger": "CANDLE_DIRECTION",
+        "spacing_mode": "ASYMMETRIC_ATR",
+        "atr_mult": 2.03,
+        "asym_growth": 1.4,
+        "waterfall_freeze": false,
+        "waterfall_thresh": 2.2,
+        "lot_mode": "clamped",
+        "max_layers": 5,
+        "tp_mode": "DYNAMIC_ATR",
+        "tp_atr_mult": 1.3,
+        "target_usd": 4.8,
+        "disaster_sl": 150.0
+      },
+      "net_profit": 2008.21,
+      "roi_pct": 200.8,
+      "win_rate": 96.8,
+      "total_cycles": 284,
+      "profit_factor": 4.19,
+      "max_drawdown": 268.97,
+      "max_dd_pct": 8.9,
+      "disaster_stops": 4,
+      "fitness": 4302.24
+    }
+  ],
+  "generation": 0,
+  "total_evaluated": 2545
+}

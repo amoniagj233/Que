@@ -1,0 +1,14 @@
+{
+  "timestamp": "2026-10-29 09:42:24",
+  "balance": 1499443.13,
+  "equity": 1499388.13,
+  "spread_usd": 0.35,
+  "spread_ok": true,
+  "total_lots_exposed": 0.05,
+  "exposure_ok": true,
+  "margin_level_pct": 9307188.9,
+  "margin_safe": true,
+  "circuit_breaker": false,
+  "recommended_base_lot": 14.99,
+  "can_open_new_trade": true
+}

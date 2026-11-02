@@ -1,0 +1,16 @@
+train 2026-09-10 .. 2026-10-06
+val 2026-10-06 .. 2026-10-19
+hold 2026-10-19 .. 2026-11-02
+
+tested 2500 | >90% win AND profitable on train+validate: 2
+best min-win profitable seen: (98.7, ((), 8, (12, 17), 'tp', 0.1, 6.0, 120), {'trades': 76, 'net': np.float64(8.12), 'win': 98.7, 'pf': np.float64(1.46), 'dd': np.float64(17.64), 'avg_win': 0.34, 'avg_loss': 17.64}, {'trades': 26, 'net': np.float64(10.1), 'win': 100.0, 'pf': 999, 'dd': 0.0, 'avg_win': 0.39, 'avg_loss': 0})
+
+PASS ((), 8, (12, 17), 'tp', 0.1, 6.0, 120) 
+  train {'trades': 76, 'net': np.float64(8.12), 'win': 98.7, 'pf': np.float64(1.46), 'dd': np.float64(17.64), 'avg_win': 0.34, 'avg_loss': 17.64} 
+  val   {'trades': 26, 'net': np.float64(10.1), 'win': 100.0, 'pf': 999, 'dd': 0.0, 'avg_win': 0.39, 'avg_loss': 0} 
+  HOLD  {'trades': 48, 'net': np.float64(-6.95), 'win': 97.9, 'pf': np.float64(0.7), 'dd': np.float64(23.01), 'avg_win': 0.34, 'avg_loss': 23.01}
+
+PASS (('adx', 'bb', 'rsi'), 6, (0, 24), 'tp', 0.2, 4.0, 60) 
+  train {'trades': 52, 'net': np.float64(7.8), 'win': 96.2, 'pf': np.float64(1.38), 'dd': np.float64(13.24), 'avg_win': 0.56, 'avg_loss': 10.16} 
+  val   {'trades': 20, 'net': np.float64(10.76), 'win': 100.0, 'pf': 999, 'dd': 0.0, 'avg_win': 0.54, 'avg_loss': 0} 
+  HOLD  {'trades': 26, 'net': np.float64(14.62), 'win': 100.0, 'pf': 999, 'dd': 0.0, 'avg_win': 0.56, 'avg_loss': 0}

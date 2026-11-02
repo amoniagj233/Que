@@ -1,0 +1,576 @@
+    <!-- ================================================================= -->
+    <!-- AI / MACHINE LEARNING TRADING INTELLIGENCE MAIN MENU                -->
+    <!-- ================================================================= -->
+    <div id="mlView" class="space-y-6 hidden">
+      <!-- 1. ML System Hero Header -->
+      <div class="rounded-2xl bg-gradient-to-r from-purple-950/40 via-slate-900/90 to-slate-900 border border-purple-500/30 p-6 shadow-2xl relative overflow-hidden">
+        <div class="absolute -right-10 -top-10 w-64 h-64 bg-purple-500/5 rounded-full blur-3xl pointer-events-none"></div>
+        <div class="flex flex-wrap items-center justify-between gap-4 relative z-10">
+          <div class="flex items-center gap-4">
+            <div class="w-14 h-14 rounded-2xl bg-gradient-to-br from-purple-500 to-indigo-700 flex items-center justify-center text-2xl shadow-lg shadow-purple-500/20 font-black text-white">
+              AI
+            </div>
+            <div>
+              <div class="flex items-center gap-3">
+                <h1 class="text-2xl font-black text-white tracking-tight">AI & Machine Learning Trading Intelligence</h1>
+                <span id="mlModelBadge" class="px-2.5 py-0.5 rounded-full text-xs font-mono font-bold bg-purple-500/20 text-purple-300 border border-purple-500/40">
+                  Model v1.0 • Calibrated Active
+                </span>
+                <span id="mlDriftBadge" class="px-2 py-0.5 rounded-full text-[11px] font-mono font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+                  DRIFT: HEALTHY (0.0%)
+                </span>
+              </div>
+              <p class="text-xs text-slate-400 mt-1 max-w-2xl">
+                Probabilistic Signal Classification • Walk-Forward Purged Training • 8-Regime Market Structure • Calibrated Platt Scaling • Deterministic Hard Risk Gate
+              </p>
+            </div>
+          </div>
+
+          <div class="flex items-center gap-4">
+            <div class="text-right">
+              <div class="text-[10px] text-slate-400 font-mono">XAUUSD Live Reference</div>
+              <div class="text-xl font-black font-mono text-purple-300" id="mlGoldLivePrice">$2,735.40</div>
+              <div class="text-[11px] font-mono text-slate-400" id="mlGoldSpread">Spread: 380 pts ($3.80/oz)</div>
+            </div>
+            <button onclick="loadMLDashboard(true)" class="p-2.5 rounded-xl bg-purple-900/40 hover:bg-purple-800/60 border border-purple-500/30 text-purple-300 transition shadow" title="Refresh ML Engine">
+              <svg class="w-5 h-5" id="mlSyncIcon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg>
+            </button>
+          </div>
+        </div>
+
+        <!-- ML Quick Metrics Ribbon -->
+        <div class="grid grid-cols-2 md:grid-cols-6 gap-3 mt-6 pt-5 border-t border-purple-500/20 text-center font-mono">
+          <div class="p-2 rounded-lg bg-slate-900/60 border border-bordercol/40">
+            <div class="text-[10px] text-slate-400">TEST ACCURACY</div>
+            <div class="text-base font-bold text-emerald-400" id="mlHeaderAccuracy">65.2%</div>
+          </div>
+          <div class="p-2 rounded-lg bg-slate-900/60 border border-bordercol/40">
+            <div class="text-[10px] text-slate-400">BRIER SCORE</div>
+            <div class="text-base font-bold text-purple-300" id="mlHeaderBrier">0.184</div>
+          </div>
+          <div class="p-2 rounded-lg bg-slate-900/60 border border-bordercol/40">
+            <div class="text-[10px] text-slate-400">ROC-AUC SCORE</div>
+            <div class="text-base font-bold text-cyan-400" id="mlHeaderAUC">0.712</div>
+          </div>
+          <div class="p-2 rounded-lg bg-slate-900/60 border border-bordercol/40">
+            <div class="text-[10px] text-slate-400">CURRENT REGIME</div>
+            <div class="text-xs font-bold text-amber-400 truncate" id="mlHeaderRegime">Strong Bullish</div>
+          </div>
+          <div class="p-2 rounded-lg bg-slate-900/60 border border-bordercol/40">
+            <div class="text-[10px] text-slate-400">MTF CONFLUENCE</div>
+            <div class="text-base font-bold text-indigo-400" id="mlHeaderConfluence">80%</div>
+          </div>
+          <div class="p-2 rounded-lg bg-slate-900/60 border border-bordercol/40">
+            <div class="text-[10px] text-slate-400">ACTIVE STRATEGIES</div>
+            <div class="text-base font-bold text-purple-300" id="mlHeaderStrats">7 / 7 Active</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 2. Submenu Navigation Bar (11 Dedicated Submenus) -->
+      <div class="flex items-center gap-1.5 overflow-x-auto pb-2 custom-scroll bg-slate-900/90 p-1.5 rounded-xl border border-bordercol shadow-inner">
+        <button onclick="switchMLSubmenu('overview')" id="mlSubTab_overview" class="ml-sub-tab px-3 py-1.5 rounded-lg text-xs font-bold transition bg-purple-600 text-white shadow whitespace-nowrap">
+          1. ML Overview
+        </button>
+        <button onclick="switchMLSubmenu('recommendations')" id="mlSubTab_recommendations" class="ml-sub-tab px-3 py-1.5 rounded-lg text-xs font-bold transition text-slate-400 hover:text-white hover:bg-slate-800 whitespace-nowrap">
+          2. AI Recommendations (24 Fields)
+        </button>
+        <button onclick="switchMLSubmenu('strategy_lab')" id="mlSubTab_strategy_lab" class="ml-sub-tab px-3 py-1.5 rounded-lg text-xs font-bold transition text-slate-400 hover:text-white hover:bg-slate-800 whitespace-nowrap">
+          3. ML Strategy Lab (A–G)
+        </button>
+        <button onclick="switchMLSubmenu('mtf')" id="mlSubTab_mtf" class="ml-sub-tab px-3 py-1.5 rounded-lg text-xs font-bold transition text-slate-400 hover:text-white hover:bg-slate-800 whitespace-nowrap">
+          4. Multi-Timeframe Analysis
+        </button>
+        <button onclick="switchMLSubmenu('regime')" id="mlSubTab_regime" class="ml-sub-tab px-3 py-1.5 rounded-lg text-xs font-bold transition text-slate-400 hover:text-white hover:bg-slate-800 whitespace-nowrap">
+          5. Market Regime (8 Regimes)
+        </button>
+        <button onclick="switchMLSubmenu('training')" id="mlSubTab_training" class="ml-sub-tab px-3 py-1.5 rounded-lg text-xs font-bold transition text-slate-400 hover:text-white hover:bg-slate-800 whitespace-nowrap">
+          6. Model Training & Versioning
+        </button>
+        <button onclick="switchMLSubmenu('backtest')" id="mlSubTab_backtest" class="ml-sub-tab px-3 py-1.5 rounded-lg text-xs font-bold transition text-slate-400 hover:text-white hover:bg-slate-800 whitespace-nowrap">
+          7. Baseline vs ML Backtest
+        </button>
+        <button onclick="switchMLSubmenu('performance')" id="mlSubTab_performance" class="ml-sub-tab px-3 py-1.5 rounded-lg text-xs font-bold transition text-slate-400 hover:text-white hover:bg-slate-800 whitespace-nowrap">
+          8. Model Performance & Drift
+        </button>
+        <button onclick="switchMLSubmenu('journal')" id="mlSubTab_journal" class="ml-sub-tab px-3 py-1.5 rounded-lg text-xs font-bold transition text-slate-400 hover:text-white hover:bg-slate-800 whitespace-nowrap">
+          9. Trade Journal & Learning
+        </button>
+        <button onclick="switchMLSubmenu('risk')" id="mlSubTab_risk" class="ml-sub-tab px-3 py-1.5 rounded-lg text-xs font-bold transition text-slate-400 hover:text-white hover:bg-slate-800 whitespace-nowrap">
+          10. Risk Management Gate
+        </button>
+        <button onclick="switchMLSubmenu('settings')" id="mlSubTab_settings" class="ml-sub-tab px-3 py-1.5 rounded-lg text-xs font-bold transition text-slate-400 hover:text-white hover:bg-slate-800 whitespace-nowrap">
+          11. ML Settings & Chaser
+        </button>
+      </div>
+
+      <!-- 3. Submenu Panels -->
+
+      <!-- SUBMENU 1: ML Overview -->
+      <div id="mlPanel_overview" class="ml-sub-panel space-y-6">
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+          <div class="md:col-span-2 rounded-2xl border border-bordercol bg-surface/90 p-6 shadow-xl space-y-4">
+            <h2 class="text-base font-bold text-white flex items-center gap-2">
+              <span class="w-2.5 h-2.5 rounded-full bg-purple-500"></span>
+              Machine Learning Decision Pipeline Architecture
+            </h2>
+            <div class="p-4 rounded-xl bg-slate-950/60 border border-bordercol/60 font-mono text-xs text-slate-300 space-y-3">
+              <div class="flex items-center justify-between pb-2 border-b border-bordercol/40">
+                <span class="text-purple-400 font-bold">1. Quantitative Feature Extraction</span>
+                <span class="text-slate-400">28 Technical, SMC, MTF, and Volatility Inputs</span>
+              </div>
+              <div class="flex items-center justify-between pb-2 border-b border-bordercol/40">
+                <span class="text-indigo-400 font-bold">2. Ensemble Classifier</span>
+                <span class="text-slate-400">LightGBM / HistGradientBoosting with Purged CV</span>
+              </div>
+              <div class="flex items-center justify-between pb-2 border-b border-bordercol/40">
+                <span class="text-cyan-400 font-bold">3. Calibrated Platt Scaling</span>
+                <span class="text-slate-400">Converts raw model logits into real probabilities P(Win)</span>
+              </div>
+              <div class="flex items-center justify-between pb-2 border-b border-bordercol/40">
+                <span class="text-amber-400 font-bold">4. 8-Regime Adaptation Gate</span>
+                <span class="text-slate-400">Filters signals based on trending, ranging, or news shock</span>
+              </div>
+              <div class="flex items-center justify-between">
+                <span class="text-emerald-400 font-bold">5. Option B Smart Profit Chaser</span>
+                <span class="text-slate-400">Peak tracking, pullback tolerance, non-closing recovery</span>
+              </div>
+            </div>
+            <div class="flex items-center justify-between pt-2">
+              <span class="text-xs text-slate-400">Active Checkpoint: <strong class="text-white" id="mlOverviewModelVer">v1.0</strong></span>
+              <button onclick="switchMLSubmenu('training')" class="px-3 py-1.5 rounded-lg bg-purple-900/30 hover:bg-purple-800/40 text-purple-300 text-xs font-bold border border-purple-500/30 transition">
+                Manage Checkpoints →
+              </button>
+            </div>
+          </div>
+
+          <div class="rounded-2xl border border-bordercol bg-surface/90 p-6 shadow-xl space-y-4">
+            <h2 class="text-base font-bold text-white flex items-center gap-2">
+              <span class="w-2.5 h-2.5 rounded-full bg-emerald-500"></span>
+              Top Feature Importances
+            </h2>
+            <div id="mlOverviewTopFeatures" class="space-y-2.5 font-mono text-xs">
+              <!-- Rendered via JS -->
+              <div class="text-slate-500 text-center py-6">Loading feature weights...</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- SUBMENU 2: AI Trade Recommendations (24 Structured Fields) -->
+      <div id="mlPanel_recommendations" class="ml-sub-panel space-y-6 hidden">
+        <div class="flex items-center justify-between">
+          <div>
+            <h2 class="text-lg font-black text-white">AI Machine Learning Trade Recommendations</h2>
+            <p class="text-xs text-slate-400">24 structured analytical fields, calibrated win probabilities, and explicit technical invalidations.</p>
+          </div>
+          <div class="flex items-center gap-2">
+            <span class="text-xs font-mono text-slate-400">Filter:</span>
+            <button onclick="filterMLRecs('ALL')" class="ml-rec-filter px-2.5 py-1 rounded text-xs font-bold bg-purple-600 text-white">ALL</button>
+            <button onclick="filterMLRecs('BUY')" class="ml-rec-filter px-2.5 py-1 rounded text-xs font-bold text-slate-400 hover:text-white">BUY</button>
+            <button onclick="filterMLRecs('SELL')" class="ml-rec-filter px-2.5 py-1 rounded text-xs font-bold text-slate-400 hover:text-white">SELL</button>
+          </div>
+        </div>
+
+        <div id="mlRecsContainer" class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          <!-- Rendered via JS -->
+          <div class="col-span-2 text-center py-12 text-slate-500 font-mono">Scanning live Gold market for 24-field ML setups...</div>
+        </div>
+      </div>
+
+      <!-- SUBMENU 3: ML Strategy Lab (Strategies A through G) -->
+      <div id="mlPanel_strategy_lab" class="ml-sub-panel space-y-6 hidden">
+        <div>
+          <h2 class="text-lg font-black text-white">ML Strategy Lab (Strategies A – G)</h2>
+          <p class="text-xs text-slate-400">Evaluates 7 distinct quantitative and SMC trading strategies with baseline vs ML-filtered win rates.</p>
+        </div>
+
+        <div id="mlStrategiesGrid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+          <!-- Rendered via JS -->
+        </div>
+      </div>
+
+      <!-- SUBMENU 4: Multi-Timeframe Analysis -->
+      <div id="mlPanel_mtf" class="ml-sub-panel space-y-6 hidden">
+        <div class="flex items-center justify-between">
+          <div>
+            <h2 class="text-lg font-black text-white">Multi-Timeframe Confluence Matrix</h2>
+            <p class="text-xs text-slate-400">Hierarchical structure, trend, momentum, and liquidity analysis from W1 down to M1.</p>
+          </div>
+          <div class="text-right font-mono">
+            <span class="text-xs text-slate-400">Overall MTF Alignment:</span>
+            <span class="text-sm font-bold text-purple-300 ml-2" id="mlMTFOverallBadge">80% Confluent</span>
+          </div>
+        </div>
+
+        <div class="rounded-2xl border border-bordercol bg-surface/90 overflow-hidden shadow-xl">
+          <table class="w-full text-left text-xs font-mono">
+            <thead class="bg-slate-950/80 text-slate-400 border-b border-bordercol">
+              <tr>
+                <th class="py-3 px-4">Timeframe</th>
+                <th class="py-3 px-4">Trend Direction</th>
+                <th class="py-3 px-4">Market Structure</th>
+                <th class="py-3 px-4">RSI (14)</th>
+                <th class="py-3 px-4">Liquidity State</th>
+                <th class="py-3 px-4">Bias</th>
+                <th class="py-3 px-4 text-right">Data Feed</th>
+              </tr>
+            </thead>
+            <tbody id="mlMTFTbody" class="divide-y divide-bordercol/60">
+              <!-- Rendered via JS -->
+            </tbody>
+          </table>
+        </div>
+
+        <div class="p-4 rounded-xl bg-purple-950/20 border border-purple-500/30 flex items-center justify-between">
+          <div class="flex items-center gap-3">
+            <span class="text-lg">🎯</span>
+            <div>
+              <div class="text-xs font-bold text-white">Recommended Execution Timeframe</div>
+              <div class="text-xs text-purple-300 font-mono" id="mlMTFRecTf">M15 (Trend-Follow Pullbacks)</div>
+            </div>
+          </div>
+          <button onclick="switchMLSubmenu('recommendations')" class="px-3 py-1.5 rounded-lg bg-purple-600 hover:bg-purple-500 text-white text-xs font-bold transition">
+            View M15 Setups →
+          </button>
+        </div>
+      </div>
+
+      <!-- SUBMENU 5: Market Regime Detection -->
+      <div id="mlPanel_regime" class="ml-sub-panel space-y-6 hidden">
+        <div>
+          <h2 class="text-lg font-black text-white">Market Regime Detection Engine (8 Distinct Regimes)</h2>
+          <p class="text-xs text-slate-400">Dynamically maps XAUUSD price action into 8 statistical market phases and adapts strategy activation.</p>
+        </div>
+
+        <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
+          <div class="p-4 rounded-xl bg-slate-900 border border-bordercol font-mono text-center">
+            <div class="text-[10px] text-slate-400">TREND STRENGTH (ADX 14)</div>
+            <div class="text-2xl font-black text-white mt-1" id="mlRegimeADX">28.4</div>
+            <div class="text-[10px] text-purple-400 mt-1">Trending Regime</div>
+          </div>
+          <div class="p-4 rounded-xl bg-slate-900 border border-bordercol font-mono text-center">
+            <div class="text-[10px] text-slate-400">ATR VOLATILITY PERCENTILE</div>
+            <div class="text-2xl font-black text-white mt-1" id="mlRegimeATRPct">54.2%</div>
+            <div class="text-[10px] text-emerald-400 mt-1">Normal Volatility</div>
+          </div>
+          <div class="p-4 rounded-xl bg-slate-900 border border-bordercol font-mono text-center">
+            <div class="text-[10px] text-slate-400">VOLUME PARTICIPATION RATIO</div>
+            <div class="text-2xl font-black text-white mt-1" id="mlRegimeVolRatio">1.25x</div>
+            <div class="text-[10px] text-cyan-400 mt-1">Above Average</div>
+          </div>
+          <div class="p-4 rounded-xl bg-slate-900 border border-bordercol font-mono text-center">
+            <div class="text-[10px] text-slate-400">HURST EXPONENT PROXY</div>
+            <div class="text-2xl font-black text-white mt-1" id="mlRegimeHurst">0.62</div>
+            <div class="text-[10px] text-amber-400 mt-1">Persistent Trending</div>
+          </div>
+        </div>
+
+        <div class="rounded-2xl border border-bordercol bg-surface/90 p-6 shadow-xl space-y-4">
+          <h3 class="text-sm font-bold text-white flex items-center gap-2">
+            <span class="w-2.5 h-2.5 rounded-full bg-amber-500"></span>
+            8-Regime Strategy Suitability Matrix
+          </h3>
+          <div class="overflow-x-auto custom-scroll">
+            <table class="w-full text-left text-xs font-mono">
+              <thead class="bg-slate-950/80 text-slate-400 border-b border-bordercol">
+                <tr>
+                  <th class="py-2.5 px-3">Market Regime</th>
+                  <th class="py-2.5 px-3 text-center">Strat A (Trend+SMC)</th>
+                  <th class="py-2.5 px-3 text-center">Strat B (EMA Pullback)</th>
+                  <th class="py-2.5 px-3 text-center">Strat C (Breakout)</th>
+                  <th class="py-2.5 px-3 text-center">Strat D (SMC OB+FVG)</th>
+                  <th class="py-2.5 px-3 text-center">Strat E (Mean Rev)</th>
+                  <th class="py-2.5 px-3 text-center">Strat F (Vol Break)</th>
+                  <th class="py-2.5 px-3 text-center">Strat G (MTF Conf)</th>
+                </tr>
+              </thead>
+              <tbody id="mlRegimeSuitabilityTbody" class="divide-y divide-bordercol/60">
+                <!-- Rendered via JS -->
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- SUBMENU 6: ML Model Training & Versioning -->
+      <div id="mlPanel_training" class="ml-sub-panel space-y-6 hidden">
+        <div class="flex items-center justify-between">
+          <div>
+            <h2 class="text-lg font-black text-white">Machine Learning Model Training & Versioning</h2>
+            <p class="text-xs text-slate-400">Non-blocking background training jobs with walk-forward purged splits and calibrated probability scaling.</p>
+          </div>
+          <button onclick="triggerMLTraining()" id="btnStartMLTrain" class="px-4 py-2 rounded-xl bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white font-bold text-xs shadow-lg transition flex items-center gap-2">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+            Train New Checkpoint on 5,000 Bars
+          </button>
+        </div>
+
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+          <div class="md:col-span-2 rounded-2xl border border-bordercol bg-surface/90 p-6 shadow-xl space-y-4">
+            <div class="flex items-center justify-between">
+              <h3 class="text-sm font-bold text-white">Training Progress & Real-Time Terminal Log</h3>
+              <span id="mlTrainStatusPill" class="px-2 py-0.5 rounded text-[11px] font-mono font-bold bg-slate-800 text-slate-300">IDLE</span>
+            </div>
+            <div class="w-full bg-slate-950 rounded-full h-2.5 overflow-hidden border border-bordercol">
+              <div id="mlTrainProgressBar" class="bg-gradient-to-r from-purple-500 to-indigo-500 h-2.5 rounded-full transition-all duration-300" style="width: 0%"></div>
+            </div>
+            <div id="mlTrainTerminalLog" class="p-4 rounded-xl bg-slate-950 border border-bordercol font-mono text-xs text-slate-400 h-48 overflow-y-auto custom-scroll space-y-1">
+              <div>[INFO] System ready for training. Click 'Train New Checkpoint' to initiate purged cross-validation.</div>
+            </div>
+          </div>
+
+          <div class="rounded-2xl border border-bordercol bg-surface/90 p-6 shadow-xl space-y-4">
+            <h3 class="text-sm font-bold text-white">Saved Model Checkpoints</h3>
+            <div id="mlCheckpointsList" class="space-y-3 font-mono text-xs">
+              <!-- Rendered via JS -->
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- SUBMENU 7: Baseline vs ML Backtest -->
+      <div id="mlPanel_backtest" class="ml-sub-panel space-y-6 hidden">
+        <div class="flex items-center justify-between">
+          <div>
+            <h2 class="text-lg font-black text-white">Standalone Baseline vs ML-Enhanced Strategy Backtest</h2>
+            <p class="text-xs text-slate-400">Head-to-head walk-forward comparison with real Headway Gold spread ($3.80/oz) and slippage ($0.20/oz).</p>
+          </div>
+          <div class="flex items-center gap-3">
+            <div class="flex items-center gap-2 font-mono text-xs text-slate-300">
+              <span>Min Conf:</span>
+              <input type="range" id="mlBtConfSlider" min="50" max="80" step="5" value="60" oninput="updateBtSliderLabel(this.value)" class="w-24 accent-purple-500">
+              <span id="mlBtConfLabel" class="font-bold text-purple-300">60%</span>
+            </div>
+            <button onclick="runMLBacktestCustom()" id="btnRunMLBacktest" class="px-3.5 py-1.5 rounded-xl bg-purple-600 hover:bg-purple-500 text-white font-bold text-xs shadow transition">
+              Run Walk-Forward Backtest
+            </button>
+          </div>
+        </div>
+
+        <div class="p-3 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-200 text-xs font-mono flex items-center justify-between">
+          <span>⚠️ Execution Cost Realism: Headway Gold Spread = 380 pts ($3.80/oz) + 20 pts Slippage = 400 pts ($4.00/oz) deducted on every trade.</span>
+          <span class="text-slate-400">Data Horizon: 5,000 M15 Bars</span>
+        </div>
+
+        <div class="rounded-2xl border border-bordercol bg-surface/90 overflow-hidden shadow-xl">
+          <table class="w-full text-left text-xs font-mono">
+            <thead class="bg-slate-950/80 text-slate-400 border-b border-bordercol">
+              <tr>
+                <th class="py-3 px-4">Performance Metric</th>
+                <th class="py-3 px-4 text-center">Standalone Strategy (Baseline)</th>
+                <th class="py-3 px-4 text-center text-purple-300">ML-Enhanced Strategy (AI Gated)</th>
+                <th class="py-3 px-4 text-right">Delta / Improvement</th>
+              </tr>
+            </thead>
+            <tbody id="mlBacktestTbody" class="divide-y divide-bordercol/60">
+              <!-- Rendered via JS -->
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- SUBMENU 8: Model Performance & Drift -->
+      <div id="mlPanel_performance" class="ml-sub-panel space-y-6 hidden">
+        <div>
+          <h2 class="text-lg font-black text-white">Model Performance & Statistical Calibration</h2>
+          <p class="text-xs text-slate-400">Brier score reliability, ROC-AUC curve, and continuous statistical model drift tracking.</p>
+        </div>
+
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+          <div class="rounded-2xl border border-bordercol bg-surface/90 p-6 shadow-xl space-y-4">
+            <h3 class="text-sm font-bold text-white flex items-center gap-2">
+              <span class="w-2.5 h-2.5 rounded-full bg-cyan-500"></span>
+              Probabilistic Reliability / Calibration Curve
+            </h3>
+            <p class="text-xs text-slate-400">Shows whether a predicted 65% win probability actually achieves 65% wins historically.</p>
+            <div id="mlCalibrationTable" class="font-mono text-xs overflow-x-auto">
+              <!-- Rendered via JS -->
+            </div>
+          </div>
+
+          <div class="rounded-2xl border border-bordercol bg-surface/90 p-6 shadow-xl space-y-4">
+            <h3 class="text-sm font-bold text-white flex items-center gap-2">
+              <span class="w-2.5 h-2.5 rounded-full bg-emerald-500"></span>
+              Statistical Model Drift Monitor
+            </h3>
+            <div id="mlDriftCard" class="p-4 rounded-xl bg-slate-950/60 border border-bordercol space-y-3 font-mono text-xs">
+              <!-- Rendered via JS -->
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- SUBMENU 9: Trade Journal & Learning -->
+      <div id="mlPanel_journal" class="ml-sub-panel space-y-6 hidden">
+        <div class="flex items-center justify-between">
+          <div>
+            <h2 class="text-lg font-black text-white">AI Trade Prediction Journal & Continuous Learning</h2>
+            <p class="text-xs text-slate-400">Audit trail of every AI prediction, actual trade outcome, and false-positive error analysis.</p>
+          </div>
+          <span class="text-xs font-mono text-slate-400" id="mlJournalCount">0 Predictions Stored</span>
+        </div>
+
+        <div class="rounded-2xl border border-bordercol bg-surface/90 overflow-hidden shadow-xl">
+          <table class="w-full text-left text-xs font-mono">
+            <thead class="bg-slate-950/80 text-slate-400 border-b border-bordercol">
+              <tr>
+                <th class="py-3 px-4">Recorded At</th>
+                <th class="py-3 px-4">Strategy</th>
+                <th class="py-3 px-4">Direction</th>
+                <th class="py-3 px-4">ML Win Prob</th>
+                <th class="py-3 px-4">Expected Value</th>
+                <th class="py-3 px-4">Actual Outcome</th>
+                <th class="py-3 px-4 text-right">Realized P&L</th>
+              </tr>
+            </thead>
+            <tbody id="mlJournalTbody" class="divide-y divide-bordercol/60">
+              <!-- Rendered via JS -->
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- SUBMENU 10: Risk Management Gate -->
+      <div id="mlPanel_risk" class="ml-sub-panel space-y-6 hidden">
+        <div>
+          <h2 class="text-lg font-black text-white">Deterministic Hard Risk Management Gate</h2>
+          <p class="text-xs text-slate-400">Enforces mathematical risk limits that override all ML models to prevent catastrophic loss.</p>
+        </div>
+
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+          <div class="rounded-2xl border border-bordercol bg-surface/90 p-6 shadow-xl space-y-4">
+            <h3 class="text-sm font-bold text-white flex items-center gap-2">
+              <span class="w-2.5 h-2.5 rounded-full bg-rose-500"></span>
+              1-Trade Maximum Gold Limit
+            </h3>
+            <div class="p-4 rounded-xl bg-slate-950 border border-bordercol font-mono text-xs space-y-2">
+              <div class="flex justify-between">
+                <span class="text-slate-400">Open Gold Trades:</span>
+                <strong class="text-white" id="mlRiskOpenCount">0</strong>
+              </div>
+              <div class="flex justify-between">
+                <span class="text-slate-400">Allowed Maximum Cap:</span>
+                <strong class="text-emerald-400">1 Position Only</strong>
+              </div>
+              <div class="flex justify-between">
+                <span class="text-slate-400">Strict Rule Status:</span>
+                <span class="text-emerald-400 font-bold" id="mlRiskCapStatus">PASSED (Available)</span>
+              </div>
+            </div>
+            <p class="text-[11px] text-slate-400">
+              Adheres strictly to the user rule: never holds more than 1 trade at any time on XAUUSD.
+            </p>
+          </div>
+
+          <div class="rounded-2xl border border-bordercol bg-surface/90 p-6 shadow-xl space-y-4">
+            <h3 class="text-sm font-bold text-white flex items-center gap-2">
+              <span class="w-2.5 h-2.5 rounded-full bg-amber-500"></span>
+              Broker Spread Filter
+            </h3>
+            <div class="p-4 rounded-xl bg-slate-950 border border-bordercol font-mono text-xs space-y-2">
+              <div class="flex justify-between">
+                <span class="text-slate-400">Current Spread:</span>
+                <strong class="text-white" id="mlRiskCurrSpread">380 pts ($3.80/oz)</strong>
+              </div>
+              <div class="flex justify-between">
+                <span class="text-slate-400">Spread Threshold:</span>
+                <strong class="text-amber-400">450 pts ($4.50/oz)</strong>
+              </div>
+              <div class="flex justify-between">
+                <span class="text-slate-400">Execution Gate:</span>
+                <span class="text-emerald-400 font-bold" id="mlRiskSpreadGate">ALLOWED</span>
+              </div>
+            </div>
+            <p class="text-[11px] text-slate-400">
+              Blocks trade placement automatically if broker spread widens past acceptable limits.
+            </p>
+          </div>
+
+          <div class="rounded-2xl border border-bordercol bg-surface/90 p-6 shadow-xl space-y-4">
+            <h3 class="text-sm font-bold text-white flex items-center gap-2">
+              <span class="w-2.5 h-2.5 rounded-full bg-purple-500"></span>
+              Account Drawdown Circuit Breaker
+            </h3>
+            <div class="p-4 rounded-xl bg-slate-950 border border-bordercol font-mono text-xs space-y-2">
+              <div class="flex justify-between">
+                <span class="text-slate-400">Max Daily Loss:</span>
+                <strong class="text-white">3.0% of Balance</strong>
+              </div>
+              <div class="flex justify-between">
+                <span class="text-slate-400">Max Drawdown Breaker:</span>
+                <strong class="text-rose-400">5.0% Account Drop</strong>
+              </div>
+              <div class="flex justify-between">
+                <span class="text-slate-400">Risk Gate Status:</span>
+                <span class="text-emerald-400 font-bold">HEALTHY (0.0% DD)</span>
+              </div>
+            </div>
+            <p class="text-[11px] text-slate-400">
+              Immediate kill-switch halts all automated order submission if daily threshold is violated.
+            </p>
+          </div>
+        </div>
+      </div>
+
+      <!-- SUBMENU 11: ML Settings & Chaser -->
+      <div id="mlPanel_settings" class="ml-sub-panel space-y-6 hidden">
+        <div>
+          <h2 class="text-lg font-black text-white">Machine Learning & Option B Chaser Settings</h2>
+          <p class="text-xs text-slate-400">Configure minimum model confidence gates, active strategies, and smart profit chaser rules.</p>
+        </div>
+
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+          <div class="rounded-2xl border border-bordercol bg-surface/90 p-6 shadow-xl space-y-4">
+            <h3 class="text-sm font-bold text-white">Model Probability Gates</h3>
+            <div class="space-y-3 font-mono text-xs">
+              <div>
+                <label class="block text-slate-400 mb-1">Minimum Calibrated Win Probability P(Win) Threshold:</label>
+                <div class="flex items-center gap-3">
+                  <input type="range" id="cfgMinConf" min="50" max="90" step="5" value="60" oninput="document.getElementById('lblCfgMinConf').innerText = this.value + '%'" class="w-full accent-purple-500">
+                  <span id="lblCfgMinConf" class="text-purple-300 font-bold w-12 text-right">60%</span>
+                </div>
+              </div>
+              <div>
+                <label class="block text-slate-400 mb-1">Minimum Expected Value (EV in R):</label>
+                <input type="number" id="cfgMinEV" step="0.05" value="0.20" class="w-full p-2 rounded-lg bg-slate-950 border border-bordercol text-white">
+              </div>
+              <div>
+                <label class="block text-slate-400 mb-1">Max Risk Per Trade (% of Account):</label>
+                <input type="number" id="cfgRiskPct" step="0.1" value="1.0" class="w-full p-2 rounded-lg bg-slate-950 border border-bordercol text-white">
+              </div>
+            </div>
+          </div>
+
+          <div class="rounded-2xl border border-bordercol bg-surface/90 p-6 shadow-xl space-y-4">
+            <h3 class="text-sm font-bold text-white">Smart Profit Chaser (Option B Recovery)</h3>
+            <div class="space-y-3 font-mono text-xs">
+              <div>
+                <label class="block text-slate-400 mb-1">Pullback Detection Mode:</label>
+                <select id="cfgPullbackType" class="w-full p-2 rounded-lg bg-slate-950 border border-bordercol text-white">
+                  <option value="PERCENTAGE">Percentage of Highest Profit (e.g. 20%)</option>
+                  <option value="FIXED_DOLLARS">Fixed Dollar Amount ($)</option>
+                  <option value="ATR_ADJUSTED">ATR Volatility Adjusted Value</option>
+                </select>
+              </div>
+              <div>
+                <label class="block text-slate-400 mb-1">Pullback Tolerance Threshold (%):</label>
+                <input type="number" id="cfgPullbackThresh" value="20" class="w-full p-2 rounded-lg bg-slate-950 border border-bordercol text-white">
+              </div>
+              <div>
+                <label class="block text-slate-400 mb-1">Recovery Rule Enforcement:</label>
+                <div class="p-2.5 rounded-lg bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 font-bold">
+                  ✓ Option B: Never close on recovery to peak; keep trade open & continue chasing.
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="text-right">
+          <button onclick="saveMLSettingsFromUI()" class="px-5 py-2.5 rounded-xl bg-purple-600 hover:bg-purple-500 text-white font-bold text-xs shadow-lg transition">
+            Save Settings & Synchronize Engines
+          </button>
+        </div>
+      </div>
+    </div> <!-- End mlView -->

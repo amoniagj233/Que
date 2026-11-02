@@ -1,0 +1,13 @@
+{
+  "start_capital": 100.0,
+  "current_balance": 74.22,
+  "high_water_mark": 119.07999999999998,
+  "level": 1,
+  "base_lot": 0.01,
+  "target_balance": 200.0,
+  "total_profit": -25.780000000000005,
+  "cycles_won": 17,
+  "cycles_lost": 2,
+  "start_time": "2026-10-28 19:46:53",
+  "last_update": "2026-10-28 20:44:52"
+}

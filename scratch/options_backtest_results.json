@@ -1,0 +1,38 @@
+[
+  {
+    "strategy": "OPTION_A_HYBRID_M30_M5",
+    "final_balance": 22.78,
+    "net_profit": -77.22,
+    "total_cycles": 191,
+    "win_rate": 75.4,
+    "wins": 144,
+    "losses": 47,
+    "max_dd": 295.75,
+    "profit_factor": 0.95,
+    "ret_dd_ratio": -0.26
+  },
+  {
+    "strategy": "OPTION_B_PURE_H1",
+    "final_balance": 312.69,
+    "net_profit": 212.69,
+    "total_cycles": 54,
+    "win_rate": 72.2,
+    "wins": 39,
+    "losses": 15,
+    "max_dd": 211.38,
+    "profit_factor": 1.25,
+    "ret_dd_ratio": 1.01
+  },
+  {
+    "strategy": "OPTION_C_PURE_M5",
+    "final_balance": -111.1,
+    "net_profit": -211.1,
+    "total_cycles": 600,
+    "win_rate": 87.5,
+    "wins": 525,
+    "losses": 75,
+    "max_dd": 475.54,
+    "profit_factor": 0.93,
+    "ret_dd_ratio": -0.44
+  }
+]

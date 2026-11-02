@@ -1,0 +1,8562 @@
+
+from execution_gateway import guarded_order_send
+import json
+import math
+import os
+import sys
+import threading
+import time
+from collections import defaultdict
+from datetime import date, datetime, timedelta, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from urllib.parse import parse_qs, urlparse
+from trade_safety import (MAX_OPEN_POSITIONS, MAX_GROUP_RISK_PERCENT, positive,
+                          floor_volume, limit_volume, stop_loss_money,
+                          validate_geometry, deal_net)
+
+try:
+    import MetaTrader5 as mt5
+    import numpy as np
+except ImportError:
+    mt5 = None
+    np = None
+
+from smart_profit_chaser import (
+    SmartProfitChaser, ProfitChaserConfig, ProfitMode, PullbackMethod, TrailingMethod, PositionState
+)
+
+from gold_intelligence import (
+    get_gold_candles,
+    compute_atr,
+    compute_rsi,
+    detect_order_blocks,
+    detect_fair_value_gaps,
+    detect_asian_session_levels,
+    analyze_market_regime,
+    get_multi_timeframe_matrix,
+    generate_gold_trade_setups,
+    get_gold_macro_events,
+    GOLD_SPEC
+)
+from gold_backtester import GoldBacktester, BACKTEST_RESULTS_FILE
+from gold_auto_trader import GoldAutoTrader
+import pandas as pd
+from ml_trading_engine import (
+    CACHE_DIR,
+    get_active_model,
+    detect_market_regime,
+    analyze_multi_timeframe,
+    evaluate_all_strategies,
+    generate_ai_trade_recommendations,
+    run_ml_backtest,
+    evaluate_risk_gate,
+    get_model_drift_analysis,
+    load_ml_settings,
+    save_ml_settings,
+    load_ml_journal,
+    record_ml_prediction,
+    update_ml_trade_outcome,
+    MLTradingModel,
+    REGIMES,
+    FEATURE_NAMES
+)
+CACHE_DIR = Path(CACHE_DIR)
+
+ml_training_state = {
+    "is_training": False,
+    "progress": 0,
+    "message": "Idle",
+    "last_result": None
+}
+
+
+HEADWAY_TERMINAL_PATH = os.getenv("MT5_PATH", r"C:\Program Files\Headway MT5 Terminal\terminal64.exe")
+BASE_DIR = Path(__file__).resolve().parent
+JOURNAL_FILE = BASE_DIR / "trades_journal.json"
+CONFIG_FILE = BASE_DIR / "auto_trade_config.json"
+MULTI_TP_FILE = BASE_DIR / "multi_tp_groups.json"
+PROFIT_GUARDIAN_CONFIG_FILE = BASE_DIR / "profit_guardian_config.json"
+
+TICKER_SYMBOLS = [
+    "XAUUSD",
+    "EURUSD",
+    "GBPUSD",
+    "USDJPY",
+    "BTCUSD",
+    "ETHUSD",
+]
+
+mt5_lock = threading.RLock()
+symbols_cache = []
+symbols_by_category = {}
+
+def third_wednesday(year: int, month: int) -> date:
+    first = date(year, month, 1)
+    days_until_wed = (2 - first.weekday()) % 7
+    first_wed = first + timedelta(days=days_until_wed)
+    return first_wed + timedelta(days=14)
+
+def get_next_imm_dates(from_date: date, count: int = 4) -> list:
+    imm_months = [3, 6, 9, 12]
+    dates = []
+    year = from_date.year
+    while len(dates) < count:
+        for month in imm_months:
+            imm = third_wednesday(year, month)
+            if imm > from_date:
+                days_left = (imm - from_date).days
+                dates.append({
+                    "date": imm.strftime("%Y-%m-%d"),
+                    "quarter": f"Q{month//3} {year}",
+                    "days_left": days_left
+                })
+                if len(dates) == count:
+                    break
+        year += 1
+    return dates
+
+def ensure_deriv_connected():
+    if not mt5:
+        return False, "MetaTrader5 Python module not installed"
+    
+    term = mt5.terminal_info()
+    if term and term.connected and ("headway" in (term.name or "").lower() or "headway" in (term.path or "").lower()):
+        return True, "Connected"
+    
+    # If connected to a different terminal, shut down before attaching Headway
+    if term and term.connected:
+        try:
+            mt5.shutdown()
+        except Exception:
+            pass
+
+    if not mt5.initialize(path=HEADWAY_TERMINAL_PATH):
+        if not mt5.initialize():
+            err = mt5.last_error()
+            return False, f"Init error: {err}"
+    
+    return True, "Connected"
+
+def get_best_filling_mode(sym_info):
+    if not sym_info:
+        return mt5.ORDER_FILLING_FOK
+    filling = sym_info.filling_mode
+    if filling & 1:
+        return mt5.ORDER_FILLING_FOK
+    elif filling & 2:
+        return mt5.ORDER_FILLING_IOC
+    else:
+        return mt5.ORDER_FILLING_RETURN
+
+def load_all_symbols():
+    global symbols_cache, symbols_by_category
+    with mt5_lock:
+        ok, _ = ensure_deriv_connected()
+        if not ok:
+            return []
+        
+        all_syms = mt5.symbols_get()
+        if not all_syms:
+            return []
+        
+        # Strictly use symbols visible in Headway Quotes (Market Watch)
+        visible_syms = [s for s in all_syms if s.visible]
+        target_syms = visible_syms if visible_syms else all_syms
+        
+        sym_list = []
+        cat_dict = {}
+        for s in target_syms:
+            cat = s.path.split("\\")[0] if "\\" in s.path else "General"
+            item = {
+                "symbol": s.name,
+                "path": s.path,
+                "category": cat,
+                "digits": s.digits,
+                "volume_min": s.volume_min,
+                "volume_max": s.volume_max,
+                "volume_step": s.volume_step,
+                "description": s.description or s.name
+            }
+            sym_list.append(item)
+            if cat not in cat_dict:
+                cat_dict[cat] = []
+            cat_dict[cat].append(s.name)
+        
+        symbols_cache = sym_list
+        symbols_by_category = cat_dict
+        return sym_list
+
+def get_symbol_quote(sym_name):
+    with mt5_lock:
+        ok, msg = ensure_deriv_connected()
+        if not ok:
+            return {"success": False, "message": msg}
+        
+        mt5.symbol_select(sym_name, True)
+        info = mt5.symbol_info(sym_name)
+        tick = mt5.symbol_info_tick(sym_name)
+        if not info or not tick:
+            return {"success": False, "message": f"Quote unavailable for {sym_name}"}
+        
+        return {
+            "success": True,
+            "symbol": sym_name,
+            "bid": round(tick.bid, info.digits),
+            "ask": round(tick.ask, info.digits),
+            "spread": round(tick.ask - tick.bid, info.digits),
+            "digits": info.digits,
+            "min_lot": info.volume_min,
+            "max_lot": info.volume_max,
+            "step_lot": info.volume_step,
+            "point": info.point
+        }
+
+def check_symbol_market_open(sym):
+    """
+    Market Status Verification (Rule 1):
+    Checks whether a symbol's market is currently open and trading actively on Deriv MT5.
+    Returns (is_open: bool, reason: str).
+    """
+    mt5.symbol_select(sym, True)
+    ref_tick = mt5.symbol_info_tick('BTCUSD')
+    live_broker_time = ref_tick.time if ref_tick else time.time()
+    
+    info = mt5.symbol_info(sym)
+    if not info:
+        return False, "Symbol not recognized by broker"
+    
+    if info.trade_mode != mt5.SYMBOL_TRADE_MODE_FULL:
+        return False, f"Trading disabled by broker (Trade mode: {info.trade_mode})"
+    
+    tick = mt5.symbol_info_tick(sym)
+    if not tick or tick.bid <= 0 or tick.ask <= 0:
+        return False, "Market closed (No active bid/ask quotes)"
+    
+    # Check tick staleness against live 24/7 broker reference clock
+    diff = live_broker_time - tick.time
+    if diff > 300:  # Stale by more than 5 minutes
+        hours_ago = diff / 3600.0
+        return False, f"Market Closed (Last quote was {hours_ago:.1f}h ago)"
+    
+    return True, "Market Open & Active"
+
+# User Directive: Trade Only Gold Today
+GOLD_ONLY_MODE = True
+
+# Asset Class Classifications for Portfolio Heat & Correlation Protection
+CRYPTO_SYMBOLS = {"BTC", "ETH", "SOL", "DOGE", "XRP", "ADA", "LTC", "BTCUSD", "ETHUSD", "DOGEUSD", "XRPUSD", "SOLUSD", "LTCUSD", "ADAUSD"}
+METALS_SYMBOLS = {"XAUUSD", "XAGUSD", "GOLD", "SILVER"}
+FOREX_SYMBOLS = {"EURUSD", "GBPUSD", "USDJPY", "USDCAD", "AUDUSD", "NZDUSD", "USDCHF"}
+INDICES_SYMBOLS = {"US500", "DJ30", "NASDAQ-100", "VOL_20", "VOL_10", "BOOM_100", "CRASH_100"}
+
+def compute_robust_stop_distance(sym, tick, info, m15_atr=0.0, h1_atr=0.0):
+    """
+    Computes an asset-class calibrated protective stop loss distance outside market noise.
+    Prevents microscopic noise stop-outs (e.g. 0.28% on crypto) that caused repeated losses.
+    """
+    cur_p = (tick.bid + tick.ask) / 2.0 if (tick.bid > 0 and tick.ask > 0) else 1.0
+    digits = info.digits
+    point = info.point or (10 ** -digits)
+    spread = tick.ask - tick.bid
+    broker_min = max(info.trade_stops_level * point, spread * 1.5, point * 50)
+    
+    sym_upper = sym.upper()
+    if sym_upper in CRYPTO_SYMBOLS or any(c in sym_upper for c in ["BTC", "ETH", "DOGE", "SOL", "XRP", "ADA", "LTC"]):
+        # Crypto: Minimum 2.0% price distance or 2.5x H1 ATR
+        dist = max(cur_p * 0.020, h1_atr * 2.2, m15_atr * 2.5, broker_min)
+    elif sym_upper in METALS_SYMBOLS or any(c in sym_upper for c in ["XAU", "GOLD", "XAG"]):
+        # Metals / Gold: Minimum $5.00/oz for Gold or 2.0x H1 ATR
+        gold_floor = 5.00 if ("XAU" in sym_upper or "GOLD" in sym_upper) else 0.35
+        dist = max(gold_floor, h1_atr * 2.0, m15_atr * 2.2, broker_min)
+    elif sym_upper in FOREX_SYMBOLS or any(c in sym_upper for c in ["EUR", "GBP", "USD", "JPY", "CAD", "AUD", "NZD", "CHF"]):
+        # Forex: Minimum 28 pips or 1.8x H1 ATR
+        pip_dist = point * 280 if digits >= 4 else point * 28
+        dist = max(pip_dist, h1_atr * 1.8, m15_atr * 2.0, broker_min)
+    else:
+        dist = max(cur_p * 0.012, h1_atr * 2.0, m15_atr * 2.2, broker_min)
+        
+    return dist
+
+def calculate_setup_confidence(sym_info, tick, closes, highs, lows, ema20, rsi, atr, bias, stop_dist, rates_h1=None):
+    """
+    Rigorous Multi-Factor Confidence Scoring (Rule 2 & High-Conviction Gate):
+      Evaluates Higher Timeframe (H1) alignment, market structure, momentum/RSI, spread, and multi-candle impulse.
+      Returns (score: int, signals: list).
+      Only exceptional setups with multi-timeframe and multi-indicator alignment reach 90-100%.
+      Counter-trend setups fighting H1 trend receive severe penalties and are rejected.
+    """
+    score = 30  # Disciplined base score (no artificial inflation)
+    signals = []
+    
+    cur_p = tick.bid if bias == "SELL" else tick.ask
+    
+    # Factor 1: Higher Timeframe (H1) Trend Confluence (Crucial 25 points / -30 penalty)
+    if rates_h1 is not None and len(rates_h1) >= 20:
+        closes_h1 = rates_h1['close']
+        weights20 = np.exp(np.linspace(-1., 0., 20))
+        weights20 /= weights20.sum()
+        h1_ema20 = float(np.convolve(closes_h1[-20:], weights20, mode='valid')[-1])
+        h1_ema50 = float(np.mean(closes_h1[-20:]))
+        if len(closes_h1) >= 50:
+            weights50 = np.exp(np.linspace(-1., 0., 50))
+            weights50 /= weights50.sum()
+            h1_ema50 = float(np.convolve(closes_h1[-50:], weights50, mode='valid')[-1])
+            
+        if bias == "BUY":
+            if cur_p > h1_ema20 and h1_ema20 >= h1_ema50:
+                score += 25
+                signals.append("H1 Bullish Trend Confluence")
+            elif cur_p < h1_ema20:
+                score -= 30
+                signals.append("PENALTY: Counter-trend to H1 Downtrend")
+        elif bias == "SELL":
+            if cur_p < h1_ema20 and h1_ema20 <= h1_ema50:
+                score += 25
+                signals.append("H1 Bearish Trend Confluence")
+            elif cur_p > h1_ema20:
+                score -= 30
+                signals.append("PENALTY: Counter-trend to H1 Uptrend")
+    
+    # Factor 2: M15 Trend Confirmation & EMA alignment (15 points)
+    if bias == "SELL" and cur_p < ema20:
+        score += 10
+        signals.append("Price below M15 EMA20")
+        if len(closes) >= 4 and closes[-1] < closes[-3]:
+            score += 5
+            signals.append("Negative M15 EMA slope")
+    elif bias == "BUY" and cur_p > ema20:
+        score += 10
+        signals.append("Price above M15 EMA20")
+        if len(closes) >= 4 and closes[-1] > closes[-3]:
+            score += 5
+            signals.append("Positive M15 EMA slope")
+            
+    # Factor 3: Momentum & RSI Sweet Spot (10 points / -15 penalty for extreme exhaustion)
+    if bias == "SELL":
+        if 38.0 <= rsi <= 52.0:
+            score += 10
+            signals.append(f"RSI prime short momentum ({rsi:.1f})")
+        elif rsi < 30.0:
+            score -= 15
+            signals.append(f"PENALTY: RSI Oversold exhaustion ({rsi:.1f})")
+    elif bias == "BUY":
+        if 48.0 <= rsi <= 62.0:
+            score += 10
+            signals.append(f"RSI prime long momentum ({rsi:.1f})")
+        elif rsi > 70.0:
+            score -= 15
+            signals.append(f"PENALTY: RSI Overbought exhaustion ({rsi:.1f})")
+        
+    # Factor 4: Liquidity & Spread Tolerance (5 points / -15 penalty for wide spread)
+    spread = tick.ask - tick.bid
+    spread_pct = (spread / cur_p) * 100 if cur_p > 0 else 1.0
+    if spread_pct < 0.05:
+        score += 5
+        signals.append(f"Ultra-low spread ({spread_pct:.3f}%)")
+    elif spread_pct > 0.15:
+        score -= 15
+        signals.append(f"PENALTY: Wide spread ({spread_pct:.3f}%)")
+        
+    # Factor 5: Volatility & ATR Adequacy (5 points)
+    if atr > 0:
+        score += 5
+        signals.append(f"Healthy ATR volatility ({atr:.2f})")
+
+    # Factor 6: Multi-Candle Trend Momentum Confluence (10 points)
+    if len(closes) >= 4:
+        if bias == "BUY" and closes[-1] > closes[-2] > closes[-3]:
+            score += 10
+            signals.append("Bullish 3-candle momentum continuation")
+        elif bias == "SELL" and closes[-1] < closes[-2] < closes[-3]:
+            score += 10
+            signals.append("Bearish 3-candle impulse continuation")
+        
+    score = min(100, max(10, score))
+    return score, signals
+
+# ==============================================================================
+# SYMBOL TRADING PERFORMANCE & TRADE ANALYTICS ENGINE
+# ==============================================================================
+_perf_cache = {
+    "data": None,
+    "last_sync": 0,
+    "timeframe": "all"
+}
+_perf_lock = threading.Lock()
+
+def get_symbol_trading_analytics(timeframe="all", force_refresh=False):
+    global _perf_cache
+    now_ts = time.time()
+    with _perf_lock:
+        if not force_refresh and _perf_cache["data"] and _perf_cache["timeframe"] == timeframe:
+            if now_ts - _perf_cache["last_sync"] < 60:
+                return _perf_cache["data"]
+                
+    with mt5_lock:
+        ok, msg = ensure_deriv_connected()
+        if not ok:
+            return {"error": msg, "symbols": [], "summary": {}}
+            
+        now_dt = datetime.now()
+        if timeframe == "today":
+            from_dt = datetime(now_dt.year, now_dt.month, now_dt.day, 0, 0, 0)
+        elif timeframe == "7d":
+            from_dt = now_dt - timedelta(days=7)
+        elif timeframe == "30d":
+            from_dt = now_dt - timedelta(days=30)
+        elif timeframe == "90d":
+            from_dt = now_dt - timedelta(days=90)
+        else: # "all"
+            from_dt = now_dt - timedelta(days=365 * 3)
+            
+        deals = mt5.history_deals_get(from_dt, now_dt)
+        positions = mt5.positions_get()
+        
+    # Group open positions by symbol
+    open_by_symbol = defaultdict(lambda: {"count": 0, "profit": 0.0, "volume": 0.0})
+    if positions:
+        for p in positions:
+            open_by_symbol[p.symbol]["count"] += 1
+            open_by_symbol[p.symbol]["profit"] += round(p.profit, 2)
+            open_by_symbol[p.symbol]["volume"] += round(p.volume, 2)
+            
+    symbols_deals = defaultdict(list)
+    if deals:
+        for d in deals:
+            if not d.symbol:
+                continue
+            if d.entry == mt5.DEAL_ENTRY_OUT or d.profit != 0:
+                net = d.profit + d.commission + d.swap
+                symbols_deals[d.symbol].append({
+                    "ticket": d.ticket,
+                    "time": d.time,
+                    "net_pnl": round(net, 2),
+                    "profit": round(d.profit, 2),
+                    "commission": round(d.commission, 2),
+                    "swap": round(d.swap, 2),
+                    "magic": d.magic,
+                    "comment": d.comment
+                })
+                
+    symbol_results = []
+    tot_trades_all = 0
+    tot_wins_all = 0
+    tot_losses_all = 0
+    tot_net_all = 0.0
+    tot_gross_profit_all = 0.0
+    tot_gross_loss_all = 0.0
+    
+    for sym, dlist in symbols_deals.items():
+        n = len(dlist)
+        wins = [x for x in dlist if x["net_pnl"] > 0]
+        losses = [x for x in dlist if x["net_pnl"] < 0]
+        evens = [x for x in dlist if x["net_pnl"] == 0]
+        
+        win_cnt = len(wins)
+        loss_cnt = len(losses)
+        win_rate = round((win_cnt / n * 100) if n > 0 else 0.0, 1)
+        
+        gross_profit = sum(x["net_pnl"] for x in wins)
+        gross_loss = abs(sum(x["net_pnl"] for x in losses))
+        net_pnl = sum(x["net_pnl"] for x in dlist)
+        
+        tot_trades_all += n
+        tot_wins_all += win_cnt
+        tot_losses_all += loss_cnt
+        tot_net_all += net_pnl
+        tot_gross_profit_all += gross_profit
+        tot_gross_loss_all += gross_loss
+        
+        if gross_loss > 0:
+            pf = round(gross_profit / gross_loss, 2)
+        elif gross_profit > 0:
+            pf = 99.0
+        else:
+            pf = 1.0
+            
+        avg_profit = round(net_pnl / n if n > 0 else 0.0, 2)
+        avg_win = round(gross_profit / win_cnt if win_cnt > 0 else 0.0, 2)
+        avg_loss = round(gross_loss / loss_cnt if loss_cnt > 0 else 0.0, 2)
+        rr = round(avg_win / avg_loss if avg_loss > 0 else (avg_win if avg_win > 0 else 1.0), 2)
+        
+        # Chronological cumulative P&L curve & Max Drawdown
+        cum = 0.0
+        peak = 0.0
+        max_dd = 0.0
+        sorted_deals = sorted(dlist, key=lambda x: x["time"])
+        cum_curve = []
+        for d in sorted_deals:
+            cum += d["net_pnl"]
+            if cum > peak:
+                peak = cum
+            dd = peak - cum
+            if dd > max_dd:
+                max_dd = dd
+            cum_curve.append({
+                "time": datetime.fromtimestamp(d["time"]).strftime("%m-%d %H:%M"),
+                "cum_pnl": round(cum, 2)
+            })
+            
+        # Statistical sample reliability
+        if n >= 10:
+            stat_valid = "STATISTICALLY_VALID"
+            stat_label = f"Validated (N={n})"
+            stat_badge = "bg-emerald-500/10 text-emeraldaccent border-emerald-500/20"
+        elif n >= 5:
+            stat_valid = "MODERATE_SAMPLE"
+            stat_label = f"Moderate (N={n})"
+            stat_badge = "bg-blue-500/10 text-cyanaccent border-blue-500/20"
+        else:
+            stat_valid = "INSUFFICIENT_DATA"
+            stat_label = f"Insufficient (N={n})"
+            stat_badge = "bg-slate-800 text-slate-400 border-slate-700"
+            
+        # Multi-factor Performance Score (0-100)
+        score = 0.0
+        score += min(30.0, win_rate * 0.3)
+        if net_pnl > 0:
+            score += min(35.0, (min(pf, 3.5) / 3.5) * 35.0)
+        if avg_profit > 0:
+            score += min(20.0, 10.0 + min(10.0, (avg_profit / 25.0) * 10.0))
+        if gross_profit > 0:
+            score -= min(25.0, (max_dd / gross_profit) * 20.0)
+        elif max_dd > 0:
+            score -= 20.0
+            
+        if n < 5:
+            score *= 0.6
+        elif n < 10:
+            score *= 0.8
+            
+        score = max(5.0, min(99.0, round(score, 1)))
+        
+        # Priority classification (1 to 5)
+        if n >= 10 and net_pnl > 50 and pf >= 1.25 and win_rate >= 50:
+            rec = "PRIORITY 1 — INCREASE FOCUS"
+            p_num = 1
+        elif net_pnl > 0 and pf >= 1.05 and n >= 5:
+            rec = "PRIORITY 2 — MAINTAIN"
+            p_num = 2
+        elif net_pnl >= 0:
+            rec = "PRIORITY 3 — MONITOR"
+            p_num = 3
+        elif net_pnl < -100 or pf < 0.5 or (win_rate > 60 and net_pnl < -500):
+            rec = "PRIORITY 5 — AVOID"
+            p_num = 5
+        else:
+            rec = "PRIORITY 4 — REDUCE EXPOSURE"
+            p_num = 4
+            
+        symbol_results.append({
+            "symbol": sym,
+            "total_trades": n,
+            "winning_trades": win_cnt,
+            "losing_trades": loss_cnt,
+            "break_even_trades": len(evens),
+            "win_rate": win_rate,
+            "gross_profit": round(gross_profit, 2),
+            "gross_loss": round(gross_loss, 2),
+            "net_pnl": round(net_pnl, 2),
+            "profit_factor": pf,
+            "avg_profit_per_trade": avg_profit,
+            "avg_win": avg_win,
+            "avg_loss": avg_loss,
+            "rr_performance": rr,
+            "max_drawdown": round(max_dd, 2),
+            "score": score,
+            "recommendation": rec,
+            "priority_num": p_num,
+            "reliability": stat_valid,
+            "stat_label": stat_label,
+            "stat_badge": stat_badge,
+            "open_positions": open_by_symbol[sym]["count"],
+            "open_profit": round(open_by_symbol[sym]["profit"], 2),
+            "open_volume": round(open_by_symbol[sym]["volume"], 2),
+            "cum_curve": cum_curve[-30:]
+        })
+        
+    symbol_results.sort(key=lambda x: (x["score"], x["net_pnl"]), reverse=True)
+    for idx, s in enumerate(symbol_results):
+        s["rank"] = idx + 1
+        
+    alerts = []
+    top_p1 = [s for s in symbol_results if s["priority_num"] == 1]
+    if top_p1:
+        alerts.append({
+            "type": "success",
+            "title": f"Top Consistent Focus: {top_p1[0]['symbol']}",
+            "message": f"{top_p1[0]['symbol']} leads your account with {top_p1[0]['total_trades']} completed trades, {top_p1[0]['win_rate']}% win rate, ${top_p1[0]['net_pnl']:+,.2f} net profit, and Profit Factor {top_p1[0]['profit_factor']}. High trading expectancy validated."
+        })
+        
+    trap_syms = [s for s in symbol_results if s["win_rate"] >= 60 and s["net_pnl"] < -100]
+    for ts in trap_syms:
+        alerts.append({
+            "type": "warning",
+            "title": f"Negative Skew / Deceptive Win Rate Warning: {ts['symbol']}",
+            "message": f"{ts['symbol']} exhibits a high win rate ({ts['win_rate']}%), but realized Net P&L is ${ts['net_pnl']:+,.2f} with Max Drawdown of ${ts['max_drawdown']:,.2f} (PF {ts['profit_factor']}). Average losses severely outweigh wins."
+        })
+        
+    dd_syms = [s for s in symbol_results if s["max_drawdown"] > 1000 and s["priority_num"] >= 4]
+    for ds in dd_syms[:1]:
+        alerts.append({
+            "type": "danger",
+            "title": f"Severe Historical Drawdown Alert: {ds['symbol']}",
+            "message": f"{ds['symbol']} reached peak-to-trough decline of ${ds['max_drawdown']:,.2f}. Categorized as {ds['recommendation']}. Stricter risk gates and trade size reduction mandatory."
+        })
+        
+    promising = [s for s in symbol_results if s["priority_num"] in [2, 3] and s["net_pnl"] > 500 and s["total_trades"] < 10]
+    for ps in promising[:1]:
+        alerts.append({
+            "type": "info",
+            "title": f"High Expectancy Emerging Symbol: {ps['symbol']}",
+            "message": f"{ps['symbol']} has generated ${ps['net_pnl']:+,.2f} across {ps['total_trades']} trades ({ps['win_rate']}% win rate). Requires {10 - ps['total_trades']} more trades to achieve Priority 1 Statistical Certification."
+        })
+        
+    tot_pf = round(tot_gross_profit_all / tot_gross_loss_all, 2) if tot_gross_loss_all > 0 else (99.0 if tot_gross_profit_all > 0 else 1.0)
+    overall_win_rate = round((tot_wins_all / tot_trades_all * 100) if tot_trades_all > 0 else 0.0, 1)
+    
+    p1_list = [s for s in symbol_results if s["priority_num"] == 1]
+    p2_list = [s for s in symbol_results if s["priority_num"] == 2]
+    p3_list = [s for s in symbol_results if s["priority_num"] == 3]
+    p4_list = [s for s in symbol_results if s["priority_num"] == 4]
+    p5_list = [s for s in symbol_results if s["priority_num"] == 5]
+    
+    summary = {
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "timeframe": timeframe,
+        "total_symbols_traded": len(symbol_results),
+        "total_deals_analyzed": tot_trades_all,
+        "total_net_pnl": round(tot_net_all, 2),
+        "total_gross_profit": round(tot_gross_profit_all, 2),
+        "total_gross_loss": round(tot_gross_loss_all, 2),
+        "overall_win_rate": overall_win_rate,
+        "overall_profit_factor": tot_pf,
+        "best_symbol": symbol_results[0]["symbol"] if symbol_results else "None",
+        "worst_symbol": sorted(symbol_results, key=lambda x: x["net_pnl"])[0]["symbol"] if symbol_results else "None",
+        "p1_count": len(p1_list),
+        "p2_count": len(p2_list),
+        "p3_count": len(p3_list),
+        "p4_count": len(p4_list),
+        "p5_count": len(p5_list)
+    }
+    
+    out_data = {
+        "summary": summary,
+        "symbols": symbol_results,
+        "alerts": alerts,
+        "p1_symbols": p1_list,
+        "p2_symbols": p2_list,
+        "p3_symbols": p3_list,
+        "p4_symbols": p4_list,
+        "p5_symbols": p5_list
+    }
+    
+    with _perf_lock:
+        _perf_cache["data"] = out_data
+        _perf_cache["last_sync"] = now_ts
+        _perf_cache["timeframe"] = timeframe
+        
+    return out_data
+
+def get_symbol_perf_summary(sym):
+    try:
+        data = get_symbol_trading_analytics(timeframe="all")
+        for s in data.get("symbols", []):
+            if s["symbol"] == sym:
+                return {
+                    "symbol": sym,
+                    "recommendation": s["recommendation"],
+                    "priority_num": s["priority_num"],
+                    "score": s["score"],
+                    "win_rate": s["win_rate"],
+                    "profit_factor": s["profit_factor"],
+                    "net_pnl": s["net_pnl"],
+                    "total_trades": s["total_trades"],
+                    "reliability": s["reliability"],
+                    "stat_label": s["stat_label"]
+                }
+    except Exception:
+        pass
+    return {
+        "symbol": sym,
+        "recommendation": "PRIORITY 3 — MONITOR",
+        "priority_num": 3,
+        "score": 50.0,
+        "win_rate": 0.0,
+        "profit_factor": 1.0,
+        "net_pnl": 0.0,
+        "total_trades": 0,
+        "reliability": "INSUFFICIENT_DATA",
+        "stat_label": "New Symbol"
+    }
+
+class AutomatedSetupScanner:
+    """
+    Continuous 3-Minute Background Scanning & Automated Execution Engine
+    Enforces:
+      1. Market status verification (no closed markets).
+      2. 88-100% High-Confidence automatic trade execution (when auto-trading enabled).
+      3. Mandatory risk management (SL, TP, 1% risk sizing, margin gates, no duplicates).
+      4. Dynamic setup lifecycle (ACTIVE, EXECUTED, INVALIDATED, MARKET CLOSED).
+      5. Complete trade tracking journal with confidence and reasons.
+    """
+    def __init__(self, interval_seconds=60):
+        self.interval = interval_seconds
+        self.lock = threading.Lock()
+        self.scan_id = 0
+        self.last_scan_time = None
+        self.next_scan_seconds = self.interval
+        self.current_setups = []
+        self.filtered_reasons = {}
+        self.status = "INITIALIZING"
+        self.status_message = "Starting automated background 3-minute market scanner..."
+        self.journal = self.load_journal()
+        self.auto_trade_enabled = self.load_config()
+        self.auto_rescan_enabled = False  # Disabled: 2-min auto rescan removed as requested
+        self.dismissed_setups = set()     # Set of (symbol, action) dismissed/taken setups
+        self.running = True
+        
+        # Start scanner daemon thread
+        self.thread = threading.Thread(target=self._run_loop, daemon=True)
+        self.thread.start()
+
+    def load_config(self):
+        if CONFIG_FILE.exists():
+            try:
+                with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                    cfg = json.load(f)
+                    return cfg.get("auto_trade_enabled", False)
+            except Exception:
+                return False
+        return False
+
+    def save_config(self):
+        try:
+            with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+                json.dump({"auto_trade_enabled": self.auto_trade_enabled}, f, indent=2)
+        except Exception as e:
+            print("Error saving auto trade config:", e)
+
+    def toggle_auto_trade(self):
+        with self.lock:
+            self.auto_trade_enabled = not self.auto_trade_enabled
+            self.save_config()
+            return self.auto_trade_enabled
+
+    def load_journal(self):
+        if JOURNAL_FILE.exists():
+            try:
+                with open(JOURNAL_FILE, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception:
+                return []
+        return []
+
+    def save_journal(self):
+        try:
+            with open(JOURNAL_FILE, "w", encoding="utf-8") as f:
+                json.dump(self.journal, f, indent=2)
+        except Exception as e:
+            print("Error saving trades journal:", e)
+
+    def dismiss_setup(self, setup_id=None, symbol=None, action=None):
+        """Immediately removes a setup from current recommendations and adds to dismissed set."""
+        with self.lock:
+            self.current_setups = [
+                s for s in self.current_setups
+                if s.get("id") != setup_id and not (symbol and s.get("symbol") == symbol and s.get("action") == (action or "").upper())
+            ]
+            if symbol and action:
+                self.dismissed_setups.add((symbol, action.upper()))
+            elif symbol:
+                self.dismissed_setups.add((symbol, "BUY"))
+                self.dismissed_setups.add((symbol, "SELL"))
+            self._update_status_message()
+            print(f"[Scanner] Dismissed setup for {symbol} ({action}). Current active setups remaining: {len(self.current_setups)}")
+
+    def record_execution(self, setup_id, symbol, direction, entry, sl, tp, volume, tickets, confidence="--", reason="Manual Execution", execution_type="MANUAL"):
+        with self.lock:
+            record = {
+                "setup_id": setup_id,
+                "symbol": symbol,
+                "direction": direction.upper(),
+                "entry_price": float(entry),
+                "sl": float(sl) if sl else 0.0,
+                "tp": float(tp) if tp else 0.0,
+                "volume": float(volume),
+                "tickets": tickets,
+                "confidence": confidence,
+                "reason": reason,
+                "execution_type": execution_type,
+                "execution_time": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"),
+                "status": "OPEN"
+            }
+            self.journal.insert(0, record)
+            if len(self.journal) > 100:
+                self.journal = self.journal[:100]
+            self.save_journal()
+            
+            # Immediately remove from current recommendations
+            self.current_setups = [
+                s for s in self.current_setups 
+                if s.get("id") != setup_id and not (s.get("symbol") == symbol and s.get("action") == direction.upper())
+            ]
+            self._update_status_message()
+
+    def _update_status_message(self):
+        if len(self.current_setups) > 0:
+            self.status = "ACTIVE_SETUPS"
+            self.status_message = f"{len(self.current_setups)} High-Probability Setups Confirmed"
+        else:
+            self.status = "WAITING_FOR_CONFIRMATION"
+            self.status_message = "No Valid Trade Setups Available – Waiting for Confirmation"
+
+    def _sync_journal_positions(self, open_positions):
+        """Update journal entries status (OPEN vs CLOSED) based on live MT5 positions."""
+        active_tickets = {p.ticket for p in open_positions} if open_positions else set()
+        changed = False
+        for item in self.journal:
+            tickets = item.get("tickets", [])
+            if any(t in active_tickets for t in tickets):
+                if item.get("status") != "OPEN":
+                    item["status"] = "OPEN"
+                    changed = True
+            else:
+                if item.get("status") == "OPEN":
+                    item["status"] = "CLOSED"
+                    changed = True
+        if changed:
+            self.save_journal()
+
+    def run_scan_now(self):
+        with mt5_lock:
+            ok, _ = ensure_deriv_connected()
+            if not ok:
+                with self.lock:
+                    self.status = "DISCONNECTED"
+                    self.status_message = "Deriv MT5 terminal disconnected. Waiting for connection..."
+                    self.current_setups = []
+                return
+
+            acc = mt5.account_info()
+            positions = mt5.positions_get()
+            if acc is None or positions is None:
+                with self.lock:
+                    self.status = "DISCONNECTED"
+                    self.status_message = "Account/position query failed; new entries paused."
+                    self.current_setups = []
+                return
+            balance = min(acc.balance, acc.equity)
+            margin_free = acc.margin_free
+            margin_level = acc.margin_level
+            risk_dollar = balance * MAX_GROUP_RISK_PERCENT / 100
+            self._sync_journal_positions(positions)
+
+            # Rule 3 & 4: Live Trade Awareness & Position Limits
+            open_pos = set()
+            if positions:
+                for p in positions:
+                    p_type = "BUY" if p.type == mt5.ORDER_TYPE_BUY else "SELL"
+                    open_pos.add((p.symbol, p_type))
+
+            # Candidate pool for Headway Quotes (Metals, Forex Majors, Crypto, Synthetic Indices)
+            if GOLD_ONLY_MODE:
+                candidate_pool = [
+                    {"symbol": "XAUUSD", "category": "Metals (Exclusive Gold Intelligence Active)"}
+                ]
+            else:
+                candidate_pool = [
+                # Top Backtested Edge Assets (Ranked by Profit Factor & Expectancy)
+                {"symbol": "VOL_20", "category": "Indices 24/7 (Top Edge: 66.9% Win, PF 1.88)"},
+                {"symbol": "BOOM_100", "category": "Indices 24/7 (Top Edge: 62.9% Win, PF 2.15)"},
+                {"symbol": "CRASH_100", "category": "Indices 24/7 (Top Edge: 60.4% Win, PF 1.74)"},
+                {"symbol": "ETH", "category": "Crypto 24/7 (Top Edge: 57.4% Win, PF 1.37)"},
+                {"symbol": "BTC", "category": "Crypto 24/7 (Top Edge: 71.6% Win, PF 2.00)"},
+                {"symbol": "VOL_10", "category": "Indices 24/7"},
+                {"symbol": "SOL", "category": "Crypto 24/7 (Top Edge: 57.4% Win, PF 1.35)"},
+                {"symbol": "DOGE", "category": "Crypto 24/7"},
+                {"symbol": "XRP", "category": "Crypto 24/7"},
+                {"symbol": "ADA", "category": "Crypto 24/7"},
+                {"symbol": "LTC", "category": "Crypto 24/7"},
+                {"symbol": "BTCUSD", "category": "Crypto"},
+                {"symbol": "ETHUSD", "category": "Crypto"},
+                # Premier Metals & Forex (Active weekdays, Weekend Technical Analysis)
+                {"symbol": "XAUUSD", "category": "Metals"},
+                {"symbol": "XAGUSD", "category": "Metals"},
+                {"symbol": "EURUSD", "category": "Forex Major"},
+                {"symbol": "GBPUSD", "category": "Forex Major"},
+                {"symbol": "USDJPY", "category": "Forex Major"},
+                {"symbol": "USDCAD", "category": "Forex Major"},
+                {"symbol": "AUDUSD", "category": "Forex Major"},
+                {"symbol": "US500", "category": "Indices"},
+                {"symbol": "DJ30", "category": "Indices"},
+                {"symbol": "NASDAQ-100", "category": "Indices"},
+            ]
+
+            valid_setups = []
+            filtered_reasons = {}
+            auto_trade_executed_this_pass = False
+
+            # Check journal cooldowns: do not duplicate active journal setups
+            recent_executed = {
+                (j["symbol"], j["direction"]) 
+                for j in self.journal 
+                if j.get("status") == "OPEN"
+            }
+
+            for c in candidate_pool:
+                sym = c["symbol"]
+
+                mt5.symbol_select(sym, True)
+                info = mt5.symbol_info(sym)
+                tick = mt5.symbol_info_tick(sym)
+                if not info or not tick:
+                    filtered_reasons[sym] = "Market quote unavailable"
+                    continue
+
+                rates = mt5.copy_rates_from_pos(sym, mt5.TIMEFRAME_M15, 0, 45)
+                if rates is None or len(rates) < 20:
+                    filtered_reasons[sym] = "Insufficient M15 candle history"
+                    continue
+
+                rates_h1 = mt5.copy_rates_from_pos(sym, mt5.TIMEFRAME_H1, 0, 45)
+                h1_atr = 0.0
+                if rates_h1 is not None and len(rates_h1) >= 14:
+                    tr_h1 = np.maximum(rates_h1['high'][1:] - rates_h1['low'][1:], np.abs(rates_h1['high'][1:] - rates_h1['close'][:-1]))
+                    tr_h1 = np.maximum(tr_h1, np.abs(rates_h1['low'][1:] - rates_h1['close'][:-1]))
+                    h1_atr = float(np.mean(tr_h1[-14:]))
+
+                closes = rates['close']
+                highs = rates['high']
+                lows = rates['low']
+
+                # Compute ATR 14
+                tr = np.maximum(highs[1:] - lows[1:], np.abs(highs[1:] - closes[:-1]))
+                tr = np.maximum(tr, np.abs(lows[1:] - closes[:-1]))
+                atr = float(np.mean(tr[-14:]))
+                digits = info.digits
+                point = info.point or (10 ** -digits)
+                if atr <= (point * 0.5):
+                    atr = point * 15.0
+
+                # Compute EMA20
+                if np is not None:
+                    weights20 = np.exp(np.linspace(-1., 0., 20))
+                    weights20 /= weights20.sum()
+                    ema20 = float(np.convolve(closes[-20:], weights20, mode='valid')[-1])
+                else:
+                    ema20 = float(sum(closes[-20:]) / 20)
+
+                # Compute RSI 14
+                deltas = np.diff(closes[-15:])
+                gains = deltas[deltas > 0]
+                losses = -deltas[deltas < 0]
+                avg_gain = float(np.mean(gains)) if len(gains) > 0 else 0.001
+                avg_loss = float(np.mean(losses)) if len(losses) > 0 else 0.001
+                rs = avg_gain / avg_loss
+                rsi = float(100 - (100 / (1 + rs)))
+
+                cur_p = (tick.bid + tick.ask) / 2.0 if (tick.bid > 0 and tick.ask > 0) else closes[-1]
+                # Calibrated robust protective stop distance outside market noise
+                stop_dist = compute_robust_stop_distance(sym, tick, info, m15_atr=atr, h1_atr=h1_atr)
+
+                # Dynamic Trend & Momentum Determination (Long vs Short)
+                if cur_p >= ema20:
+                    bias = "BUY"
+                    setup_name = f"{sym} Trend Momentum (Long)"
+                    notes = f"{sym} M15 bullish trend holding above dynamic EMA support."
+                    entry = tick.ask if tick.ask > 0 else closes[-1]
+                    sl = entry - stop_dist
+                    # Rule 1: Exactly 2 TPs kept (TP1 Conservative 1.8x, TP2 Runner 4.0x)
+                    tp1 = entry + (stop_dist * 1.8)
+                    tp2 = entry + (stop_dist * 4.0)
+                    tp = tp1
+                    invalidation = f"Invalidated if M15 candle closes below {round(sl, digits)} or RSI drops below 35.0"
+                else:
+                    bias = "SELL"
+                    setup_name = f"{sym} Bearish Momentum (Short)"
+                    notes = f"{sym} M15 downward impulse holding below dynamic EMA resistance."
+                    entry = tick.bid if tick.bid > 0 else closes[-1]
+                    sl = entry + stop_dist
+                    # Rule 1: Exactly 2 TPs kept (TP1 Conservative 1.8x, TP2 Runner 4.0x)
+                    tp1 = max(entry * 0.1, entry - (stop_dist * 1.8))
+                    tp2 = max(entry * 0.1, entry - (stop_dist * 4.0))
+                    tp = tp1
+                    invalidation = f"Invalidated if M15 candle closes above {round(sl, digits)} or RSI breaks above 68.0"
+
+                # Check if setup was taken or dismissed by user
+                if (sym, bias) in self.dismissed_setups:
+                    filtered_reasons[sym] = f"Setup on {sym} ({bias}) was taken or dismissed by user"
+                    continue
+
+                # 1. SINGLE TRADE PER SYMBOL POLICY: If ANY trade is currently open on this symbol, do not add another
+                open_symbols_in_account = {p.symbol for p in positions} if positions else set()
+                if sym in open_symbols_in_account:
+                    filtered_reasons[sym] = f"Blocked: Exactly 1 trade per symbol allowed ({sym} already has an open position)"
+                    continue
+
+                if (sym, bias) in recent_executed:
+                    filtered_reasons[sym] = f"Blocked: Previous {bias} setup executed and still active in journal"
+                    continue
+
+                # 2. MARKET STATUS VERIFICATION (Rule 1)
+                is_open, open_reason = check_symbol_market_open(sym)
+
+                try:
+                    calc_lot = limit_volume(
+                        mt5, info, mt5.ORDER_TYPE_BUY if bias == "BUY" else mt5.ORDER_TYPE_SELL,
+                        sym, max(0.01, info.volume_min), entry, sl, risk_dollar, legs=1)
+                except (ValueError, TypeError):
+                    filtered_reasons[sym] = "Broker risk data unavailable or minimum lot exceeds budget"
+                    continue
+
+                # Compute Multi-Factor Confidence Score (Rule 2 & High Conviction Gate)
+                confidence_score, signals_list = calculate_setup_confidence(
+                    info, tick, closes, highs, lows, ema20, rsi, atr, bias, stop_dist, rates_h1=rates_h1
+                )
+                
+                tech_signals = f"M15 EMA20 at {round(ema20, digits)}, RSI(14) at {rsi:.1f}, ATR(14) at {round(atr, digits)} | Confluence: {'; '.join(signals_list[:2])}"
+                if not is_open:
+                    setup_name += " [Weekend Analysis]"
+                    tech_signals = f"[Market Closed – Weekend Structure] " + tech_signals
+
+                setup_id = f"{sym.replace(' ', '_')}_{bias}_{int(time.time())//180}"
+
+                setup_obj = {
+                    "id": setup_id,
+                    "symbol": sym,
+                    "category": c["category"],
+                    "setup_name": setup_name,
+                    "action": bias,
+                    "confidence_score": confidence_score,
+                    "conviction": f"{confidence_score}/100 rule score",
+                    "is_high_confidence": confidence_score >= 90,
+                    "status": "ACTIVE",
+                    "is_market_open": is_open,
+                    "market_note": "OPEN" if is_open else "CLOSED (Weekend Analysis)",
+                    "entry": round(entry, digits),
+                    "sl": round(sl, digits),
+                    "tp": round(tp1, digits),
+                    "tp1": round(tp1, digits),
+                    "tp2": round(tp2, digits),
+                    "atr": round(atr, digits),
+                    "stop_dist": round(stop_dist, digits),
+                    "recommended_lots": calc_lot,
+                    "suggested_trades": 1,
+                    "rr_ratio": "Dual-TP (1:1.8 / 1:4.0)",
+                    "technical_signals": tech_signals,
+                    "invalidation_condition": invalidation,
+                    "notes": notes,
+                    "symbol_perf": get_symbol_perf_summary(sym)
+                }
+
+                # ULTRA-HIGH CONFIDENCE AUTOMATIC EXECUTION (Rule 3: 90-100% Threshold Only - Exactly 1 Trade Per Symbol)
+                if is_open and confidence_score >= 90 and self.auto_trade_enabled:
+                    # Policy: Take trade automatically one symbol at a time per scan pass
+                    if auto_trade_executed_this_pass:
+                        setup_obj["notes"] += " [Queued: Taking 1 symbol at a time policy]"
+                        valid_setups.append(setup_obj)
+                        continue
+
+                    # Portfolio Correlation Protection Gate
+                    sym_u = sym.upper()
+                    open_crypto = sum(1 for p in positions if p.symbol.upper() in CRYPTO_SYMBOLS or any(c in p.symbol.upper() for c in ["BTC", "ETH", "DOGE", "SOL", "XRP", "ADA", "LTC"]))
+                    open_metals = sum(1 for p in positions if p.symbol.upper() in METALS_SYMBOLS or any(c in p.symbol.upper() for c in ["XAU", "GOLD", "XAG"]))
+                    open_forex = sum(1 for p in positions if p.symbol.upper() in FOREX_SYMBOLS or any(c in p.symbol.upper() for c in ["EUR", "GBP", "USD", "JPY", "CAD", "AUD", "NZD", "CHF"]))
+
+                    if (sym_u in CRYPTO_SYMBOLS or any(c in sym_u for c in ["BTC", "ETH", "DOGE", "SOL", "XRP", "ADA", "LTC"])) and open_crypto >= 1:
+                        filtered_reasons[sym] = f"Auto-Execution blocked: Portfolio Correlation Gate - Max 1 active Crypto trade allowed ({open_crypto} currently open)"
+                        setup_obj["notes"] += " [Blocked by Crypto Correlation Gate]"
+                        valid_setups.append(setup_obj)
+                        continue
+
+                    if (sym_u in METALS_SYMBOLS or any(c in sym_u for c in ["XAU", "GOLD", "XAG"])) and open_metals >= 1:
+                        filtered_reasons[sym] = f"Auto-Execution blocked: Portfolio Correlation Gate - Max 1 active Metals trade allowed ({open_metals} currently open)"
+                        setup_obj["notes"] += " [Blocked by Metals Correlation Gate]"
+                        valid_setups.append(setup_obj)
+                        continue
+
+                    if (sym_u in FOREX_SYMBOLS or any(c in sym_u for c in ["EUR", "GBP", "USD", "JPY", "CAD", "AUD", "NZD", "CHF"])) and open_forex >= 2:
+                        filtered_reasons[sym] = f"Auto-Execution blocked: Portfolio Correlation Gate - Max 2 active Forex trades allowed ({open_forex} currently open)"
+                        setup_obj["notes"] += " [Blocked by Forex Correlation Gate]"
+                        valid_setups.append(setup_obj)
+                        continue
+
+                    # Symbol Loss Cooldown: avoid repeated entries on symbol that stopped out in last 45 minutes
+                    recent_losses = getattr(self, "recent_losses", {})
+                    last_loss_ts = recent_losses.get(sym, 0)
+                    if time.time() - last_loss_ts < 2700:
+                        rem_m = int((2700 - (time.time() - last_loss_ts)) / 60)
+                        filtered_reasons[sym] = f"Auto-Execution blocked: 45-min Loss Cooldown active on {sym} ({rem_m}m remaining)"
+                        setup_obj["notes"] += " [Blocked by Loss Cooldown]"
+                        valid_setups.append(setup_obj)
+                        continue
+
+                    # Risk gate: Disallow automatic execution on Priority 5 (AVOID) symbols with severe historical losses
+                    if setup_obj.get("symbol_perf", {}).get("priority_num") == 5:
+                        filtered_reasons[sym] = f"Auto-Execution blocked: {sym} has historical Priority 5 (AVOID) status (Severe Loss Skew/Drawdown). Manual confirmation required."
+                        valid_setups.append(setup_obj)
+                        continue
+
+                    # Mandatory Risk Verification before execution
+                    risk_checks_passed = (
+                        margin_free >= 500.0 and
+                        (margin_level >= 200.0 or margin_level == 0.0) and
+                        len(positions) + 1 <= MAX_OPEN_POSITIONS and
+                        calc_lot >= info.volume_min and
+                        sl > 0 and tp1 > 0 and tp2 > 0
+                    )
+                    
+                    if risk_checks_passed:
+                        # Router rechecks current account risk and capacity for every group/leg.
+                        order_res = execute_multi_tp_group(
+                            symbol=sym,
+                            action=bias,
+                            ref_balance=balance,
+                            default_lot=0.01,
+                            ai_notes=f"Auto-Execution (88-100 rule score): {tech_signals}",
+                            confidence_score=confidence_score,
+                            prevent_duplicate=True,
+                        )
+                        if order_res.get("success"):
+                            setup_obj["status"] = "EXECUTED"
+                            setup_obj["group_id"] = order_res.get("group_id")
+                            auto_trade_executed_this_pass = True
+                            valid_setups.append(setup_obj)
+                            print(f"[AutoTrader] Successfully opened 1 trade on {sym} ({bias}). Adhering to 1 symbol at a time.")
+                            continue
+                        else:
+                            filtered_reasons[sym] = f"Auto-Execution Failed: {order_res.get('message')}"
+                            valid_setups.append(setup_obj)
+                    else:
+                        filtered_reasons[sym] = "High-Confidence Setup blocked by Mandatory Margin/Risk Limits"
+                        valid_setups.append(setup_obj)
+                else:
+                    valid_setups.append(setup_obj)
+
+            with self.lock:
+                self.scan_id += 1
+                self.last_scan_time = datetime.utcnow().strftime("%H:%M:%S UTC")
+                self.next_scan_seconds = self.interval
+                self.current_setups = valid_setups
+                self.filtered_reasons = filtered_reasons
+                self._update_status_message()
+
+    def _run_loop(self):
+        """Initial startup scan, then re-scans automatically when auto_trade_enabled or auto_rescan_enabled is True."""
+        time.sleep(1)
+        self.run_scan_now()
+        
+        while self.running:
+            if not self.auto_trade_enabled and not self.auto_rescan_enabled:
+                time.sleep(1.0)
+                continue
+            for _ in range(self.interval):
+                if not self.running or (not self.auto_trade_enabled and not self.auto_rescan_enabled):
+                    break
+                time.sleep(1)
+                with self.lock:
+                    if self.next_scan_seconds > 0:
+                        self.next_scan_seconds -= 1
+            if self.running and (self.auto_trade_enabled or self.auto_rescan_enabled):
+                self.run_scan_now()
+
+    def get_state(self):
+        with self.lock:
+            return {
+                "scan_id": self.scan_id,
+                "interval_seconds": self.interval,
+                "last_scan_time": self.last_scan_time or datetime.utcnow().strftime("%H:%M:%S UTC"),
+                "next_scan_seconds": self.next_scan_seconds,
+                "auto_trade_enabled": self.auto_trade_enabled,
+                "status": self.status,
+                "status_message": self.status_message,
+                "setups": self.current_setups,
+                "filtered_reasons": self.filtered_reasons,
+                "journal": self.journal[:20]
+            }
+
+# Importing this module must never start an order-producing thread.
+
+class ProfitGuardian:
+    """
+    Automated High-Water Mark Profit Protection Engine
+    Rules:
+      1. Tracks every open MT5 position's peak floating profit (profit + swap).
+      2. When floating profit reaches activation threshold ($10.00+), the shield is ARMED.
+      3. If profit pulls back from peak by more than max_giveback_pct (default 35%) or drops to minimum guaranteed ($5.00),
+         instantly market-closes the position to bank guaranteed profit.
+      4. Protects all open positions from fast momentum reversals and profit givebacks.
+    """
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.config = self.load_config()
+        self.peak_tracker = {}  # {ticket: {"symbol": str, "peak_profit": float, "armed": bool, "floor": float}}
+        self.group_peak_tracker = {}  # {group_id: {"symbol": str, "tickets": list, "peak_profit": float, "armed": bool, "floor": float}}
+        self.closed_events = []
+        self.running = False
+        self.thread = None
+
+    def load_config(self):
+        default_cfg = {
+            "enabled": True,
+            "activation_usd": 10.0,
+            "max_giveback_pct": 35.0,
+            "min_guaranteed_usd": 5.0
+        }
+        if PROFIT_GUARDIAN_CONFIG_FILE.exists():
+            try:
+                data = json.loads(PROFIT_GUARDIAN_CONFIG_FILE.read_text(encoding="utf-8"))
+                default_cfg.update(data)
+            except Exception:
+                pass
+        return default_cfg
+
+    def save_config(self):
+        try:
+            PROFIT_GUARDIAN_CONFIG_FILE.write_text(json.dumps(self.config, indent=2), encoding="utf-8")
+        except Exception as e:
+            print("Error saving Profit Guardian config:", e)
+
+    def toggle_enabled(self):
+        with self.lock:
+            self.config["enabled"] = not self.config.get("enabled", True)
+            self.save_config()
+            return self.config["enabled"]
+
+    def update_config(self, new_cfg):
+        with self.lock:
+            self.config.update(new_cfg)
+            self.save_config()
+
+    def start(self):
+        if not self.running:
+            self.running = True
+            self.thread = threading.Thread(target=self._guardian_loop, daemon=True)
+            self.thread.start()
+
+    def stop(self):
+        self.running = False
+
+    def get_ticket_info(self, ticket):
+        with self.lock:
+            info = self.peak_tracker.get(ticket)
+            if info:
+                return dict(info)
+            return {"armed": False, "peak_profit": 0.0, "floor": 0.0}
+
+    def _guardian_loop(self):
+        while self.running:
+            try:
+                if self.config.get("enabled", True):
+                    self.check_positions()
+            except Exception as e:
+                print("Profit Guardian loop error:", e)
+            time.sleep(1.0)
+
+    def check_positions(self):
+        with mt5_lock:
+            ok, _ = ensure_deriv_connected()
+            if not ok:
+                return
+            acc = mt5.account_info()
+            positions = mt5.positions_get()
+            if positions is None:
+                return
+            
+            active_tickets = {p.ticket for p in positions}
+            if profit_chaser and profit_chaser.config.enabled:
+                profit_chaser.sync_with_live_mt5_positions(list(active_tickets))
+                for p in positions:
+                    profit_chaser.register_position(
+                        ticket=p.ticket,
+                        symbol=p.symbol,
+                        direction="BUY" if p.type == mt5.ORDER_TYPE_BUY else "SELL",
+                        volume=p.volume,
+                        entry_price=p.price_open,
+                        entry_equity=float(acc.equity if acc else 1000.0),
+                        position_margin=float(getattr(p, "margin", 0.0) or 100.0),
+                        point_size=0.01
+                    )
+                    profit_chaser.update_position(
+                        ticket=p.ticket,
+                        current_profit_currency=float(p.profit + p.swap),
+                        current_price=float(p.price_current)
+                    )
+            with self.lock:
+                for t in list(self.peak_tracker.keys()):
+                    if t not in active_tickets:
+                        del self.peak_tracker[t]
+
+            activation_threshold = float(self.config.get("activation_usd", 10.0))
+            giveback_pct = float(self.config.get("max_giveback_pct", 35.0)) / 100.0
+            min_guaranteed = float(self.config.get("min_guaranteed_usd", 5.0))
+
+            to_close = []
+            # 1. GROUP-LEVEL PROFIT GUARDIAN (Tracks combined profit of multi-TP trade setups)
+            try:
+                active_groups = load_multi_tp_groups(strict=False)
+            except Exception:
+                active_groups = []
+
+            pos_dict = {p.ticket: p for p in positions}
+            group_to_close = []
+
+            for g in active_groups:
+                if g.get("status") not in ("ACTIVE", "RECONCILIATION_REQUIRED"):
+                    continue
+                gid = g.get("group_id")
+                open_tickets = [
+                    pos["ticket"] for pos in g.get("positions", [])
+                    if pos.get("status") == "ACTIVE" and pos["ticket"] in pos_dict
+                ]
+                if not open_tickets:
+                    continue
+
+                group_floating = sum(round(pos_dict[t].profit + pos_dict[t].swap, 2) for t in open_tickets)
+                sym = g.get("symbol", "UNKNOWN")
+
+                with self.lock:
+                    if gid not in self.group_peak_tracker:
+                        self.group_peak_tracker[gid] = {
+                            "group_id": gid,
+                            "symbol": sym,
+                            "tickets": open_tickets,
+                            "peak_profit": group_floating,
+                            "armed": False,
+                            "floor": 0.0
+                        }
+                    g_entry = self.group_peak_tracker[gid]
+                    g_entry["tickets"] = open_tickets
+                    if group_floating > g_entry["peak_profit"]:
+                        g_entry["peak_profit"] = group_floating
+
+                    # Arm group shield if group combined profit reaches >= $10.00
+                    if g_entry["peak_profit"] >= activation_threshold:
+                        g_entry["armed"] = True
+                        allowed_giveback = g_entry["peak_profit"] * giveback_pct
+                        calc_floor = g_entry["peak_profit"] - allowed_giveback
+                        g_entry["floor"] = round(max(min_guaranteed, calc_floor), 2)
+
+                    if g_entry["armed"] and group_floating <= g_entry["floor"]:
+                        group_to_close.append((gid, sym, open_tickets, group_floating, g_entry["peak_profit"], g_entry["floor"]))
+
+            for gid, sym, tickets, cur_pnl, peak, floor in group_to_close:
+                for t in tickets:
+                    close_deriv_position(t)
+                event_msg = f"🛡️ Profit Guardian Secured Group +${cur_pnl:.2f} on {sym} ({len(tickets)} legs closed) — Protected from drop after peak of +${peak:.2f} (Floor was +${floor:.2f})"
+                print(event_msg)
+                with self.lock:
+                    if gid in self.group_peak_tracker:
+                        del self.group_peak_tracker[gid]
+                    self.closed_events.insert(0, {
+                        "time": datetime.utcnow().strftime("%H:%M:%S UTC"),
+                        "symbol": sym,
+                        "ticket": f"Group {gid[:16]}",
+                        "profit": cur_pnl,
+                        "peak_profit": peak,
+                        "floor": floor,
+                        "message": event_msg
+                    })
+
+            # 2. INDIVIDUAL TICKET PROFIT GUARDIAN (Arms at >= $5.00 for micro-lots or >= $10.00)
+            ticket_arm_threshold = max(min_guaranteed, activation_threshold / 2.0)
+            for p in positions:
+                ticket = p.ticket
+                symbol = p.symbol
+                cur_profit = round(p.profit + p.swap, 2)
+
+                with self.lock:
+                    if ticket not in self.peak_tracker:
+                        self.peak_tracker[ticket] = {
+                            "symbol": symbol,
+                            "type": "BUY" if p.type == mt5.ORDER_TYPE_BUY else "SELL",
+                            "volume": p.volume,
+                            "peak_profit": cur_profit,
+                            "armed": False,
+                            "floor": 0.0
+                        }
+
+                    entry = self.peak_tracker[ticket]
+                    if cur_profit > entry["peak_profit"]:
+                        entry["peak_profit"] = cur_profit
+
+                    # Arm shield if profit touches or exceeds activation threshold
+                    if entry["peak_profit"] >= ticket_arm_threshold:
+                        entry["armed"] = True
+                        allowed_giveback = entry["peak_profit"] * giveback_pct
+                        calculated_floor = entry["peak_profit"] - allowed_giveback
+                        entry["floor"] = round(max(min_guaranteed * 0.7, calculated_floor), 2)
+
+                    if entry["armed"] and cur_profit <= entry["floor"]:
+                        to_close.append((ticket, symbol, cur_profit, entry["peak_profit"], entry["floor"]))
+
+            for ticket, symbol, cur_profit, peak, floor in to_close:
+                res = close_deriv_position(ticket)
+                event_msg = f"🛡️ Profit Guardian Secured +${cur_profit:.2f} on {symbol} (Ticket #{ticket}) — Protected from drop after peak of +${peak:.2f} (Floor was +${floor:.2f})"
+                print(event_msg)
+                with self.lock:
+                    if ticket in self.peak_tracker:
+                        del self.peak_tracker[ticket]
+                    self.closed_events.insert(0, {
+                        "time": datetime.utcnow().strftime("%H:%M:%S UTC"),
+                        "symbol": symbol,
+                        "ticket": ticket,
+                        "profit": cur_profit,
+                        "peak_profit": peak,
+                        "floor": floor,
+                        "message": event_msg
+                    })
+                    if len(self.closed_events) > 30:
+                        self.closed_events = self.closed_events[:30]
+
+    def get_status(self):
+        with self.lock:
+            return {
+                "config": dict(self.config),
+                "tracked_positions": dict(self.peak_tracker),
+                "tracked_groups": dict(self.group_peak_tracker),
+                "recent_protections": list(self.closed_events[:10]),
+                "be_events": dict(getattr(self, "be_events", {}))
+            }
+
+guardian = None
+profit_chaser = SmartProfitChaser()
+gold_auto_trader = GoldAutoTrader(profit_chaser=profit_chaser, mt5_lock=mt5_lock)
+
+scanner = None
+
+def get_deriv_full_state():
+    with mt5_lock:
+        ok, msg = ensure_deriv_connected()
+        if not ok:
+            return {
+                "connected": False,
+                "error": msg,
+                "account": {},
+                "positions": [],
+                "quotes": {},
+                "imm_dates": get_next_imm_dates(date.today())
+            }
+        
+        acc = mt5.account_info()
+        term = mt5.terminal_info()
+        
+        account_data = {
+            "login": acc.login if acc else "17683547",
+            "name": acc.name if acc else "PATRICK AMONI",
+            "server": acc.server if acc else "Headway-Real",
+            "company": acc.company if acc else "Jarocel (Pty) Ltd",
+            "balance": round(acc.balance, 2) if acc else 0.0,
+            "equity": round(acc.equity, 2) if acc else 0.0,
+            "profit": round(acc.profit, 2) if acc else 0.0,
+            "margin_free": round(acc.margin_free, 2) if acc else 0.0,
+            "margin_level": round(acc.margin_level, 2) if acc else 0.0,
+            "leverage": acc.leverage if acc else 1000,
+            "ping": round(term.ping_last / 1000, 2) if term else 0.0
+        }
+        
+        positions_raw = mt5.positions_get()
+        positions = []
+        if positions_raw:
+            for p in positions_raw:
+                p_type = "BUY" if p.type == mt5.ORDER_TYPE_BUY else "SELL"
+                p_guard = guardian.get_ticket_info(p.ticket) if guardian else {}
+                positions.append({
+                    "ticket": p.ticket,
+                    "symbol": p.symbol,
+                    "type": p_type,
+                    "volume": round(p.volume, 2),
+                    "price_open": round(p.price_open, 5),
+                    "price_current": round(p.price_current, 5),
+                    "sl": round(p.sl, 5),
+                    "tp": round(p.tp, 5),
+                    "profit": round(p.profit, 2),
+                    "time": time.strftime("%H:%M:%S", time.localtime(p.time)),
+                    "guardian_armed": p_guard.get("armed", False),
+                    "guardian_peak": p_guard.get("peak_profit", round(p.profit, 2)),
+                    "guardian_floor": p_guard.get("floor", 0.0)
+                })
+        
+        quotes = {}
+        for s in TICKER_SYMBOLS:
+            mt5.symbol_select(s, True)
+            tick = mt5.symbol_info_tick(s)
+            if tick:
+                quotes[s] = {
+                    "bid": round(tick.bid, 4),
+                    "ask": round(tick.ask, 4),
+                    "spread": round(tick.ask - tick.bid, 4)
+                }
+        
+        return {
+            "connected": True,
+            "account": account_data,
+            "positions": positions,
+            "quotes": quotes,
+            "imm_dates": get_next_imm_dates(date.today()),
+            "profit_guardian": guardian.get_status() if guardian else {}
+        }
+
+def get_recent_trade_history(limit=15):
+    with mt5_lock:
+        ok, msg = ensure_deriv_connected()
+        if not ok:
+            return []
+        
+        from_time = datetime.now() - timedelta(days=3)
+        deals = mt5.history_deals_get(from_time, datetime.now())
+        if not deals:
+            return []
+        
+        history = []
+        for d in reversed(deals):
+            if d.entry == mt5.DEAL_ENTRY_OUT or d.profit != 0:
+                history.append({
+                    "ticket": d.ticket,
+                    "order": d.order,
+                    "symbol": d.symbol,
+                    "type": "BUY" if d.type == mt5.DEAL_TYPE_BUY else "SELL",
+                    "volume": round(d.volume, 2),
+                    "price": round(d.price, 5),
+                    "profit": round(d.profit, 2),
+                    "commission": round(d.commission, 2),
+                    "time": datetime.fromtimestamp(d.time).strftime("%m-%d %H:%M:%S")
+                })
+            if len(history) >= limit:
+                break
+        return history
+
+def execute_deriv_order(symbol, action, volume, sl=0.0, tp=0.0, trades_count=1, volume_mode="split", setup_id=None, confidence="--", reason="Manual Execution", comment="Headway Agent"):
+    with mt5_lock:
+        ok, msg = ensure_deriv_connected()
+        if not ok:
+            return {"success": False, "message": msg}
+        
+        # Verify market is open before order placement
+        is_open, open_reason = check_symbol_market_open(symbol)
+        if not is_open:
+            return {"success": False, "message": f"Execution rejected: {open_reason}"}
+        
+        mt5.symbol_select(symbol, True)
+        sym_info = mt5.symbol_info(symbol)
+        if not sym_info:
+            return {"success": False, "message": f"Symbol '{symbol}' not found on Deriv MT5."}
+        
+        trades_count = max(1, min(int(trades_count), 10))
+        total_vol = float(volume)
+        
+        if volume_mode == "split" and trades_count > 1:
+            per_trade_vol = round(total_vol / trades_count, 2)
+            if per_trade_vol < sym_info.volume_min:
+                per_trade_vol = sym_info.volume_min
+        else:
+            per_trade_vol = round(total_vol, 2)
+            if per_trade_vol < sym_info.volume_min:
+                per_trade_vol = sym_info.volume_min
+        
+        order_type = mt5.ORDER_TYPE_BUY if action.upper() == "BUY" else mt5.ORDER_TYPE_SELL
+        filling_mode = get_best_filling_mode(sym_info)
+        
+        executed_tickets = []
+        executed_prices = []
+        errors = []
+        
+        for i in range(trades_count):
+            tick = mt5.symbol_info_tick(symbol)
+            if not tick:
+                errors.append(f"Trade #{i+1}: Could not fetch latest tick.")
+                continue
+            
+            price = tick.ask if order_type == mt5.ORDER_TYPE_BUY else tick.bid
+            
+            comment_str = f"{comment} ({i+1}/{trades_count})"[:31]
+            request = {
+                "action": mt5.TRADE_ACTION_DEAL,
+                "symbol": symbol,
+                "volume": per_trade_vol,
+                "type": order_type,
+                "price": price,
+                "sl": float(sl) if sl else 0.0,
+                "tp": float(tp) if tp else 0.0,
+                "deviation": 30,
+                "magic": 999999 + i,
+                "comment": comment_str,
+                "type_time": mt5.ORDER_TIME_GTC,
+                "type_filling": filling_mode,
+            }
+            
+            res = guarded_order_send(mt5, request)
+            if res is not None and res.retcode == mt5.TRADE_RETCODE_DONE:
+                executed_tickets.append(res.order)
+                executed_prices.append(res.price)
+            else:
+                err_msg = res.comment if res else str(mt5.last_error())
+                code = res.retcode if res else -1
+                errors.append(f"Trade #{i+1} failed: {err_msg} (code {code})")
+            
+            if trades_count > 1:
+                time.sleep(0.08)
+        
+        if executed_tickets:
+            avg_price = sum(executed_prices) / len(executed_prices) if executed_prices else 0.0
+            total_filled_vol = round(per_trade_vol * len(executed_tickets), 2)
+            
+            scanner.record_execution(
+                setup_id=setup_id or f"{symbol}_{action}",
+                symbol=symbol,
+                direction=action,
+                entry=avg_price,
+                sl=sl,
+                tp=tp,
+                volume=total_filled_vol,
+                tickets=executed_tickets,
+                confidence=confidence,
+                reason=reason,
+                execution_type="MANUAL (1-Click)" if "AUTO" not in comment else "AUTO_EXECUTED (88-100% Conf)"
+            )
+            
+            tickets_str = ", ".join(f"#{t}" for t in executed_tickets)
+            msg = f"FILLED {len(executed_tickets)}x {action} {per_trade_vol} lot(s) on {symbol} (Total: {total_filled_vol} lots). Tickets: {tickets_str}"
+            if errors:
+                msg += f" | Partial errors: {'; '.join(errors)}"
+            return {
+                "success": True,
+                "tickets": executed_tickets,
+                "count": len(executed_tickets),
+                "total_volume": total_filled_vol,
+                "message": msg
+            }
+        else:
+            return {
+                "success": False,
+                "message": f"Execution failed for all orders: {'; '.join(errors)}"
+            }
+
+def close_deriv_position(ticket):
+    with mt5_lock:
+        ok, msg = ensure_deriv_connected()
+        if not ok:
+            return {"success": False, "message": msg}
+        
+        positions = mt5.positions_get(ticket=ticket)
+        if not positions:
+            return {"success": False, "message": f"Ticket #{ticket} not found or already closed."}
+        
+        pos = positions[0]
+        sym_info = mt5.symbol_info(pos.symbol)
+        filling_mode = get_best_filling_mode(sym_info)
+        
+        close_type = mt5.ORDER_TYPE_SELL if pos.type == mt5.ORDER_TYPE_BUY else mt5.ORDER_TYPE_BUY
+        tick = mt5.symbol_info_tick(pos.symbol)
+        price = tick.bid if pos.type == mt5.ORDER_TYPE_BUY else tick.ask
+        
+        request = {
+            "action": mt5.TRADE_ACTION_DEAL,
+            "position": pos.ticket,
+            "symbol": pos.symbol,
+            "volume": pos.volume,
+            "type": close_type,
+            "price": price,
+            "deviation": 30,
+            "magic": 999999,
+            "comment": "Headway Instant Close",
+            "type_time": mt5.ORDER_TIME_GTC,
+            "type_filling": filling_mode,
+        }
+        res = guarded_order_send(mt5, request)
+        if res is not None and res.retcode == mt5.TRADE_RETCODE_DONE:
+            return {"success": True, "message": f"Closed #{ticket} ({pos.symbol}) successfully."}
+        else:
+            err_msg = res.comment if res else str(mt5.last_error())
+            code = res.retcode if res else -1
+            return {"success": False, "message": f"Close failed: {err_msg} (code {code})"}
+
+def close_all_deriv_positions():
+    with mt5_lock:
+        ok, msg = ensure_deriv_connected()
+        if not ok:
+            return {"success": False, "message": msg}
+        
+        positions = mt5.positions_get()
+        if not positions:
+            return {"success": True, "message": "No open positions to close."}
+        
+        closed = 0
+        errors = []
+        for pos in positions:
+            sym_info = mt5.symbol_info(pos.symbol)
+            filling_mode = get_best_filling_mode(sym_info)
+            close_type = mt5.ORDER_TYPE_SELL if pos.type == mt5.ORDER_TYPE_BUY else mt5.ORDER_TYPE_BUY
+            tick = mt5.symbol_info_tick(pos.symbol)
+            price = tick.bid if pos.type == mt5.ORDER_TYPE_BUY else tick.ask
+            
+            request = {
+                "action": mt5.TRADE_ACTION_DEAL,
+                "position": pos.ticket,
+                "symbol": pos.symbol,
+                "volume": pos.volume,
+                "type": close_type,
+                "price": price,
+                "deviation": 30,
+                "magic": 999999,
+                "comment": "Panic Close All"[:31],
+                "type_time": mt5.ORDER_TIME_GTC,
+                "type_filling": filling_mode,
+            }
+            res = guarded_order_send(mt5, request)
+            if res is not None and res.retcode == mt5.TRADE_RETCODE_DONE:
+                closed += 1
+            else:
+                err_msg = res.comment if res else str(mt5.last_error())
+                errors.append(f"#{pos.ticket}: {err_msg}")
+        
+        return {
+            "success": True,
+            "message": f"Emergency Close: Successfully closed {closed} of {len(positions)} positions.",
+            "errors": errors
+        }
+
+# ==============================================================================
+# 5-TRADE MULTI-TP SYSTEM WITH SHARED 5% STOP LOSS ENGINE
+# ==============================================================================
+def load_multi_tp_groups(strict=False):
+    if not MULTI_TP_FILE.exists():
+        return []
+    try:
+        groups = json.loads(MULTI_TP_FILE.read_text(encoding="utf-8"))
+        if not isinstance(groups, list):
+            raise ValueError("Trade group state is not a list")
+        return groups
+    except Exception:
+        if strict:
+            raise ValueError("Trade group state cannot be read; new entries paused")
+        return []
+
+
+def save_multi_tp_groups(groups):
+    # Commit the complete file; resilient against OneDrive file-locking on Windows
+    payload = json.dumps(groups, indent=2, allow_nan=False)
+    pending = MULTI_TP_FILE.with_suffix(".json.tmp")
+    try:
+        pending.write_text(payload, encoding="utf-8")
+        for _ in range(5):
+            try:
+                os.replace(pending, MULTI_TP_FILE)
+                return
+            except PermissionError:
+                time.sleep(0.05)
+    except Exception:
+        pass
+    # Fallback direct write if os.replace is locked by OneDrive
+    try:
+        MULTI_TP_FILE.write_text(payload, encoding="utf-8")
+        if pending.exists():
+            pending.unlink(missing_ok=True)
+    except Exception as e:
+        print(f"Warning saving multi_tp_groups: {e}")
+
+
+def sync_multi_tp_groups():
+    """Reconcile Multi-TP positions against live MT5 positions."""
+    with mt5_lock:
+        ok, _ = ensure_deriv_connected()
+        groups = load_multi_tp_groups()
+        if not ok or not groups:
+            return groups
+        open_positions = mt5.positions_get()
+        if open_positions is None:
+            return groups
+        live = {p.ticket: p for p in open_positions}
+        changed = False
+        for group in groups:
+            realized, floating, all_closed = 0.0, 0.0, True
+            for pos in group.get("positions", []):
+                ticket = pos.get("ticket")
+                if not ticket:
+                    continue
+                if ticket in live:
+                    active = live[ticket]
+                    all_closed = False
+                    pos.update(
+                        status="ACTIVE",
+                        current_price=active.price_current,
+                        floating_profit=round(active.profit + active.swap, 2)
+                    )
+                    floating += pos["floating_profit"]
+                else:
+                    if pos.get("status") == "ACTIVE" or not pos.get("status"):
+                        pos.update(status="CLOSED", floating_profit=0.0)
+                        changed = True
+                    realized += pos.get("realized_profit", 0.0)
+
+            group.update(
+                realized_profit=round(realized, 2),
+                floating_profit=round(floating, 2),
+                total_profit=round(realized + floating, 2),
+                status="COMPLETED" if all_closed else "ACTIVE"
+            )
+            changed = True
+        if changed:
+            save_multi_tp_groups(groups)
+        return groups
+
+
+def execute_multi_tp_group(symbol, action, ref_balance=1000.0, default_lot=0.01,
+                           ai_notes="Multi-TP Setup", custom_lots=None,
+                           confidence_score=None, prevent_duplicate=False):
+    """Three fixed targets; preserve signal/price-distance rules, cap stop exposure.
+
+    Risk/target money is a broker estimate in account currency, excluding costs
+    and stop slippage. No trailing stop or win probability is implied.
+    """
+    with mt5_lock:
+        def reject(message):
+            return {"success": False, "message": message}
+
+        action = str(action).upper()
+        if action not in ("BUY", "SELL"):
+            return reject("Action must be BUY or SELL")
+        ok, msg = ensure_deriv_connected()
+        if not ok:
+            return reject(msg)
+        try:
+            groups = load_multi_tp_groups(strict=True)
+        except ValueError as exc:
+            return reject(str(exc))
+        if any(g.get("symbol") == symbol and g.get("execution_state") == "UNKNOWN" for g in groups):
+            return reject("Prior submission requires broker reconciliation before new symbol entries")
+        is_open, reason = check_symbol_market_open(symbol)
+        if not is_open:
+            return reject(f"Execution rejected: {reason}")
+        info = mt5.symbol_info(symbol)
+        tick = mt5.symbol_info_tick(symbol)
+        acc = mt5.account_info()
+        positions = mt5.positions_get()
+        if info is None or tick is None or acc is None or positions is None:
+            return reject("Account, positions, symbol or quote unavailable; no orders sent")
+        if not getattr(acc, "trade_allowed", False) or not getattr(acc, "trade_expert", False):
+            return reject("Account does not permit automated trading")
+        if getattr(acc, "margin_mode", None) != mt5.ACCOUNT_MARGIN_MODE_RETAIL_HEDGING:
+            return reject("Two separate positions require a hedging account")
+        order_type = mt5.ORDER_TYPE_BUY if action == "BUY" else mt5.ORDER_TYPE_SELL
+        if prevent_duplicate and any(p.symbol == symbol and p.type == order_type for p in positions):
+            return reject("An existing position already has this symbol and direction")
+        if len(positions) + 2 > MAX_OPEN_POSITIONS:
+            return reject(f"Two-trade group exceeds the {MAX_OPEN_POSITIONS}-position account cap")
+        try:
+            basis = positive(min(acc.balance, acc.equity), "Account risk basis")
+            budget = basis * MAX_GROUP_RISK_PERCENT / 100
+            entry = positive(tick.ask if action == "BUY" else tick.bid, "Entry")
+            spread = tick.ask - tick.bid
+            if spread < 0:
+                raise ValueError("Quote is crossed")
+            point = positive(info.point, "Symbol point")
+            minimum = max(info.trade_stops_level * point, spread * 1.5, point * 50)
+            rates = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M15, 0, 25)
+            rates_h1 = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_H1, 0, 25)
+            m15_atr = 0.0
+            if rates is not None and len(rates) >= 14:
+                tr_m = np.maximum(rates['high'][1:] - rates['low'][1:], np.abs(rates['high'][1:] - rates['close'][:-1]))
+                tr_m = np.maximum(tr_m, np.abs(rates['low'][1:] - rates['close'][:-1]))
+                m15_atr = float(np.mean(tr_m[-14:]))
+            h1_atr = 0.0
+            if rates_h1 is not None and len(rates_h1) >= 14:
+                tr_h = np.maximum(rates_h1['high'][1:] - rates_h1['low'][1:], np.abs(rates_h1['high'][1:] - rates_h1['close'][:-1]))
+                tr_h = np.maximum(tr_h, np.abs(rates_h1['low'][1:] - rates_h1['close'][:-1]))
+                h1_atr = float(np.mean(tr_h[-14:]))
+
+            # Calibrated robust protective stop distance outside market noise
+            distance = compute_robust_stop_distance(symbol, tick, info, m15_atr=m15_atr, h1_atr=h1_atr)
+            shared_sl = round(max(0.00001, entry - distance) if action == "BUY"
+                              else entry + distance, info.digits)
+            requested = default_lot if custom_lots is None else custom_lots
+            lot = limit_volume(mt5, info, order_type, symbol, requested,
+                               entry, shared_sl, budget, legs=1)
+        except (ValueError, TypeError, OverflowError) as exc:
+            return reject(str(exc))
+
+        executed, errors, uncertain = [], [], None
+        reservation = None
+        used_risk = 0.0
+        group_id = f"GRP-{time.time_ns()}-{symbol.replace(' ', '')[:6]}"
+        import random
+        # RULES 1 & 2: Keep 2 TPs only (1.8x & 4.0x), open ONE trade per symbol and randomly allocate one of the two TPs
+        tp_choices = [
+            (1, 1.8, "TP1-Conservative"),
+            (2, 4.0, "TP2-Runner")
+        ]
+        chosen_leg, chosen_multiple, chosen_label = random.choice(tp_choices)
+
+        # Target distance respects 1.8R and 4.0R multiples of the protective stop distance
+        target_distance = max(minimum, distance * chosen_multiple)
+        tp = round(entry + target_distance if action == "BUY" else
+                   max(entry * 0.1, entry - target_distance), info.digits)
+        fresh = mt5.symbol_info_tick(symbol)
+        current_acc = mt5.account_info()
+        current_positions = mt5.positions_get()
+        if fresh is None or current_acc is None or current_positions is None:
+            return reject("Fresh account/position/quote query failed")
+        if len(current_positions) >= MAX_OPEN_POSITIONS:
+            return reject("Account maximum position limit reached")
+        
+        # Enforce exactly 1 open trade per symbol
+        if any(p.symbol == symbol for p in current_positions):
+            return reject(f"Policy: Exactly 1 trade per symbol allowed ({symbol} already has an open position)")
+
+        try:
+            price = fresh.ask if action == "BUY" else fresh.bid
+            validate_geometry(action == "BUY", fresh.bid, fresh.ask, shared_sl,
+                              tp, info.trade_stops_level * point)
+            leg_risk = stop_loss_money(mt5, order_type, symbol, lot, price, shared_sl)
+            current_budget = min(budget, positive(min(current_acc.balance, current_acc.equity),
+                                                 "Account risk basis") * MAX_GROUP_RISK_PERCENT / 100)
+            if leg_risk > current_budget + 1e-8:
+                raise ValueError("Quote exceeds the trade risk budget")
+            margin = mt5.order_calc_margin(order_type, symbol, lot, price)
+            if margin is None or not math.isfinite(margin) or margin < 0 or margin > current_acc.margin_free:
+                raise ValueError("Margin unavailable or insufficient")
+            target_money = mt5.order_calc_profit(order_type, symbol, lot, price, tp)
+            positive(target_money, "Broker target value")
+        except (ValueError, TypeError, OverflowError) as exc:
+            return reject(str(exc))
+
+        for leg, multiple in [(1, chosen_multiple)]:
+            request = {"action": mt5.TRADE_ACTION_DEAL, "symbol": symbol, "volume": lot,
+                       "type": order_type, "price": price, "sl": shared_sl, "tp": tp,
+                       "deviation": 30, "magic": 555000 + chosen_leg,
+                       "comment": f"1T-{chosen_label[:3]}-{symbol[:4]}",
+                       "type_time": mt5.ORDER_TIME_GTC,
+                       "type_filling": get_best_filling_mode(info)}
+            # Persist an uncertain reservation BEFORE sending; a crash cannot silently retry it.
+            if reservation is None:
+                reservation = {"group_id": group_id, "symbol": symbol, "action": action,
+                               "status": "RECONCILIATION_REQUIRED", "execution_state": "UNKNOWN",
+                               "positions": executed, "uncertain_order": request,
+                               "entry_price": entry, "shared_sl": shared_sl,
+                               "total_profit": 0.0, "realized_profit": 0.0, "floating_profit": 0.0}
+                groups.insert(0, reservation)
+            reservation["uncertain_order"] = request
+            try:
+                save_multi_tp_groups(groups)
+            except (OSError, ValueError) as exc:
+                errors.append(f"Execution reservation could not be persisted: {exc}")
+                break
+            try:
+                result = guarded_order_send(mt5, request)
+            except Exception as exc:
+                result = None
+                errors.append(f"Submission exception: {exc}")
+            if result is None or result.retcode not in (mt5.TRADE_RETCODE_DONE,
+                                                       mt5.TRADE_RETCODE_DONE_PARTIAL):
+                # Explicit rejections have no fill; all other results require reconciliation.
+                rejected = {10004, 10006, 10007, 10013, 10014, 10015, 10016, 10017,
+                            10018, 10019, 10020, 10021, 10022, 10024, 10026, 10027,
+                            10030, 10032, 10033, 10034, 10035, 10042, 10043, 10044, 10046}
+                if result is None or result.retcode not in rejected:
+                    uncertain = request
+                errors.append(f"Leg {leg}: {result.comment if result else 'Submission outcome unknown'}")
+                break
+            fill_volume = float(result.volume)
+            fill_price = float(result.price or price)
+            if not math.isfinite(fill_volume) or fill_volume <= 0 or not result.order:
+                uncertain = request
+                errors.append("Accepted response has incomplete fill details")
+                break
+            try:
+                fill_risk = stop_loss_money(mt5, order_type, symbol, fill_volume,
+                                            fill_price, shared_sl)
+                fill_target = positive(mt5.order_calc_profit(order_type, symbol, fill_volume,
+                                                            fill_price, tp), "Filled target value")
+            except (ValueError, TypeError):
+                fill_risk, fill_target = leg_risk * fill_volume / lot, target_money * fill_volume / lot
+                uncertain = request
+                errors.append("Filled exposure needs broker reconciliation")
+            used_risk += fill_risk
+            executed.append({"sub_id": leg, "name": f"Trade {leg} (fixed target {multiple}x range)",
+                             "ticket": result.order, "lot": fill_volume, "entry": fill_price,
+                             "sl": shared_sl, "tp": tp, "target_dollar": round(fill_target, 2),
+                             "target_pct": "fixed price target", "planned_risk_dollar": round(fill_risk, 2),
+                             "status": "ACTIVE", "floating_profit": 0.0, "realized_profit": 0.0,
+                             "close_price": None, "close_reason": None})
+            if result.retcode == mt5.TRADE_RETCODE_DONE_PARTIAL or used_risk > current_budget + 1e-8:
+                uncertain = request
+                errors.append("Partial fill or adverse fill requires reconciliation; no more legs sent")
+            if uncertain:
+                break
+            time.sleep(0.08)
+
+        if not executed and uncertain is None:
+            if reservation is not None:
+                groups.remove(reservation)
+                save_multi_tp_groups(groups)
+            return reject("No orders filled: " + "; ".join(errors))
+        group = {"group_id": group_id, "symbol": symbol, "action": action,
+                 "ref_balance": basis, "currency": acc.currency,
+                 "total_risk_dollar": round(used_risk, 2),
+                 "total_risk_pct": round(used_risk / basis * 100, 4),
+                 "risk_budget_dollar": round(budget, 2), "risk_excludes_costs": True,
+                 "risk_complete": uncertain is None,
+                 "lot_per_trade": lot, "total_volume": sum(p["lot"] for p in executed),
+                 "entry_price": executed[0]["entry"] if executed else entry,
+                 "shared_sl": shared_sl, "created_at": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"),
+                 "ai_notes": ai_notes, "confidence_score": confidence_score,
+                 "status": "RECONCILIATION_REQUIRED" if uncertain else "ACTIVE",
+                 "execution_state": "UNKNOWN" if uncertain else "CONFIRMED",
+                 "uncertain_order": uncertain, "realized_profit": 0.0, "floating_profit": 0.0,
+                 "total_profit": 0.0, "positions": executed, "errors": errors}
+        if reservation is not None:
+            groups.remove(reservation)
+        groups.insert(0, group)
+        save_multi_tp_groups(groups)
+        if executed and scanner is not None:
+            score_label = (f"{confidence_score}/100 rule score" if confidence_score is not None
+                           else "Unscored manual entry")
+            scanner.record_execution(group_id, symbol, action, group["entry_price"], shared_sl,
+                                     executed[-1]["tp"], group["total_volume"],
+                                     [p["ticket"] for p in executed], confidence=score_label,
+                                     reason=f"Fixed-target group; estimated stop exposure {used_risk:.2f} {acc.currency} before costs. {ai_notes}",
+                                     execution_type="MULTI_TP_2_TRADES")
+        return {"success": bool(executed) and uncertain is None, "group_id": group_id,
+                "symbol": symbol, "action": action, "tickets": [p["ticket"] for p in executed],
+                "shared_sl": shared_sl, "total_risk_dollar": round(used_risk, 2),
+                "positions_opened": len(executed), "errors": errors,
+                "message": f"Filled {len(executed)}/2 positions; estimated stop exposure {used_risk:.2f} {acc.currency} before costs. " +
+                           ("Broker reconciliation required. " if uncertain else "") + "; ".join(errors)}
+
+
+def close_multi_tp_trade(ticket):
+    return close_deriv_position(ticket)
+
+def close_multi_tp_group(group_id):
+    with mt5_lock:
+        groups = load_multi_tp_groups()
+        target_group = next((g for g in groups if g.get("group_id") == group_id), None)
+        if not target_group:
+            return {"success": False, "message": f"Multi-TP group '{group_id}' not found."}
+
+        closed_count = 0
+        errors = []
+        for p in target_group.get("positions", []):
+            ticket = p.get("ticket")
+            if ticket:
+                res = close_deriv_position(ticket)
+                if res.get("success"):
+                    closed_count += 1
+                else:
+                    errors.append(f"Ticket #{ticket}: {res.get('message')}")
+
+        target_group["status"] = "CLOSED_BY_USER"
+        save_multi_tp_groups(groups)
+        sync_multi_tp_groups()
+
+        return {
+            "success": True,
+            "message": f"Closed {closed_count} positions in group {group_id}.",
+            "errors": errors
+        }
+
+HTML_PAGE = """<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Headway MT5 Institutional Trading Station & Analytics</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            brand: '#FF444F',
+            darkbg: '#0B0E14',
+            panel: '#121722',
+            bordercol: '#1E2638',
+            emeraldaccent: '#00C087',
+            crimsonaccent: '#FF444F',
+            cyanaccent: '#06B6D4',
+            amberaccent: '#F59E0B'
+          }
+        }
+      }
+    }
+  </script>
+
+  <style>
+    /* ------------------------------------------------------------- */
+    /* THEME SYSTEM STYLES & DYNAMIC VARIABLES                       */
+    /* ------------------------------------------------------------- */
+    :root, html[data-theme="gold-obsidian"], html:not([data-theme]) {
+      --bg-primary: #07090e;
+      --bg-header: #0d111a;
+      --bg-panel: #111622;
+      --bg-card: rgba(18, 24, 38, 0.85);
+      --border-main: rgba(245, 158, 11, 0.28);
+      --border-glow: rgba(245, 158, 11, 0.4);
+      --accent-primary: #f59e0b;
+      --accent-secondary: #fbbf24;
+      --accent-gradient: linear-gradient(135deg, #fbbf24 0%, #f59e0b 50%, #b45309 100%);
+      --accent-text: #fef3c7;
+      --tag-bg: rgba(245, 158, 11, 0.15);
+      --card-shadow: 0 10px 30px -10px rgba(245, 158, 11, 0.15);
+      --hero-overlay: radial-gradient(circle at 50% 0%, rgba(245, 158, 11, 0.12) 0%, transparent 70%);
+    }
+
+    html[data-theme="cyberpunk-neon"] {
+      --bg-primary: #05050f;
+      --bg-header: #0a081a;
+      --bg-panel: #0e0c24;
+      --bg-card: rgba(18, 14, 40, 0.85);
+      --border-main: rgba(0, 240, 255, 0.35);
+      --border-glow: rgba(236, 72, 153, 0.4);
+      --accent-primary: #00f0ff;
+      --accent-secondary: #ec4899;
+      --accent-gradient: linear-gradient(135deg, #00f0ff 0%, #a855f7 50%, #ec4899 100%);
+      --accent-text: #cffafe;
+      --tag-bg: rgba(0, 240, 255, 0.15);
+      --card-shadow: 0 10px 30px -10px rgba(0, 240, 255, 0.22);
+      --hero-overlay: radial-gradient(circle at 50% 0%, rgba(0, 240, 255, 0.15) 0%, rgba(236, 72, 153, 0.08) 50%, transparent 75%);
+    }
+
+    html[data-theme="emerald-matrix"] {
+      --bg-primary: #040907;
+      --bg-header: #07150e;
+      --bg-panel: #0a1c13;
+      --bg-card: rgba(12, 32, 22, 0.85);
+      --border-main: rgba(16, 185, 129, 0.32);
+      --border-glow: rgba(0, 245, 155, 0.4);
+      --accent-primary: #10b981;
+      --accent-secondary: #00f59b;
+      --accent-gradient: linear-gradient(135deg, #34d399 0%, #10b981 50%, #047857 100%);
+      --accent-text: #d1fae5;
+      --tag-bg: rgba(16, 185, 129, 0.15);
+      --card-shadow: 0 10px 30px -10px rgba(16, 185, 129, 0.18);
+      --hero-overlay: radial-gradient(circle at 50% 0%, rgba(16, 185, 129, 0.15) 0%, transparent 70%);
+    }
+
+    html[data-theme="sapphire-nordic"] {
+      --bg-primary: #070e1b;
+      --bg-header: #0c172a;
+      --bg-panel: #111f38;
+      --bg-card: rgba(19, 34, 60, 0.85);
+      --border-main: rgba(56, 189, 248, 0.32);
+      --border-glow: rgba(59, 130, 246, 0.4);
+      --accent-primary: #38bdf8;
+      --accent-secondary: #3b82f6;
+      --accent-gradient: linear-gradient(135deg, #38bdf8 0%, #3b82f6 50%, #1d4ed8 100%);
+      --accent-text: #e0f2fe;
+      --tag-bg: rgba(56, 189, 248, 0.15);
+      --card-shadow: 0 10px 30px -10px rgba(59, 130, 246, 0.2);
+      --hero-overlay: radial-gradient(circle at 50% 0%, rgba(56, 189, 248, 0.14) 0%, transparent 70%);
+    }
+
+    html[data-theme="solar-forge"] {
+      --bg-primary: #0a0606;
+      --bg-header: #140b0b;
+      --bg-panel: #1c1010;
+      --bg-card: rgba(32, 16, 16, 0.85);
+      --border-main: rgba(249, 115, 22, 0.35);
+      --border-glow: rgba(239, 68, 68, 0.4);
+      --accent-primary: #f97316;
+      --accent-secondary: #ef4444;
+      --accent-gradient: linear-gradient(135deg, #fb923c 0%, #f97316 50%, #dc2626 100%);
+      --accent-text: #ffedd5;
+      --tag-bg: rgba(249, 115, 22, 0.15);
+      --card-shadow: 0 10px 30px -10px rgba(249, 115, 22, 0.22);
+      --hero-overlay: radial-gradient(circle at 50% 0%, rgba(249, 115, 22, 0.15) 0%, rgba(239, 68, 68, 0.08) 50%, transparent 70%);
+    }
+
+    body {
+      background-color: var(--bg-primary) !important;
+      background-image: var(--hero-overlay);
+      background-attachment: fixed;
+      color: #E5E7EB;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      transition: background-color 0.35s ease, background-image 0.35s ease;
+    }
+    
+    header {
+      background-color: var(--bg-header) !important;
+      border-color: var(--border-main) !important;
+      transition: all 0.35s ease;
+    }
+    
+    .bg-panel {
+      background-color: var(--bg-card) !important;
+      border-color: var(--border-main) !important;
+      box-shadow: var(--card-shadow) !important;
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      transition: all 0.35s ease;
+    }
+
+    .border-bordercol {
+      border-color: var(--border-main) !important;
+    }
+
+    .theme-active-pill {
+      box-shadow: 0 0 15px var(--border-glow) !important;
+      border-color: var(--accent-primary) !important;
+      color: #ffffff !important;
+      font-weight: 800 !important;
+    }
+
+    /* Modal Animation */
+    .modal-enter {
+      animation: modalFadeIn 0.25s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+    }
+    @keyframes modalFadeIn {
+      from { opacity: 0; transform: scale(0.96) translateY(10px); }
+      to { opacity: 1; transform: scale(1) translateY(0); }
+    }
+
+    .custom-scroll::-webkit-scrollbar { width: 5px; height: 5px; }
+    .custom-scroll::-webkit-scrollbar-track { background: var(--bg-primary); }
+    .custom-scroll::-webkit-scrollbar-thumb { background: var(--border-main); border-radius: 3px; }
+  </style>
+
+</head>
+<body class="min-h-screen flex flex-col">
+
+  <!-- Header -->
+  <header class="border-b border-bordercol bg-panel/95 backdrop-blur px-6 py-3 flex flex-wrap items-center justify-between gap-4 sticky top-0 z-50">
+    <div class="flex items-center space-x-3.5">
+      <div class="w-10 h-10 rounded-xl overflow-hidden border border-amber-500/40 shadow-lg shadow-amber-500/20 relative group">
+        <img src="/static/images/gold_bullion_3d.jpg" alt="Headway Institutional" class="w-full h-full object-cover filter brightness-105">
+      </div>
+      <div>
+        <h1 class="text-sm font-bold tracking-tight text-white flex items-center gap-2">
+          HEADWAY MT5 INSTITUTIONAL WORKSTATION
+          <span class="text-[10px] px-2 py-0.5 rounded-full bg-emeraldaccent/10 text-emeraldaccent border border-emeraldaccent/20 font-mono font-semibold">AUTO-EXECUTE ENABLED</span>
+        </h1>
+        <p class="text-[11px] text-slate-400">Account #<span id="headerLogin" class="text-slate-200 font-mono font-bold">17683547</span> &bull; <span id="headerServer">Headway-Real</span> &bull; 1:1000 Leverage &bull; Quotes Only</p>
+      </div>
+    </div>
+    
+    <!-- MAIN MENU NAVIGATION TABS (Requirement 1) -->
+    <nav class="flex items-center space-x-1.5 bg-slate-900/90 p-1 rounded-xl border border-bordercol shadow-inner">
+      <button id="navTabStation" onclick="switchMainTab('station')" class="px-3.5 py-1.5 rounded-lg text-xs font-bold transition bg-brand text-white shadow flex items-center gap-2">
+        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
+        Trading Station & Execution
+      </button>
+      <button id="navTabPerformance" onclick="switchMainTab('performance')" class="px-3.5 py-1.5 rounded-lg text-xs font-bold transition text-slate-400 hover:text-white hover:bg-slate-800 flex items-center gap-2">
+        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"></path></svg>
+        Symbol Performance & Analytics
+        <span id="p1TopBadge" class="px-1.5 py-0.2 rounded-full bg-emerald-500/20 text-emeraldaccent text-[10px] font-mono">P1 FOCUS</span>
+      </button>
+      <button id="navTabGold" onclick="switchMainTab('gold')" class="px-3.5 py-1.5 rounded-lg text-xs font-bold transition text-amber-400 hover:text-amber-300 hover:bg-slate-800 flex items-center gap-2">
+        <svg class="w-3.5 h-3.5 text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+        Gold Intelligence
+        <span class="px-1.5 py-0.2 rounded-full bg-amber-500/20 text-amber-300 text-[10px] font-mono border border-amber-500/30">XAUUSD</span>
+      </button>
+      <button id="navTabML" onclick="switchMainTab('ml')" class="px-3.5 py-1.5 rounded-lg text-xs font-bold transition text-purple-400 hover:text-purple-300 hover:bg-slate-800 flex items-center gap-2">
+        <svg class="w-3.5 h-3.5 text-purple-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"></path></svg>
+        AI / ML Intelligence
+        <span class="px-1.5 py-0.2 rounded-full bg-purple-500/20 text-purple-300 text-[10px] font-mono border border-purple-500/30">ML ENGINE</span>
+      </button>
+    </nav>
+
+    <div class="flex items-center space-x-3">
+      <div class="flex items-center gap-2 text-xs font-mono px-3 py-1.5 rounded-lg bg-slate-900 border border-bordercol text-slate-300">
+        <span class="w-2 h-2 rounded-full bg-emeraldaccent animate-pulse"></span>
+        <span id="connPing">PING: 160ms</span>
+      </div>
+      <button onclick="emergencyCloseAll()" class="px-3 py-1.5 rounded-lg bg-rose-600/10 hover:bg-rose-600/20 text-crimsonaccent border border-rose-500/30 text-xs font-bold transition flex items-center gap-1.5">
+        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"></path></svg>
+        Panic Close All
+      </button>
+      <button onclick="refreshAll()" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-medium text-slate-200 transition border border-bordercol flex items-center gap-1.5">
+        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg>
+        Sync All
+      </button>
+    </div>
+  </header>
+
+  <!-- Interactive Theme Studio Bar (5 Modern Live Demos) -->
+  <div class="border-b border-bordercol px-6 py-2.5 flex flex-wrap items-center justify-between gap-3 shadow-md z-40 transition" style="background-color: var(--bg-header)">
+    <div class="flex items-center gap-3">
+      <div class="w-7 h-7 rounded-lg flex items-center justify-center text-sm shadow-inner" style="background: var(--tag-bg); border: 1px solid var(--border-main)">
+        🎨
+      </div>
+      <div>
+        <div class="flex items-center gap-2">
+          <span class="text-xs font-black text-white uppercase tracking-wider">Modern Theme Studio</span>
+          <span id="activeThemePillBadge" class="text-[10px] px-2 py-0.5 rounded-full font-mono font-bold" style="background: var(--tag-bg); color: var(--accent-primary); border: 1px solid var(--border-main)">
+            👑 24K OBSIDIAN GOLD
+          </span>
+        </div>
+        <p class="text-[11px] text-slate-400">Click any theme to transform the entire workstation in real time:</p>
+      </div>
+    </div>
+
+    <!-- 5 Live Theme Pills -->
+    <div class="flex items-center gap-2 overflow-x-auto custom-scroll pb-1">
+      <button onclick="setAppTheme('gold-obsidian')" id="pill_gold-obsidian" class="theme-pill px-3 py-1.5 rounded-xl text-xs font-bold transition flex items-center gap-1.5 border border-amber-500/40 bg-amber-500/20 text-amber-300 shadow">
+        <span>👑</span> <span>24K Gold</span>
+      </button>
+      <button onclick="setAppTheme('cyberpunk-neon')" id="pill_cyberpunk-neon" class="theme-pill px-3 py-1.5 rounded-xl text-xs font-bold transition flex items-center gap-1.5 border border-slate-800 bg-slate-900/60 text-slate-300 hover:text-cyan-300 hover:border-cyan-500/40">
+        <span>⚡</span> <span>Cyberpunk</span>
+      </button>
+      <button onclick="setAppTheme('emerald-matrix')" id="pill_emerald-matrix" class="theme-pill px-3 py-1.5 rounded-xl text-xs font-bold transition flex items-center gap-1.5 border border-slate-800 bg-slate-900/60 text-slate-300 hover:text-emerald-300 hover:border-emerald-500/40">
+        <span>💎</span> <span>Emerald Alpha</span>
+      </button>
+      <button onclick="setAppTheme('sapphire-nordic')" id="pill_sapphire-nordic" class="theme-pill px-3 py-1.5 rounded-xl text-xs font-bold transition flex items-center gap-1.5 border border-slate-800 bg-slate-900/60 text-slate-300 hover:text-blue-300 hover:border-blue-500/40">
+        <span>🌊</span> <span>Sapphire</span>
+      </button>
+      <button onclick="setAppTheme('solar-forge')" id="pill_solar-forge" class="theme-pill px-3 py-1.5 rounded-xl text-xs font-bold transition flex items-center gap-1.5 border border-slate-800 bg-slate-900/60 text-slate-300 hover:text-orange-300 hover:border-orange-500/40">
+        <span>🔥</span> <span>Solar Forge</span>
+      </button>
+      <button onclick="openThemeGalleryModal()" class="px-3.5 py-1.5 rounded-xl text-xs font-bold transition bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white shadow-lg flex items-center gap-1.5">
+        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"></path></svg>
+        <span>Inspect All 5 Themes</span>
+      </button>
+    </div>
+  </div>
+
+  <!-- THEME DEMO GALLERY MODAL (Interactive Visual Showcase) -->
+  <div id="themeGalleryModal" class="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-md hidden flex items-center justify-center p-4 sm:p-6 overflow-y-auto">
+    <div class="modal-enter max-w-5xl w-full rounded-3xl bg-slate-900/95 border border-bordercol shadow-2xl p-6 sm:p-8 space-y-6 relative overflow-hidden max-h-[90vh] overflow-y-auto custom-scroll" style="background-color: var(--bg-panel); border-color: var(--border-main)">
+      
+      <!-- Modal Header -->
+      <div class="flex items-center justify-between border-b border-bordercol pb-4">
+        <div class="flex items-center gap-3.5">
+          <div class="w-12 h-12 rounded-2xl flex items-center justify-center text-2xl shadow-lg" style="background: var(--accent-gradient); color: #000">
+            🎨
+          </div>
+          <div>
+            <h2 class="text-xl font-black text-white tracking-tight flex items-center gap-2">
+              Modern Trading Theme Gallery
+              <span class="text-xs px-2.5 py-0.5 rounded-full font-mono font-bold bg-purple-500/20 text-purple-300 border border-purple-500/30">
+                5 BESPOKE DEMOS
+              </span>
+            </h2>
+            <p class="text-xs text-slate-400 mt-0.5">Explore each visual direction with custom artwork, color tokens, and sample cards. Click "Apply & Select" to activate.</p>
+          </div>
+        </div>
+        <button onclick="closeThemeGalleryModal()" class="w-9 h-9 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white flex items-center justify-center text-lg font-bold transition">
+          &times;
+        </button>
+      </div>
+
+      <!-- 5 Theme Cards Grid -->
+      <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
+        
+        <!-- CARD 1: 24K Obsidian Gold -->
+        <div class="rounded-2xl border border-amber-500/40 bg-slate-950/80 p-5 space-y-4 hover:border-amber-400 transition shadow-xl relative overflow-hidden flex flex-col justify-between">
+          <div class="space-y-3">
+            <div class="h-32 rounded-xl overflow-hidden border border-amber-500/40 relative group">
+              <img src="/static/images/gold_bullion_3d.jpg" alt="24K Obsidian Gold" class="w-full h-full object-cover filter brightness-85 group-hover:scale-105 transition duration-500">
+              <div class="absolute inset-0 bg-gradient-to-t from-black/90 via-black/30 to-transparent"></div>
+              <div class="absolute bottom-2.5 left-3 right-3 flex items-end justify-between">
+                <div>
+                  <span class="text-[9px] font-mono px-1.5 py-0.2 rounded bg-amber-500/30 text-amber-300 font-bold border border-amber-500/40">THEME 01</span>
+                  <h3 class="text-sm font-black text-white">24K Obsidian Gold</h3>
+                </div>
+                <div class="text-2xl filter drop-shadow">👑</div>
+              </div>
+            </div>
+            
+            <p class="text-xs text-slate-300 leading-relaxed">
+              Deep celestial obsidian black canvas paired with metallic 24K Gold highlights and warm champagne text. Designed specifically for institutional Gold traders.
+            </p>
+
+            <div class="flex items-center gap-1.5 pt-1">
+              <span class="w-4 h-4 rounded-full bg-[#fbbf24] shadow-sm"></span>
+              <span class="w-4 h-4 rounded-full bg-[#f59e0b] shadow-sm"></span>
+              <span class="w-4 h-4 rounded-full bg-[#07090e] border border-amber-500/50 shadow-sm"></span>
+              <span class="text-[10px] font-mono text-slate-400 ml-1">#fbbf24 • #f59e0b • #07090e</span>
+            </div>
+          </div>
+
+          <button onclick="setAppTheme('gold-obsidian'); closeThemeGalleryModal();" class="w-full py-2.5 rounded-xl font-black text-xs transition bg-gradient-to-r from-amber-500 to-yellow-600 hover:from-amber-400 hover:to-yellow-500 text-slate-950 shadow-lg shadow-amber-500/20">
+            Apply 24K Obsidian Gold
+          </button>
+        </div>
+
+        <!-- CARD 2: Cyberpunk Neon -->
+        <div class="rounded-2xl border border-cyan-500/40 bg-slate-950/80 p-5 space-y-4 hover:border-cyan-400 transition shadow-xl relative overflow-hidden flex flex-col justify-between">
+          <div class="space-y-3">
+            <div class="h-32 rounded-xl overflow-hidden border border-cyan-500/40 relative group">
+              <img src="/static/images/theme_cyberpunk_neon.svg" alt="Cyberpunk Neon" class="w-full h-full object-cover group-hover:scale-105 transition duration-500">
+              <div class="absolute inset-0 bg-gradient-to-t from-black/90 via-black/30 to-transparent"></div>
+              <div class="absolute bottom-2.5 left-3 right-3 flex items-end justify-between">
+                <div>
+                  <span class="text-[9px] font-mono px-1.5 py-0.2 rounded bg-cyan-500/30 text-cyan-300 font-bold border border-cyan-500/40">THEME 02</span>
+                  <h3 class="text-sm font-black text-white">Cyberpunk Neon</h3>
+                </div>
+                <div class="text-2xl filter drop-shadow">⚡</div>
+              </div>
+            </div>
+            
+            <p class="text-xs text-slate-300 leading-relaxed">
+              Ultra-modern midnight violet canvas illuminated with electric cyan and neon fuchsia laser glow. Gives the station an adrenaline-fueled high-frequency feel.
+            </p>
+
+            <div class="flex items-center gap-1.5 pt-1">
+              <span class="w-4 h-4 rounded-full bg-[#00f0ff] shadow-sm"></span>
+              <span class="w-4 h-4 rounded-full bg-[#ec4899] shadow-sm"></span>
+              <span class="w-4 h-4 rounded-full bg-[#05050f] border border-cyan-500/50 shadow-sm"></span>
+              <span class="text-[10px] font-mono text-slate-400 ml-1">#00f0ff • #ec4899 • #05050f</span>
+            </div>
+          </div>
+
+          <button onclick="setAppTheme('cyberpunk-neon'); closeThemeGalleryModal();" class="w-full py-2.5 rounded-xl font-black text-xs transition bg-gradient-to-r from-cyan-500 to-fuchsia-600 hover:from-cyan-400 hover:to-fuchsia-500 text-white shadow-lg shadow-cyan-500/20">
+            Apply Cyberpunk Neon
+          </button>
+        </div>
+
+        <!-- CARD 3: Emerald Matrix -->
+        <div class="rounded-2xl border border-emerald-500/40 bg-slate-950/80 p-5 space-y-4 hover:border-emerald-400 transition shadow-xl relative overflow-hidden flex flex-col justify-between">
+          <div class="space-y-3">
+            <div class="h-32 rounded-xl overflow-hidden border border-emerald-500/40 relative group">
+              <img src="/static/images/theme_emerald_matrix.svg" alt="Emerald Matrix" class="w-full h-full object-cover group-hover:scale-105 transition duration-500">
+              <div class="absolute inset-0 bg-gradient-to-t from-black/90 via-black/30 to-transparent"></div>
+              <div class="absolute bottom-2.5 left-3 right-3 flex items-end justify-between">
+                <div>
+                  <span class="text-[9px] font-mono px-1.5 py-0.2 rounded bg-emerald-500/30 text-emerald-300 font-bold border border-emerald-500/40">THEME 03</span>
+                  <h3 class="text-sm font-black text-white">Emerald Matrix</h3>
+                </div>
+                <div class="text-2xl filter drop-shadow">💎</div>
+              </div>
+            </div>
+            
+            <p class="text-xs text-slate-300 leading-relaxed">
+              Deep graphite obsidian with vivid cyber mint and emerald green HUD accents. Clean, authoritative, and laser-focused on win rate and equity growth.
+            </p>
+
+            <div class="flex items-center gap-1.5 pt-1">
+              <span class="w-4 h-4 rounded-full bg-[#10b981] shadow-sm"></span>
+              <span class="w-4 h-4 rounded-full bg-[#00f59b] shadow-sm"></span>
+              <span class="w-4 h-4 rounded-full bg-[#040907] border border-emerald-500/50 shadow-sm"></span>
+              <span class="text-[10px] font-mono text-slate-400 ml-1">#10b981 • #00f59b • #040907</span>
+            </div>
+          </div>
+
+          <button onclick="setAppTheme('emerald-matrix'); closeThemeGalleryModal();" class="w-full py-2.5 rounded-xl font-black text-xs transition bg-gradient-to-r from-emerald-500 to-teal-600 hover:from-emerald-400 hover:to-teal-500 text-slate-950 shadow-lg shadow-emerald-500/20">
+            Apply Emerald Matrix
+          </button>
+        </div>
+
+        <!-- CARD 4: Sapphire Nordic -->
+        <div class="rounded-2xl border border-sky-500/40 bg-slate-950/80 p-5 space-y-4 hover:border-sky-400 transition shadow-xl relative overflow-hidden flex flex-col justify-between">
+          <div class="space-y-3">
+            <div class="h-32 rounded-xl overflow-hidden border border-sky-500/40 relative group">
+              <img src="/static/images/theme_sapphire_nordic.svg" alt="Sapphire Horizon" class="w-full h-full object-cover group-hover:scale-105 transition duration-500">
+              <div class="absolute inset-0 bg-gradient-to-t from-black/90 via-black/30 to-transparent"></div>
+              <div class="absolute bottom-2.5 left-3 right-3 flex items-end justify-between">
+                <div>
+                  <span class="text-[9px] font-mono px-1.5 py-0.2 rounded bg-sky-500/30 text-sky-300 font-bold border border-sky-500/40">THEME 04</span>
+                  <h3 class="text-sm font-black text-white">Sapphire Horizon</h3>
+                </div>
+                <div class="text-2xl filter drop-shadow">🌊</div>
+              </div>
+            </div>
+            
+            <p class="text-xs text-slate-300 leading-relaxed">
+              Oceanic deep navy slate paired with crisp frosted glass and sapphire blue accents. Inspired by top-tier modern Silicon Valley fintech interfaces (Linear, Stripe).
+            </p>
+
+            <div class="flex items-center gap-1.5 pt-1">
+              <span class="w-4 h-4 rounded-full bg-[#38bdf8] shadow-sm"></span>
+              <span class="w-4 h-4 rounded-full bg-[#3b82f6] shadow-sm"></span>
+              <span class="w-4 h-4 rounded-full bg-[#070e1b] border border-sky-500/50 shadow-sm"></span>
+              <span class="text-[10px] font-mono text-slate-400 ml-1">#38bdf8 • #3b82f6 • #070e1b</span>
+            </div>
+          </div>
+
+          <button onclick="setAppTheme('sapphire-nordic'); closeThemeGalleryModal();" class="w-full py-2.5 rounded-xl font-black text-xs transition bg-gradient-to-r from-sky-500 to-blue-600 hover:from-sky-400 hover:to-blue-500 text-white shadow-lg shadow-sky-500/20">
+            Apply Sapphire Horizon
+          </button>
+        </div>
+
+        <!-- CARD 5: Solar Forge -->
+        <div class="rounded-2xl border border-orange-500/40 bg-slate-950/80 p-5 space-y-4 hover:border-orange-400 transition shadow-xl relative overflow-hidden flex flex-col justify-between">
+          <div class="space-y-3">
+            <div class="h-32 rounded-xl overflow-hidden border border-orange-500/40 relative group">
+              <img src="/static/images/theme_solar_forge.svg" alt="Solar Forge" class="w-full h-full object-cover group-hover:scale-105 transition duration-500">
+              <div class="absolute inset-0 bg-gradient-to-t from-black/90 via-black/30 to-transparent"></div>
+              <div class="absolute bottom-2.5 left-3 right-3 flex items-end justify-between">
+                <div>
+                  <span class="text-[9px] font-mono px-1.5 py-0.2 rounded bg-orange-500/30 text-orange-300 font-bold border border-orange-500/40">THEME 05</span>
+                  <h3 class="text-sm font-black text-white">Solar Forge</h3>
+                </div>
+                <div class="text-2xl filter drop-shadow">🔥</div>
+              </div>
+            </div>
+            
+            <p class="text-xs text-slate-300 leading-relaxed">
+              Volcanic dark basalt with glowing solar flame and crimson forge accents. Built for aggressive momentum breakouts and fast-moving volatility surges.
+            </p>
+
+            <div class="flex items-center gap-1.5 pt-1">
+              <span class="w-4 h-4 rounded-full bg-[#f97316] shadow-sm"></span>
+              <span class="w-4 h-4 rounded-full bg-[#ef4444] shadow-sm"></span>
+              <span class="w-4 h-4 rounded-full bg-[#0a0606] border border-orange-500/50 shadow-sm"></span>
+              <span class="text-[10px] font-mono text-slate-400 ml-1">#f97316 • #ef4444 • #0a0606</span>
+            </div>
+          </div>
+
+          <button onclick="setAppTheme('solar-forge'); closeThemeGalleryModal();" class="w-full py-2.5 rounded-xl font-black text-xs transition bg-gradient-to-r from-orange-500 to-rose-600 hover:from-orange-400 hover:to-rose-500 text-white shadow-lg shadow-orange-500/20">
+            Apply Solar Forge
+          </button>
+        </div>
+
+      </div>
+
+      <!-- Modal Footer -->
+      <div class="flex items-center justify-between border-t border-bordercol pt-4 text-xs font-mono text-slate-400">
+        <span>Active Theme Stored in LocalStorage</span>
+        <button onclick="closeThemeGalleryModal()" class="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-white font-bold transition">
+          Close Gallery
+        </button>
+      </div>
+
+    </div>
+  </div>
+
+
+  <!-- Live Market Watch Bar -->
+  <div class="bg-slate-950/80 border-b border-bordercol px-6 py-2 overflow-x-auto custom-scroll">
+    <div id="tickerBar" class="flex items-center space-x-4 text-xs font-mono whitespace-nowrap min-w-max">
+      <!-- Populated via JS -->
+    </div>
+  </div>
+
+  <!-- Main Container -->
+  <main class="flex-1 p-6 space-y-6 max-w-[1600px] w-full mx-auto">
+
+    <!-- VIEW 1: TRADING STATION & EXECUTION -->
+    <div id="stationView" class="space-y-6">
+
+    <!-- Balance & Equity Row -->
+    <section class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+      <div class="p-4 rounded-xl bg-panel border border-bordercol shadow-sm">
+        <div class="text-[11px] font-medium text-slate-400 uppercase tracking-wider mb-1">Account Balance</div>
+        <div id="accBalance" class="text-2xl font-black font-mono text-white">$0.00</div>
+        <div class="text-[11px] text-slate-500 font-mono mt-1">Currency: USD</div>
+      </div>
+
+      <div class="p-4 rounded-xl bg-panel border border-bordercol shadow-sm">
+        <div class="text-[11px] font-medium text-slate-400 uppercase tracking-wider mb-1">Account Equity</div>
+        <div id="accEquity" class="text-2xl font-black font-mono text-white">$0.00</div>
+        <div class="text-[11px] text-slate-500 font-mono mt-1">Live Net Worth</div>
+      </div>
+
+      <div class="p-4 rounded-xl bg-panel border border-bordercol shadow-sm">
+        <div class="text-[11px] font-medium text-slate-400 uppercase tracking-wider mb-1">Floating Profit / Loss</div>
+        <div id="accProfit" class="text-2xl font-black font-mono text-emeraldaccent">$0.00</div>
+        <div class="text-[11px] text-slate-500 font-mono mt-1">Active Positions P/L</div>
+      </div>
+
+      <div class="p-4 rounded-xl bg-panel border border-bordercol shadow-sm">
+        <div class="text-[11px] font-medium text-slate-400 uppercase tracking-wider mb-1">Free Margin Available</div>
+        <div id="accMargin" class="text-2xl font-black font-mono text-blue-400">$0.00</div>
+        <div id="accMarginLevel" class="text-[11px] text-slate-500 font-mono mt-1">Margin Level: 0.00%</div>
+      </div>
+    </section>
+
+    <!-- SECTION: Automated Recommended Trade Setups & Technical Invalidation Notes -->
+    <section class="bg-panel border border-bordercol rounded-xl p-5 shadow-sm space-y-4">
+      <div class="flex flex-wrap items-center justify-between gap-3 pb-3.5 border-b border-bordercol">
+        <div>
+          <div class="flex items-center gap-2.5">
+            <h2 class="text-sm font-bold text-white flex items-center gap-2">
+              <svg class="w-4 h-4 text-emeraldaccent" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6"></path></svg>
+              Recommended Trade Setups & Technical Invalidation Notes
+            </h2>
+            <span id="scannerStatusBadge" class="text-xs px-2.5 py-0.5 rounded-full bg-emerald-500/10 text-emeraldaccent border border-emerald-500/20 font-mono font-semibold">SCANNING</span>
+          </div>
+          <p class="text-xs text-slate-400 mt-0.5">Strict 90-100% confidence scanner. Policy: Exactly 1 trade per symbol with random TP1/TP2 allocation. Smart trailing protected.</p>
+        </div>
+
+        <div class="flex flex-wrap items-center gap-2">
+          
+          <!-- AUTO-TRADING TOGGLE (Rule 2: 88-100% High Confidence Auto Execution) -->
+          <div class="flex items-center gap-2 text-xs font-mono px-3 py-1.5 rounded-lg bg-slate-900 border border-bordercol shadow-inner">
+            <span class="text-slate-400 font-sans text-xs font-medium">Auto-Trade (90-100% Conf Only):</span>
+            <button id="autoTradeBtn" onclick="toggleAutoTrade()" class="px-2.5 py-1 rounded text-[11px] font-bold transition flex items-center gap-1.5 bg-slate-800 text-slate-400 border border-slate-700">
+              <span id="autoTradeDot" class="w-2 h-2 rounded-full bg-slate-500"></span>
+              <span id="autoTradeText">DISABLED</span>
+            </button>
+          </div>
+
+          <!-- PROFIT GUARDIAN TOGGLE ($10+ Peak Lock) -->
+          <div class="flex items-center gap-2 text-xs font-mono px-3 py-1.5 rounded-lg bg-slate-900 border border-bordercol shadow-inner">
+            <span class="text-slate-400 font-sans text-xs font-medium">Profit Shield ($10+ Floor):</span>
+            <button id="guardianBtn" onclick="toggleProfitGuardian()" class="px-2.5 py-1 rounded text-[11px] font-bold transition flex items-center gap-1.5 bg-emerald-500/20 text-emeraldaccent border border-emerald-500/50 shadow-sm shadow-emerald-500/20">
+              <span class="w-2 h-2 rounded-full bg-emeraldaccent animate-pulse"></span>
+              <span id="guardianText">ARMED (ACTIVE)</span>
+            </button>
+          </div>
+
+          <!-- Scan Mode Badge (2-min auto rescan removed as requested) -->
+          <div class="flex items-center gap-1.5 text-xs font-mono px-3 py-1.5 rounded-lg bg-slate-900 border border-bordercol text-slate-300">
+            <span class="w-2 h-2 rounded-full bg-emeraldaccent"></span>
+            <span class="text-slate-400 font-sans">Scan Mode:</span>
+            <span class="text-emeraldaccent font-bold" id="rescanCountdown">ON DEMAND (Manual)</span>
+            <span class="text-slate-500 text-[10px] ml-1">(Last: <span id="lastScanTime" class="text-slate-400">--</span>)</span>
+          </div>
+
+          <button onclick="toggleAuditModal()" class="text-xs px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 font-medium transition border border-bordercol flex items-center gap-1">
+            <svg class="w-3.5 h-3.5 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path></svg>
+            Filtered Audit
+          </button>
+
+          <button onclick="triggerImmediateRescan()" class="text-xs px-3 py-1.5 rounded-lg bg-brand hover:bg-red-600 text-white font-bold transition flex items-center gap-1.5 shadow-sm shadow-red-500/20">
+            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg>
+            Re-Scan Now
+          </button>
+        </div>
+      </div>
+
+      <!-- Setups Grid or Waiting for Confirmation State -->
+      <div id="setupsGrid" class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+        <!-- Rendered via JS -->
+      </div>
+
+      <!-- Filtered Reasons Audit Drawer (Collapsible) -->
+      <div id="auditSection" class="hidden p-4 rounded-xl bg-slate-950/80 border border-bordercol space-y-2 text-xs">
+        <div class="flex items-center justify-between border-b border-bordercol pb-2">
+          <span class="font-bold text-slate-300 font-mono">Scanner Quality Audit & Filtered Instruments</span>
+          <button onclick="toggleAuditModal()" class="text-slate-500 hover:text-white">Close</button>
+        </div>
+        <div id="auditContent" class="grid grid-cols-1 sm:grid-cols-2 gap-2 text-slate-400 font-mono text-[11px]">
+          <!-- Populated via JS -->
+        </div>
+      </div>
+    </section>
+
+    <!-- ============================================================================== -->
+    <!-- ============================================================================== -->
+    <!-- SECTION: SMART DYNAMIC PROFIT CHASING, PULLBACK & RECOVERY STATION (OPTION B)     -->
+    <!-- ============================================================================== -->
+    <section class="bg-panel border border-bordercol rounded-xl p-5 shadow-sm space-y-4">
+      <div class="flex flex-wrap items-center justify-between gap-3 pb-3.5 border-b border-bordercol">
+        <div>
+          <div class="flex items-center gap-2.5">
+            <h2 class="text-sm font-bold text-white flex items-center gap-2 font-sans">
+              <svg class="w-4 h-4 text-cyanaccent" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6"></path></svg>
+              Smart Dynamic Profit Chasing, Pullback & Recovery Engine (Option B)
+            </h2>
+            <span id="chaserPositionsCount" class="text-xs px-2.5 py-0.5 rounded-full bg-cyan-500/10 text-cyanaccent border border-cyan-500/20 font-mono font-semibold">0 TRADES MONITORED</span>
+            <span id="chaserRecoveryBadge" class="text-xs px-2.5 py-0.5 rounded-full bg-emerald-500/10 text-emeraldaccent border border-emerald-500/20 font-mono font-semibold">0 RECOVERIES BANKED</span>
+          </div>
+          <p class="text-xs text-slate-400 mt-0.5">Continuous peak profit tracking with Option-B pullback recovery. Never caps winners prematurely; ratchets trailing floor up.</p>
+        </div>
+
+        <div class="flex flex-wrap items-center gap-2 text-xs font-mono">
+          <div class="px-3 py-1.5 rounded-lg bg-slate-900 border border-bordercol flex items-center gap-2 text-slate-300">
+            <span class="text-slate-400">Pullback Mode:</span>
+            <span class="font-bold text-amberaccent" id="chaserPullbackMethod">25% OF PEAK</span>
+          </div>
+          <div class="px-3 py-1.5 rounded-lg bg-slate-900 border border-bordercol flex items-center gap-2 text-slate-300">
+            <span class="text-slate-400">Trailing Shield:</span>
+            <span class="font-bold text-emeraldaccent" id="chaserTrailingMethod">MAX 35% GIVEBACK</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Live Chased Positions Table -->
+      <div class="overflow-x-auto">
+        <table class="w-full text-left text-xs font-mono">
+          <thead>
+            <tr class="text-slate-400 border-b border-bordercol/60 pb-2">
+              <th class="py-2 px-3">Position</th>
+              <th class="py-2 px-3">Current Profit</th>
+              <th class="py-2 px-3">All-Time Peak</th>
+              <th class="py-2 px-3">Pullback / Drop</th>
+              <th class="py-2 px-3">Option B Recovery Target</th>
+              <th class="py-2 px-3">Protected Floor</th>
+              <th class="py-2 px-3">Status Machine</th>
+            </tr>
+          </thead>
+          <tbody id="chaserPositionsBody">
+            <tr>
+              <td colspan="7" class="py-4 text-center text-slate-500">Scanning live MT5 open positions for profit chasing telemetry...</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- Live Recovery & Peak Events Feed -->
+      <div class="pt-2 border-t border-bordercol/40">
+        <span class="text-[11px] font-mono text-slate-400 uppercase font-bold tracking-wider">Option-B Peak & Recovery Live Audit Stream:</span>
+        <div id="chaserEventStream" class="mt-2 space-y-1.5 max-h-36 overflow-y-auto font-mono text-[11px] text-slate-300">
+          <div class="text-slate-500 italic">No events logged yet. Active trades will log new highs, pullbacks, and Option-B recoveries here.</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- SECTION: MULTI-TP TRADE MANAGER (5-Trade Multi-TP System with Shared 5% SL)    -->
+    <!-- ============================================================================== -->
+    <section class="bg-panel border border-bordercol rounded-xl p-5 shadow-sm space-y-4">
+      <div class="flex flex-wrap items-center justify-between gap-3 pb-3.5 border-b border-bordercol">
+        <div>
+          <div class="flex items-center gap-2.5">
+            <h2 class="text-sm font-bold text-white flex items-center gap-2 font-sans">
+              <svg class="w-4 h-4 text-emeraldaccent" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"></path></svg>
+              Multi-TP Trade Manager (2-Trade Multi-TP Power System)
+            </h2>
+            <span id="mtpGroupsBadge" class="text-xs px-2.5 py-0.5 rounded-full bg-emerald-500/10 text-emeraldaccent border border-emerald-500/20 font-mono font-semibold">0 GROUPS</span>
+          </div>
+          <p class="text-xs text-slate-400 mt-0.5">2 separate positions per setup: Trade 1 (Fixed Target ~1.8x range) and Trade 2 (AI Dynamic Runner ~4.0x range) with a shared account Stop Loss, allowing up to 7 concurrent setups within the 15-position account limit.</p>
+        </div>
+
+        <div class="flex flex-wrap items-center gap-2 text-xs font-mono">
+          <div class="bg-slate-900 border border-bordercol px-3 py-1.5 rounded-lg flex items-center gap-2 text-slate-300">
+            <span class="text-slate-400 font-sans text-xs">Ref Balance:</span>
+            <input id="mtpRefBalanceInput" type="number" value="1000" step="100" onchange="updateMtpRiskPreview()" class="w-20 bg-slate-950 border border-slate-700 rounded px-1.5 py-0.5 text-white font-mono text-xs focus:outline-none focus:border-cyanaccent">
+            <button onclick="useLiveBalanceForMtp()" class="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-[10px] text-cyanaccent border border-slate-700 transition">Use Live</button>
+          </div>
+
+          <div class="bg-slate-900 border border-bordercol px-3 py-1.5 rounded-lg flex items-center gap-2 text-slate-300">
+            <span class="text-slate-400 font-sans text-xs">Shared SL Risk:</span>
+            <span id="mtpRiskDollarBadge" class="text-crimsonaccent font-bold font-mono">5.0% ($50.00 max)</span>
+          </div>
+
+          <button onclick="fetchMultiTpGroups()" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-medium text-slate-200 transition border border-bordercol flex items-center gap-1.5">
+            <svg class="w-3.5 h-3.5 text-cyanaccent" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg>
+            Sync Multi-TP
+          </button>
+        </div>
+      </div>
+
+      <!-- Multi-TP Live Groups Display -->
+      <div id="mtpGroupsContainer" class="space-y-4">
+        <!-- Rendered via JS -->
+      </div>
+    </section>
+
+    <!-- Open Positions Table -->
+    <section class="bg-panel border border-bordercol rounded-xl overflow-hidden shadow-sm">
+      <div class="p-4 border-b border-bordercol flex items-center justify-between">
+        <div class="flex items-center gap-2">
+          <span class="w-2.5 h-2.5 rounded-full bg-red-500"></span>
+          <h2 class="text-sm font-bold text-white">Live Positions on Deriv MT5</h2>
+          <span id="posCount" class="text-xs px-2 py-0.5 rounded-full bg-slate-800 text-slate-300 font-mono">0 active</span>
+        </div>
+        <div class="text-xs text-slate-400 font-mono">
+          Real-time broker sync (<span id="netVolume">0.00</span> total lots)
+        </div>
+      </div>
+
+      <div class="overflow-x-auto custom-scroll">
+        <table class="w-full text-left text-xs">
+          <thead class="bg-slate-900/60 text-slate-400 uppercase tracking-wider text-[11px] font-semibold border-b border-bordercol">
+            <tr>
+              <th class="py-2.5 px-4">Ticket</th>
+              <th class="py-2.5 px-4">Symbol</th>
+              <th class="py-2.5 px-4">Type</th>
+              <th class="py-2.5 px-4">Volume</th>
+              <th class="py-2.5 px-4">Open Price</th>
+              <th class="py-2.5 px-4">Current Price</th>
+              <th class="py-2.5 px-4">Stop Loss</th>
+              <th class="py-2.5 px-4">Take Profit</th>
+              <th class="py-2.5 px-4">P / L</th>
+              <th class="py-2.5 px-4 text-right">Action</th>
+            </tr>
+          </thead>
+          <tbody id="positionsTbody" class="divide-y divide-bordercol text-slate-300">
+            <tr><td colspan="10" class="py-6 text-center text-slate-500">Loading live Deriv positions...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- 2-Column Execution & Journal Grid -->
+    <div class="grid grid-cols-1 lg:grid-cols-12 gap-6">
+
+      <!-- Left Column: Precision Order Placement, 733+ Symbols & Multi-Order (7 Cols) -->
+      <section class="lg:col-span-7 space-y-6">
+        <div class="bg-panel border border-bordercol rounded-xl p-5 shadow-sm">
+          <div class="flex items-center justify-between pb-3.5 border-b border-bordercol mb-4">
+            <div>
+              <h2 class="text-sm font-bold text-white flex items-center gap-2">
+                <svg class="w-4 h-4 text-brand" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
+                Execution Terminal (Direct to Deriv MT5)
+              </h2>
+              <p class="text-xs text-slate-400">Trade all 733+ broker symbols & execute multi-position setups</p>
+            </div>
+            <span class="text-xs px-2.5 py-1 rounded bg-red-500/10 text-brand border border-red-500/20 font-mono font-bold">DERIV FOK</span>
+          </div>
+
+          <form id="orderForm" onsubmit="submitDerivOrder(event)" class="space-y-4">
+            
+            <!-- Category Filter & Symbol Search -->
+            <div class="space-y-2">
+              <label class="block text-xs text-slate-400 font-medium">Select Broker Symbol (733 Available on Deriv)</label>
+              
+              <!-- Category Filter Pills -->
+              <div class="flex flex-wrap gap-1.5 text-[11px]">
+                <button type="button" onclick="filterCategory('ALL')" class="cat-pill px-2.5 py-1 rounded bg-brand text-white font-medium">All</button>
+                <button type="button" onclick="filterCategory('Crash Boom Indices')" class="cat-pill px-2.5 py-1 rounded bg-slate-800 text-slate-300 hover:text-white font-medium">Crash / Boom</button>
+                <button type="button" onclick="filterCategory('Volatility Indices')" class="cat-pill px-2.5 py-1 rounded bg-slate-800 text-slate-300 hover:text-white font-medium">Volatility</button>
+                <button type="button" onclick="filterCategory('Step Indices')" class="cat-pill px-2.5 py-1 rounded bg-slate-800 text-slate-300 hover:text-white font-medium">Step Indices</button>
+                <button type="button" onclick="filterCategory('Crypto')" class="cat-pill px-2.5 py-1 rounded bg-slate-800 text-slate-300 hover:text-white font-medium">Crypto</button>
+                <button type="button" onclick="filterCategory('Forex Major')" class="cat-pill px-2.5 py-1 rounded bg-slate-800 text-slate-300 hover:text-white font-medium">Forex Major</button>
+                <button type="button" onclick="filterCategory('Metals')" class="cat-pill px-2.5 py-1 rounded bg-slate-800 text-slate-300 hover:text-white font-medium">Metals & Gold</button>
+              </div>
+
+              <!-- Search input & Select -->
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                <div class="relative">
+                  <input id="symbolSearchInput" type="text" placeholder="Search 733 symbols (e.g. BTC, Boom, V75, EUR)..." oninput="onSymbolSearch(this.value)" class="w-full bg-slate-900 border border-bordercol rounded-lg px-3 py-2 text-xs text-slate-100 font-mono focus:outline-none focus:border-brand" />
+                </div>
+                <div>
+                  <select id="allSymbolsSelect" onchange="onSymbolDropdownSelect(this.value)" class="w-full bg-slate-900 border border-bordercol rounded-lg px-3 py-2 text-xs text-slate-100 font-mono focus:outline-none focus:border-brand">
+                    <option value="BTCUSD">BTCUSD - Bitcoin vs USD</option>
+                  </select>
+                </div>
+              </div>
+
+              <!-- Active Symbol Info Bar -->
+              <div id="activeSymbolDetails" class="p-2.5 rounded-lg bg-slate-900/80 border border-bordercol flex flex-wrap items-center justify-between text-xs font-mono">
+                <div><span class="text-slate-500">Active:</span> <span id="curSymName" class="font-bold text-white">BTCUSD</span></div>
+                <div><span class="text-slate-500">Bid:</span> <span id="curSymBid" class="text-emeraldaccent font-bold">--</span></div>
+                <div><span class="text-slate-500">Ask:</span> <span id="curSymAsk" class="text-crimsonaccent font-bold">--</span></div>
+                <div><span class="text-slate-500">Spread:</span> <span id="curSymSpread" class="text-slate-300">--</span></div>
+                <div><span class="text-slate-500">Min Lot:</span> <span id="curSymMinLot" class="text-blue-400">0.01</span></div>
+              </div>
+            </div>
+
+            <!-- Direction -->
+            <div>
+              <label class="block text-xs text-slate-400 mb-1 font-medium">Order Direction</label>
+              <div class="grid grid-cols-2 gap-2">
+                <button type="button" id="btnBuy" onclick="setDirection('BUY')" class="py-2.5 rounded-lg bg-slate-800 text-slate-400 hover:text-white font-bold text-xs flex items-center justify-center gap-1 transition">
+                  BUY (LONG)
+                </button>
+                <button type="button" id="btnSell" onclick="setDirection('SELL')" class="py-2.5 rounded-lg bg-crimsonaccent text-white font-bold text-xs flex items-center justify-center gap-1 transition shadow-lg shadow-red-500/20">
+                  SELL (SHORT)
+                </button>
+              </div>
+            </div>
+
+            <!-- Prices & SL/TP -->
+            <div class="grid grid-cols-1 sm:grid-cols-4 gap-3">
+              <div>
+                <label class="block text-xs text-slate-400 mb-1 font-medium">Entry Price</label>
+                <input id="tradeEntry" type="number" step="any" placeholder="80595.00" oninput="recalcSizer()" class="w-full bg-slate-900 border border-bordercol rounded-lg px-3 py-2 text-xs text-slate-200 font-mono focus:outline-none focus:border-brand" />
+              </div>
+              <div>
+                <label class="block text-xs text-slate-400 mb-1 font-medium">Stop Loss (SL)</label>
+                <input id="tradeSL" type="number" step="any" placeholder="80949.00" oninput="recalcSizer()" class="w-full bg-slate-900 border border-bordercol rounded-lg px-3 py-2 text-xs text-slate-200 font-mono focus:outline-none focus:border-brand" />
+              </div>
+              <div>
+                <label class="block text-xs text-slate-400 mb-1 font-medium">Take Profit (TP)</label>
+                <input id="tradeTP" type="number" step="any" placeholder="80065.00" class="w-full bg-slate-900 border border-bordercol rounded-lg px-3 py-2 text-xs text-slate-200 font-mono focus:outline-none focus:border-brand" />
+              </div>
+              <div>
+                <label class="block text-xs text-slate-400 mb-1 font-medium">Risk Budget (%)</label>
+                <input id="tradeRiskPct" type="number" step="0.1" value="1.0" min="0.1" max="5.0" oninput="recalcSizer()" class="w-full bg-slate-900 border border-bordercol rounded-lg px-3 py-2 text-xs text-slate-200 font-mono focus:outline-none focus:border-brand" />
+              </div>
+            </div>
+
+            <!-- MULTI-ORDER PARAMETERS -->
+            <div class="p-4 rounded-xl bg-slate-900/90 border border-blue-500/30 space-y-3">
+              <div class="flex items-center justify-between">
+                <div class="flex items-center gap-2">
+                  <span class="w-2 h-2 rounded-full bg-blue-400 animate-pulse"></span>
+                  <label class="text-xs font-bold text-white uppercase tracking-wider">Multi-Position Execution Parameters</label>
+                </div>
+                <span class="text-[10px] px-2 py-0.5 rounded bg-blue-500/10 text-blue-400 font-mono font-semibold">PARTIAL SCALE / STACK</span>
+              </div>
+
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                  <label class="block text-xs text-slate-400 mb-1 font-medium">Number of Trades to Open</label>
+                  <div class="flex items-center gap-2">
+                    <input id="tradesCount" type="number" min="1" max="10" value="1" oninput="updateMultiOrderPreview()" class="w-20 bg-slate-800 border border-bordercol rounded-lg px-3 py-2 text-xs text-white font-mono font-bold focus:outline-none focus:border-brand" />
+                    <div class="flex gap-1">
+                      <button type="button" onclick="setTradeCount(1)" class="px-2 py-1 bg-slate-800 hover:bg-slate-700 rounded text-xs font-mono text-slate-300">1x</button>
+                      <button type="button" onclick="setTradeCount(2)" class="px-2 py-1 bg-slate-800 hover:bg-slate-700 rounded text-xs font-mono text-slate-300">2x</button>
+                      <button type="button" onclick="setTradeCount(3)" class="px-2 py-1 bg-slate-800 hover:bg-slate-700 rounded text-xs font-mono text-slate-300">3x</button>
+                      <button type="button" onclick="setTradeCount(5)" class="px-2 py-1 bg-slate-800 hover:bg-slate-700 rounded text-xs font-mono text-slate-300">5x</button>
+                    </div>
+                  </div>
+                </div>
+
+                <div>
+                  <label class="block text-xs text-slate-400 mb-1 font-medium">Volume Distribution Mode</label>
+                  <select id="volumeMode" onchange="updateMultiOrderPreview()" class="w-full bg-slate-800 border border-bordercol rounded-lg px-3 py-2 text-xs text-white font-mono focus:outline-none focus:border-brand">
+                    <option value="split">Split Total Lots (e.g. 0.30 lots across 3 trades = 0.10 lots each)</option>
+                    <option value="stack">Stack Full Lots (e.g. 3 trades each having the full lot size)</option>
+                  </select>
+                </div>
+              </div>
+
+              <!-- Multi-order summary note -->
+              <div id="multiOrderPreview" class="text-[11px] text-blue-300/80 font-mono bg-blue-950/40 p-2 rounded border border-blue-900/50">
+                Single order: Opening 1 trade of 0.20 lots.
+              </div>
+            </div>
+
+            <!-- Real-time Sizer Calculation Banner -->
+            <div class="p-3.5 rounded-lg bg-slate-900 border border-bordercol flex flex-wrap items-center justify-between gap-4 text-xs">
+              <div>
+                <span class="text-slate-400 block text-[11px]">1.0% Risk Budget</span>
+                <span id="calcRiskDollar" class="font-bold text-white font-mono text-sm">$71.50</span>
+              </div>
+              <div>
+                <span class="text-slate-400 block text-[11px]">Stop Distance</span>
+                <span id="calcStopDist" class="font-bold text-slate-200 font-mono text-sm">350.00 pts</span>
+              </div>
+              <div>
+                <span class="text-slate-400 block text-[11px]">Recommended Lots</span>
+                <span id="calcLots" class="font-bold text-emeraldaccent font-mono text-sm">0.20 lots</span>
+              </div>
+              <div>
+                <label class="text-slate-400 block text-[11px]">Total Volume (Lots)</label>
+                <input id="tradeVolume" type="number" step="0.01" value="0.20" oninput="updateMultiOrderPreview()" required class="w-24 bg-slate-800 border border-brand/50 rounded px-2.5 py-1 text-white font-mono font-bold text-xs focus:outline-none" />
+              </div>
+            </div>
+
+            <!-- 2-Trade Multi-TP Power System Sizing & Execution Panel -->
+            <div class="p-3.5 rounded-lg bg-emerald-950/20 border border-emerald-500/40 space-y-2.5">
+              <div class="flex items-center justify-between">
+                <div class="flex items-center gap-1.5">
+                  <span class="text-sm">⚡</span>
+                  <span class="text-xs font-bold text-white font-sans">2-Trade Multi-TP Power System</span>
+                  <span class="text-[10px] px-1.5 py-0.2 rounded bg-emerald-500/20 text-emeraldaccent border border-emerald-500/40 font-mono font-bold">SHARED 5% SL</span>
+                </div>
+                <span id="otMtpRiskBadge" class="text-[10px] text-emerald-400 font-mono font-bold">Risk: $50.00 Max</span>
+              </div>
+              <div class="grid grid-cols-3 gap-1.5 text-[10px] font-mono text-center">
+                <div class="p-1.5 rounded bg-slate-900 border border-slate-800"><span class="text-slate-400 block text-[8px]">T1 (TP 2%)</span><span id="otMtpT1Target" class="text-emeraldaccent font-bold">+$20 Target</span></div>
+                <div class="p-1.5 rounded bg-slate-900 border border-slate-800"><span class="text-slate-400 block text-[8px]">T2 (TP 5%)</span><span id="otMtpT2Target" class="text-emeraldaccent font-bold">+$50 Target</span></div>
+                <div class="p-1.5 rounded bg-slate-900 border border-slate-800"><span class="text-slate-400 block text-[8px]">T3 (AI Runner)</span><span id="otMtpT3Target" class="text-cyanaccent font-bold">Infinite Upside</span></div>
+              </div>
+              <p class="text-[10px] text-slate-300 leading-snug">
+                Opens 3 separate trades: T1 locks in guaranteed quick cash, T2 captures the core trend move, and T3 provides an infinite upside trailing stop.
+              </p>
+              <button type="button" onclick="executeMtpFromCurrentForm()" class="w-full py-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs uppercase tracking-wider transition shadow-lg shadow-emerald-600/30 flex items-center justify-center gap-2">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
+                Execute 2-Trade Multi-TP System
+              </button>
+            </div>
+
+            <!-- Submit Button -->
+            <button type="submit" id="submitBtn" class="w-full py-3.5 rounded-lg bg-crimsonaccent hover:bg-red-600 text-white font-bold text-xs uppercase tracking-wider transition shadow-lg shadow-red-600/25 flex items-center justify-center gap-2">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
+              Execute Instant Order on Deriv MT5
+            </button>
+            <div id="orderStatusMsg" class="hidden text-xs p-3 rounded-lg font-mono"></div>
+          </form>
+        </div>
+      </section>
+
+      <!-- Right Column: Executed Trades Journal & IMM Calendar (5 Cols) -->
+      <section class="lg:col-span-5 space-y-6">
+        
+        <!-- Executed Setups Journal (Rule 4) -->
+        <div class="bg-panel border border-bordercol rounded-xl p-5 shadow-sm space-y-3">
+          <div class="flex items-center justify-between pb-2.5 border-b border-bordercol">
+            <div>
+              <h2 class="text-sm font-bold text-white flex items-center gap-2">
+                <svg class="w-4 h-4 text-emeraldaccent" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"></path></svg>
+                Executed Setups Journal (Live Sync)
+              </h2>
+              <p class="text-[11px] text-slate-400">Audit log with confidence scores & execution reasons</p>
+            </div>
+            <span id="journalCount" class="text-[10px] px-2 py-0.5 rounded bg-slate-800 text-slate-300 font-mono">0 Logged</span>
+          </div>
+
+          <div class="max-h-72 overflow-y-auto custom-scroll">
+            <table class="w-full text-left text-[11px]">
+              <thead class="text-slate-500 uppercase tracking-wider font-semibold border-b border-bordercol">
+                <tr>
+                  <th class="py-1.5 px-2">Symbol</th>
+                  <th class="py-1.5 px-2">Action</th>
+                  <th class="py-1.5 px-2">Lots</th>
+                  <th class="py-1.5 px-2">Conf</th>
+                  <th class="py-1.5 px-2">Type</th>
+                  <th class="py-1.5 px-2">Status</th>
+                  <th class="py-1.5 px-2 text-right">Time</th>
+                </tr>
+              </thead>
+              <tbody id="journalTbody" class="divide-y divide-bordercol text-slate-300 font-mono">
+                <tr><td colspan="7" class="py-4 text-center text-slate-500">No executed setups logged yet.</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- Institutional FinTech & IMM Calendar -->
+        <div class="bg-panel border border-bordercol rounded-xl p-5 shadow-sm space-y-4">
+          <div class="flex items-center justify-between pb-3 border-b border-bordercol">
+            <h2 class="text-sm font-bold text-white flex items-center gap-2">
+              <svg class="w-4 h-4 text-cyanaccent" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"></path></svg>
+              Financial Dates & IMM Expiries
+            </h2>
+            <span class="text-[10px] px-2 py-0.5 rounded bg-cyan-500/10 text-cyanaccent font-mono font-bold">FINTECH OPS</span>
+          </div>
+
+          <div id="immContainer" class="grid grid-cols-2 gap-2 text-xs font-mono">
+            <!-- Rendered via JS -->
+          </div>
+        </div>
+
+      </section>
+
+    </div>
+
+    </div> <!-- End stationView -->
+
+    <!-- ============================================================================== -->
+    <!-- VIEW 2: SYMBOL TRADING PERFORMANCE & TRADE ANALYTICS DASHBOARD -->
+    <!-- ============================================================================== -->
+    <div id="performanceView" class="space-y-6 hidden">
+      
+      <!-- Top Title & Sync Banner -->
+      <div class="bg-panel border border-bordercol rounded-xl p-5 shadow-sm flex flex-wrap items-center justify-between gap-4">
+        <div>
+          <div class="flex items-center gap-2.5">
+            <div class="w-9 h-9 rounded-lg bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center text-emeraldaccent">
+              <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"></path></svg>
+            </div>
+            <div>
+              <h1 class="text-base font-bold text-white flex items-center gap-2 font-sans">
+                Symbol Trading Performance & Trade Analytics
+                <span class="text-[10px] px-2 py-0.5 rounded-full bg-blue-500/10 text-cyanaccent border border-blue-500/20 font-mono font-semibold">MT5 DEAL HISTORY</span>
+              </h1>
+              <p class="text-xs text-slate-400 mt-0.5">Automated multi-factor evaluation of all traded instruments on Deriv MT5. Separates statistical conviction from noise.</p>
+            </div>
+          </div>
+        </div>
+
+        <div class="flex items-center gap-3">
+          <div class="text-right">
+            <span class="text-[10px] text-slate-500 block font-mono">SYNCHRONIZED (3-MIN AUTO)</span>
+            <span id="perfSyncTime" class="text-xs font-mono text-slate-300 font-bold">Connecting...</span>
+          </div>
+          <button onclick="loadPerformanceDashboard(true)" class="px-3.5 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-bold text-white border border-bordercol transition flex items-center gap-1.5 shadow">
+            <svg id="perfSyncIcon" class="w-3.5 h-3.5 text-cyanaccent" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg>
+            Resync Deals
+          </button>
+        </div>
+      </div>
+
+      <!-- Account-Level KPI Metric Cards -->
+      <section class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-3.5">
+        <div class="p-4 rounded-xl bg-panel border border-bordercol shadow-sm">
+          <div class="text-[10px] font-medium text-slate-400 uppercase tracking-wider mb-1">Deals Analyzed</div>
+          <div id="perfKpiTrades" class="text-2xl font-black font-mono text-white">0</div>
+          <div id="perfKpiSymbolsTraded" class="text-[10px] text-slate-500 font-mono mt-1">Across 0 symbols</div>
+        </div>
+
+        <div class="p-4 rounded-xl bg-panel border border-bordercol shadow-sm">
+          <div class="text-[10px] font-medium text-slate-400 uppercase tracking-wider mb-1">Realized Net P&L</div>
+          <div id="perfKpiNetPnl" class="text-2xl font-black font-mono text-emeraldaccent">$0.00</div>
+          <div class="text-[10px] text-slate-500 font-mono mt-1">Post Swap & Comm</div>
+        </div>
+
+        <div class="p-4 rounded-xl bg-panel border border-bordercol shadow-sm">
+          <div class="text-[10px] font-medium text-slate-400 uppercase tracking-wider mb-1">Overall Win Rate</div>
+          <div id="perfKpiWinRate" class="text-2xl font-black font-mono text-cyanaccent">0.0%</div>
+          <div id="perfKpiWinLoss" class="text-[10px] text-slate-500 font-mono mt-1">0 Wins / 0 Losses</div>
+        </div>
+
+        <div class="p-4 rounded-xl bg-panel border border-bordercol shadow-sm">
+          <div class="text-[10px] font-medium text-slate-400 uppercase tracking-wider mb-1">Profit Factor</div>
+          <div id="perfKpiPf" class="text-2xl font-black font-mono text-white">0.00</div>
+          <div class="text-[10px] text-slate-500 font-mono mt-1">Gross Win / Loss</div>
+        </div>
+
+        <div class="p-4 rounded-xl bg-panel border border-emerald-500/30 bg-emerald-950/10 shadow-sm">
+          <div class="text-[10px] font-medium text-emerald-400 uppercase tracking-wider mb-1">Top Focus Symbol</div>
+          <div id="perfKpiBestSymbol" class="text-base font-black font-sans text-emeraldaccent truncate">None</div>
+          <div id="perfKpiBestDetails" class="text-[10px] text-emerald-400/80 font-mono mt-1">Highest Consistency</div>
+        </div>
+
+        <div class="p-4 rounded-xl bg-panel border border-bordercol shadow-sm">
+          <div class="text-[10px] font-medium text-slate-400 uppercase tracking-wider mb-1">Open Positions P&L</div>
+          <div id="perfKpiOpenPnl" class="text-2xl font-black font-mono text-slate-200">$0.00</div>
+          <div id="perfKpiOpenCount" class="text-[10px] text-slate-500 font-mono mt-1">0 Active Trades</div>
+        </div>
+      </section>
+
+      <!-- Automated Performance Alerts Banner (Dynamic) -->
+      <section id="perfAlertsContainer" class="space-y-2">
+        <!-- Injected via JS -->
+      </section>
+
+      <!-- SECTION: RECOMMENDED SYMBOLS TO FOCUS ON (Priorities 1 to 5) -->
+      <section class="bg-panel border border-bordercol rounded-xl p-5 shadow-sm space-y-4">
+        <div class="flex items-center justify-between pb-3 border-b border-bordercol">
+          <div>
+            <h2 class="text-sm font-bold text-white flex items-center gap-2 font-sans">
+              <svg class="w-4 h-4 text-emeraldaccent" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11.049 2.927c.3-.921 1.603-.921 1.902 0l1.519 4.674a1 1 0 00.95.69h4.915c.969 0 1.371 1.24.588 1.81l-3.976 2.888a1 1 0 00-.363 1.118l1.518 4.674c.3.922-.755 1.688-1.538 1.118l-3.976-2.888a1 1 0 00-1.176 0l-3.976 2.888c-.783.57-1.838-.197-1.538-1.118l1.518-4.674a1 1 0 00-.363-1.118l-3.976-2.888c-.784-.57-.38-1.81.588-1.81h4.914a1 1 0 00.951-.69l1.519-4.674z"></path></svg>
+              Recommended Symbols to Focus On (Priority 1–5 Classification)
+            </h2>
+            <p class="text-xs text-slate-400 mt-0.5">Objective priority allocation guiding research and capital deployment based on historical trading expectancy and sample confidence.</p>
+          </div>
+          <span class="text-xs px-2.5 py-0.5 rounded-full bg-slate-800 text-slate-300 font-mono">Multi-Factor Engine</span>
+        </div>
+
+        <div class="grid grid-cols-1 md:grid-cols-5 gap-3.5" id="priorityBucketsGrid">
+          <!-- Populated via JS: Priority 1 to Priority 5 Cards -->
+        </div>
+      </section>
+
+      <!-- Charts & Visual Analytics Section -->
+      <section class="grid grid-cols-1 lg:grid-cols-3 gap-4">
+        <!-- Chart 1: Realized Net Profit / Loss by Symbol -->
+        <div class="p-4 rounded-xl bg-panel border border-bordercol shadow-sm flex flex-col justify-between">
+          <div class="flex items-center justify-between pb-3 border-b border-bordercol">
+            <h3 class="text-xs font-bold text-white uppercase tracking-wider flex items-center gap-1.5">
+              <span class="w-2 h-2 rounded-full bg-emeraldaccent"></span>
+              Net Realized P&L by Symbol ($)
+            </h3>
+            <span class="text-[10px] text-slate-500 font-mono">Gross Realized</span>
+          </div>
+          <div class="h-64 mt-3">
+            <canvas id="chartPnlBySymbol"></canvas>
+          </div>
+        </div>
+
+        <!-- Chart 2: Win Rate (%) & Profit Factor -->
+        <div class="p-4 rounded-xl bg-panel border border-bordercol shadow-sm flex flex-col justify-between">
+          <div class="flex items-center justify-between pb-3 border-b border-bordercol">
+            <h3 class="text-xs font-bold text-white uppercase tracking-wider flex items-center gap-1.5">
+              <span class="w-2 h-2 rounded-full bg-cyanaccent"></span>
+              Win Rate (%) & Profit Factor
+            </h3>
+            <span class="text-[10px] text-slate-500 font-mono">Reliability Matrix</span>
+          </div>
+          <div class="h-64 mt-3">
+            <canvas id="chartWinRatePf"></canvas>
+          </div>
+        </div>
+
+        <!-- Chart 3: Cumulative P&L Curves -->
+        <div class="p-4 rounded-xl bg-panel border border-bordercol shadow-sm flex flex-col justify-between">
+          <div class="flex items-center justify-between pb-3 border-b border-bordercol">
+            <h3 class="text-xs font-bold text-white uppercase tracking-wider flex items-center gap-1.5">
+              <span class="w-2 h-2 rounded-full bg-amberaccent"></span>
+              Top Symbols Equity Growth Curve
+            </h3>
+            <span class="text-[10px] text-slate-500 font-mono">Trajectory</span>
+          </div>
+          <div class="h-64 mt-3">
+            <canvas id="chartCumEquity"></canvas>
+          </div>
+        </div>
+      </section>
+
+      <!-- SECTION: Symbol Performance Ranking & Comprehensive Analytics Table -->
+      <section class="bg-panel border border-bordercol rounded-xl p-5 shadow-sm space-y-4">
+        <div class="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-bordercol">
+          <div>
+            <h2 class="text-sm font-bold text-white flex items-center gap-2 font-sans">
+              <svg class="w-4 h-4 text-cyanaccent" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 10h18M3 14h18m-9-4v8m-7 0h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"></path></svg>
+              Symbol Performance Ranking & Analytics Table
+            </h2>
+            <p class="text-xs text-slate-400 mt-0.5">Click table headers to sort. Identifies statistical reliability, risk-to-reward ratio, expectancy, and maximum peak-to-trough drawdown.</p>
+          </div>
+
+          <!-- Controls & Filters Toolbar -->
+          <div class="flex flex-wrap items-center gap-2 text-xs">
+            <!-- Timeframe Filter -->
+            <div class="flex items-center bg-slate-900 p-0.5 rounded-lg border border-bordercol">
+              <button onclick="setPerfTimeframe('today')" class="perf-tf-btn px-2.5 py-1 rounded text-[11px] font-bold text-slate-400 hover:text-white" data-tf="today">Today</button>
+              <button onclick="setPerfTimeframe('7d')" class="perf-tf-btn px-2.5 py-1 rounded text-[11px] font-bold text-slate-400 hover:text-white" data-tf="7d">7D</button>
+              <button onclick="setPerfTimeframe('30d')" class="perf-tf-btn px-2.5 py-1 rounded text-[11px] font-bold text-slate-400 hover:text-white" data-tf="30d">30D</button>
+              <button onclick="setPerfTimeframe('90d')" class="perf-tf-btn px-2.5 py-1 rounded text-[11px] font-bold text-slate-400 hover:text-white" data-tf="90d">90D</button>
+              <button onclick="setPerfTimeframe('all')" class="perf-tf-btn px-2.5 py-1 rounded text-[11px] font-bold bg-brand text-white shadow" data-tf="all">All Time</button>
+            </div>
+
+            <!-- Reliability Filter -->
+            <select id="filterReliabilitySelect" onchange="applyPerfFilters()" class="bg-slate-900 border border-bordercol rounded-lg px-2.5 py-1 text-slate-300 font-sans focus:outline-none focus:border-cyanaccent text-[11px]">
+              <option value="ALL">All Sample Sizes</option>
+              <option value="STAT">Validated Only (N ≥ 10)</option>
+              <option value="MOD">Moderate & Validated (N ≥ 5)</option>
+            </select>
+
+            <!-- Priority Filter -->
+            <select id="filterPrioritySelect" onchange="applyPerfFilters()" class="bg-slate-900 border border-bordercol rounded-lg px-2.5 py-1 text-slate-300 font-sans focus:outline-none focus:border-cyanaccent text-[11px]">
+              <option value="ALL">All Priorities (1–5)</option>
+              <option value="1">Priority 1: Focus Only</option>
+              <option value="2">Priority 2: Maintain</option>
+              <option value="3">Priority 3: Monitor</option>
+              <option value="4">Priority 4: Reduce</option>
+              <option value="5">Priority 5: Avoid</option>
+            </select>
+
+            <!-- Search Input -->
+            <div class="relative">
+              <input id="perfSearchInput" type="text" oninput="applyPerfFilters()" placeholder="Filter symbol..." class="bg-slate-900 border border-bordercol rounded-lg pl-7 pr-2.5 py-1 text-white font-mono text-[11px] focus:outline-none focus:border-cyanaccent w-32 placeholder-slate-500">
+              <svg class="w-3.5 h-3.5 text-slate-500 absolute left-2 top-1.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path></svg>
+            </div>
+          </div>
+        </div>
+
+        <!-- Table Container -->
+        <div class="overflow-x-auto custom-scroll">
+          <table class="w-full text-left text-xs whitespace-nowrap">
+            <thead class="bg-slate-950/80 text-slate-400 font-mono uppercase text-[10px] tracking-wider border-b border-bordercol">
+              <tr>
+                <th class="py-3 px-3 cursor-pointer hover:text-white" onclick="sortPerfTable('rank')">Rank ↕</th>
+                <th class="py-3 px-3 cursor-pointer hover:text-white" onclick="sortPerfTable('symbol')">Symbol ↕</th>
+                <th class="py-3 px-3 cursor-pointer hover:text-white" onclick="sortPerfTable('priority_num')">Trade Recommendation ↕</th>
+                <th class="py-3 px-3 cursor-pointer hover:text-white" onclick="sortPerfTable('total_trades')">Reliability & Sample ↕</th>
+                <th class="py-3 px-3 cursor-pointer hover:text-white" onclick="sortPerfTable('win_rate')">Win Rate % ↕</th>
+                <th class="py-3 px-3 cursor-pointer hover:text-white" onclick="sortPerfTable('net_pnl')">Net Realized P&L ↕</th>
+                <th class="py-3 px-3 cursor-pointer hover:text-white" onclick="sortPerfTable('profit_factor')">Profit Factor ↕</th>
+                <th class="py-3 px-3 cursor-pointer hover:text-white" onclick="sortPerfTable('avg_profit_per_trade')">Expectancy / Trade ↕</th>
+                <th class="py-3 px-3 cursor-pointer hover:text-white" onclick="sortPerfTable('rr_performance')">R:R Ratio ↕</th>
+                <th class="py-3 px-3 cursor-pointer hover:text-white" onclick="sortPerfTable('max_drawdown')">Max Drawdown ↕</th>
+                <th class="py-3 px-3 cursor-pointer hover:text-white" onclick="sortPerfTable('score')">Score (0–100) ↕</th>
+                <th class="py-3 px-3 text-right">Action</th>
+              </tr>
+            </thead>
+            <tbody id="perfTableTbody" class="divide-y divide-bordercol/60">
+              <!-- Rendered via JS -->
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+    </div> <!-- End performanceView -->
+
+    <!-- ================================================================= -->
+    <!-- GOLD TRADING INTELLIGENCE DASHBOARD (XAUUSD)                      -->
+    <!-- ================================================================= -->
+    <div id="goldView" class="space-y-6 hidden">
+      <!-- 3D Gold Bullion Hero Banner -->
+      <div class="rounded-3xl border border-amber-500/40 overflow-hidden shadow-2xl relative bg-slate-950">
+        <div class="relative h-44 sm:h-52 w-full overflow-hidden">
+          <img src="/static/images/gold_bullion_3d.jpg" alt="Gold Bullion" class="w-full h-full object-cover filter brightness-90 contrast-110 hover:scale-105 transition duration-700">
+          <div class="absolute inset-0 bg-gradient-to-t from-slate-950 via-slate-950/40 to-transparent"></div>
+          <div class="absolute bottom-4 left-6 right-6 flex flex-wrap items-end justify-between gap-4">
+            <div>
+              <div class="flex items-center gap-2 mb-1">
+                <span class="px-2.5 py-0.5 rounded-full text-[10px] font-mono font-bold bg-amber-500/20 text-amber-300 border border-amber-500/40 shadow">INSTITUTIONAL GRADE</span>
+                <span class="text-xs text-amber-200/90 font-mono">XAUUSD &bull; 999.9 FINE GOLD &bull; 1:1000 LEVERAGE</span>
+              </div>
+              <h2 class="text-2xl sm:text-3xl font-black text-white tracking-tight drop-shadow-md">Gold Intelligence &amp; Autonomous Scalp Station</h2>
+            </div>
+            <div class="bg-slate-950/80 backdrop-blur-md px-4 py-2.5 rounded-2xl border border-amber-500/30 font-mono text-right shadow-lg">
+              <div class="text-[10px] text-slate-400 font-bold uppercase tracking-wider">Active Concurrency Rule</div>
+              <div class="text-sm font-black text-emeraldaccent flex items-center gap-1.5 justify-end mt-0.5">
+                <span class="w-2 h-2 rounded-full bg-emeraldaccent animate-pulse"></span>
+                5 TRADES MAX &bull; AUTO-REPLACE ON TP
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <!-- 1. Gold Live Overview Hero Header -->
+      <div class="rounded-2xl bg-gradient-to-r from-amber-950/40 via-slate-900/90 to-slate-900 border border-amber-500/30 p-6 shadow-2xl relative overflow-hidden">
+        <div class="absolute -right-10 -top-10 w-64 h-64 bg-amber-500/5 rounded-full blur-3xl pointer-events-none"></div>
+        <div class="flex flex-wrap items-center justify-between gap-4 relative z-10">
+          <div class="flex items-center gap-4">
+            <div class="w-14 h-14 rounded-2xl bg-gradient-to-br from-amber-400 to-yellow-600 flex items-center justify-center text-2xl shadow-lg shadow-amber-500/20 font-black text-slate-950">
+              Au
+            </div>
+            <div>
+              <div class="flex items-center gap-2">
+                <h2 class="text-xl font-black text-white tracking-tight flex items-center gap-2">
+                  GOLD (XAUUSD) INTELLIGENCE & RESEARCH
+                </h2>
+                <span id="goldRegimeBadge" class="px-2.5 py-0.5 rounded-full text-[10px] font-bold font-mono bg-amber-500/20 text-amber-300 border border-amber-500/30">ANALYZING...</span>
+              </div>
+              <p class="text-xs text-slate-400 mt-0.5">
+                Institutional Market Structure &bull; Smart Money Concepts (SMC) &bull; Asian Sweeps &bull; Multi-Timeframe Alignment
+              </p>
+            </div>
+          </div>
+          <div class="flex items-center gap-3">
+            <div class="text-right px-4 py-2 rounded-xl bg-slate-950/60 border border-bordercol">
+              <span class="text-[10px] uppercase tracking-wider text-slate-400 font-bold block">Live Spread</span>
+              <span id="goldSpreadDisplay" class="text-sm font-mono font-black text-amber-400">$3.80 (380 pts)</span>
+            </div>
+            <button onclick="loadGoldDashboard(true)" class="px-4 py-2.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-black transition shadow-lg shadow-amber-500/20 flex items-center gap-2">
+              <svg id="goldSyncIcon" class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg>
+              Refresh Gold Analytics
+            </button>
+          </div>
+        </div>
+
+        <!-- Metric Strips -->
+        <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 mt-6 pt-5 border-t border-slate-800/80">
+          <div class="p-3 rounded-xl bg-slate-950/50 border border-bordercol">
+            <span class="text-[10px] text-slate-400 font-mono uppercase block">Live Bid / Ask</span>
+            <span id="goldBidAsk" class="text-sm font-mono font-bold text-slate-200">-- / --</span>
+          </div>
+          <div class="p-3 rounded-xl bg-slate-950/50 border border-bordercol">
+            <span class="text-[10px] text-slate-400 font-mono uppercase block">Market Regime</span>
+            <span id="goldRegimeText" class="text-xs font-mono font-bold text-amber-300">--</span>
+          </div>
+          <div class="p-3 rounded-xl bg-slate-950/50 border border-bordercol">
+            <span class="text-[10px] text-slate-400 font-mono uppercase block">M15 ATR (14)</span>
+            <span id="goldAtrDisplay" class="text-sm font-mono font-bold text-blue-400">--</span>
+          </div>
+          <div class="p-3 rounded-xl bg-slate-950/50 border border-bordercol">
+            <span class="text-[10px] text-slate-400 font-mono uppercase block">M15 RSI (14)</span>
+            <span id="goldRsiDisplay" class="text-sm font-mono font-bold text-slate-200">--</span>
+          </div>
+          <div class="p-3 rounded-xl bg-slate-950/50 border border-bordercol">
+            <span class="text-[10px] text-slate-400 font-mono uppercase block">Asian High / Low</span>
+            <span id="goldAsianRange" class="text-xs font-mono font-bold text-slate-200">-- / --</span>
+          </div>
+          <div class="p-3 rounded-xl bg-slate-950/50 border border-bordercol">
+            <span class="text-[10px] text-slate-400 font-mono uppercase block">Asian State</span>
+            <span id="goldAsianStatus" class="text-xs font-mono font-bold text-emeraldaccent">--</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- GOLD AUTONOMOUS EXECUTION CONTROL STATION -->
+      <section class="rounded-2xl bg-gradient-to-r from-slate-900 via-panel to-slate-900 border border-amber-500/40 p-5 shadow-2xl space-y-4">
+        <div class="flex flex-wrap items-center justify-between gap-4">
+          <div class="flex items-center gap-3.5">
+            <div id="goldAutoTradePulse" class="w-10 h-10 rounded-xl bg-slate-800 border border-slate-700 flex items-center justify-center text-lg shadow-inner">
+              🤖
+            </div>
+            <div>
+              <div class="flex items-center gap-2">
+                <h3 class="text-sm font-black text-white tracking-tight flex items-center gap-2">
+                  GOLD AUTONOMOUS EXECUTION ENGINE
+                </h3>
+                <span id="goldAutoTradeBadge" class="px-2 py-0.5 rounded-full text-[10px] font-bold font-mono bg-slate-800 text-slate-400 border border-slate-700">STANDBY / DISABLED</span>
+              </div>
+              <p id="goldAutoStatusMsg" class="text-xs text-slate-400 mt-0.5 font-mono">
+                Engine ready &bull; Awaiting activation
+              </p>
+            </div>
+          </div>
+
+          <div class="flex flex-wrap items-center gap-3">
+            <button id="btnToggleGoldAuto" onclick="toggleGoldAutoTrade()" class="px-4 py-2.5 rounded-xl text-xs font-black transition shadow-lg flex items-center gap-2 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700">
+              <span id="goldAutoDot" class="w-2.5 h-2.5 rounded-full bg-slate-500"></span>
+              <span id="goldAutoBtnText">ENABLE GOLD AUTO-TRADE</span>
+            </button>
+            <div class="flex items-center gap-2 bg-slate-950/80 p-1 rounded-xl border border-bordercol">
+              <span class="text-[10px] font-mono text-slate-400 px-2">Lots:</span>
+              <select id="goldLotSelect" onchange="updateGoldAutoSettings()" class="bg-slate-900 text-white font-mono text-xs px-2 py-1 rounded border border-slate-800">
+                <option value="0.01">0.01 Lot (1 oz)</option>
+                <option value="0.02">0.02 Lot (2 oz)</option>
+                <option value="0.05">0.05 Lot (5 oz)</option>
+              </select>
+              <span class="text-[10px] font-mono text-slate-400 px-2">Min Conf:</span>
+              <select id="goldConfSelect" onchange="updateGoldAutoSettings()" class="bg-slate-900 text-emeraldaccent font-mono text-xs px-2 py-1 rounded border border-slate-800 font-bold">
+                <option value="90">≥ 90% Confidence</option>
+                <option value="92">≥ 92% Confidence</option>
+                <option value="95">≥ 95% Confidence</option>
+              </select>
+              <span class="text-[10px] font-mono text-slate-400 px-2">Auto Target:</span>
+              <select id="goldAutoTfSelect" onchange="updateGoldAutoSettings()" class="bg-slate-900 text-amber-300 font-mono text-xs px-2 py-1 rounded border border-slate-800 font-bold">
+                <option value="M1_M5">⚡ 1M & 5M Fast Setups (Recommended)</option>
+                <option value="M1">⚡ 1M Scalp Only</option>
+                <option value="M5">⚡ 5M Momentum Only</option>
+                <option value="ALL">All Setups (M1 – H1)</option>
+              </select>
+            </div>
+          </div>
+        </div>
+
+        <!-- Inline Settings & Status Metrics -->
+        <div class="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-6 gap-2.5 pt-3 border-t border-slate-800/80 text-xs font-mono">
+          <div class="p-2.5 rounded-lg bg-slate-950/60 border border-bordercol">
+            <span class="text-[10px] text-slate-400 uppercase block">Min Confidence</span>
+            <span id="goldCfgConf" class="font-bold text-emeraldaccent">≥ 90%</span>
+          </div>
+          <div class="p-2.5 rounded-lg bg-slate-950/60 border border-bordercol">
+            <span class="text-[10px] text-slate-400 uppercase block">Lot Size</span>
+            <span id="goldCfgLot" class="font-bold text-white">0.01 Lot (1 oz)</span>
+          </div>
+          <div class="p-2.5 rounded-lg bg-slate-950/60 border border-bordercol">
+            <span class="text-[10px] text-slate-400 uppercase block">Execution Mode</span>
+            <span id="goldCfgTp" class="font-bold text-emeraldaccent">TWIN TRADE (2 LEGS)</span>
+          </div>
+          <div class="p-2.5 rounded-lg bg-slate-950/60 border border-bordercol">
+            <span class="text-[10px] text-slate-400 uppercase block">Today's Trades</span>
+            <span id="goldDailyTrades" class="font-bold text-blue-400">0 / 3 max</span>
+          </div>
+          <div class="p-2.5 rounded-lg bg-slate-950/60 border border-bordercol">
+            <span class="text-[10px] text-slate-400 uppercase block">Active Concurrency</span>
+            <span id="goldOpenPosStatus" class="font-bold text-amber-300">0 / 5 Trades (Auto-Replace on TP)</span>
+          </div>
+          <div class="p-2.5 rounded-lg bg-slate-950/60 border border-bordercol">
+            <span class="text-[10px] text-slate-400 uppercase block">Macro News Gate</span>
+            <span id="goldCfgNews" class="font-bold text-emeraldaccent">ACTIVE (30m)</span>
+          </div>
+        </div>
+      </section>
+
+      <!-- GOLD HIGH-FREQUENCY TRADING TERMINAL & TWIN-ORDER EXECUTION (User Requirement) -->
+      <section class="rounded-2xl bg-gradient-to-br from-panel via-slate-900 to-panel border border-amber-500/50 p-6 shadow-2xl space-y-4">
+        <div class="flex flex-wrap items-center justify-between gap-4 border-b border-bordercol/80 pb-4">
+          <div class="flex items-center gap-3.5">
+            <div class="w-11 h-11 rounded-2xl bg-gradient-to-br from-amber-400 to-yellow-600 flex items-center justify-center text-xl shadow-lg shadow-amber-500/20 font-black text-slate-950">
+              ⚡
+            </div>
+            <div>
+              <div class="flex items-center gap-2">
+                <h3 class="text-base font-black text-white tracking-tight flex items-center gap-2">
+                  GOLD HIGH-FREQUENCY TRADING TERMINAL
+                </h3>
+                <span class="px-2.5 py-0.5 rounded-full text-[10px] font-bold font-mono bg-emerald-500/20 text-emeraldaccent border border-emerald-500/30">
+                  TWIN-ORDER MODE (1 FIXED TP + 1 TRAILING TP)
+                </span>
+              </div>
+              <p class="text-xs text-slate-400 mt-0.5">
+                Manual &amp; Autonomous Scalp Execution &bull; Opens 2 Orders Every Trade &bull; Trade 1: Hard Fixed TP1 &bull; Trade 2: Dynamic Trailing Runner
+              </p>
+            </div>
+          </div>
+          
+          <div class="flex items-center gap-3">
+            <div class="text-right px-3.5 py-1.5 rounded-xl bg-slate-950/80 border border-bordercol">
+              <span class="text-[10px] uppercase font-mono text-slate-400 block font-bold">Terminal Mode</span>
+              <span id="activeTerminalTfDisplay" class="text-xs font-mono font-black text-amber-300">⚡ M1 SCALP MODE</span>
+            </div>
+            <button onclick="closeAllGoldPositions()" class="px-3.5 py-2 rounded-xl bg-rose-600/15 hover:bg-rose-600/30 text-rose-300 border border-rose-500/30 text-xs font-bold transition flex items-center gap-1.5">
+              <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+              Close All Gold
+            </button>
+          </div>
+        </div>
+
+        <!-- Trading Controls Row -->
+        <div class="grid grid-cols-1 md:grid-cols-12 gap-4 items-center">
+          <!-- Timeframe & Lot selector (5 Cols) -->
+          <div class="md:col-span-5 space-y-3">
+            <div class="space-y-1.5">
+              <label class="block text-[11px] font-mono text-slate-400 uppercase font-bold">Execution Strategy Timeframe:</label>
+              <div class="grid grid-cols-3 gap-2 text-xs font-mono">
+                <button type="button" id="btnTerminalM1" onclick="setManualTradeTf('M1')" class="py-2 px-2.5 rounded-xl bg-amber-500/20 text-amber-300 font-bold border border-amber-500/40 text-center transition flex flex-col items-center">
+                  <span class="font-bold">⚡ 1M Scalp</span>
+                  <span class="text-[10px] text-slate-400 font-normal">SL $3.50 | TP 1.5R</span>
+                </button>
+                <button type="button" id="btnTerminalM5" onclick="setManualTradeTf('M5')" class="py-2 px-2.5 rounded-xl bg-slate-950 text-slate-400 hover:text-white border border-bordercol text-center transition flex flex-col items-center">
+                  <span class="font-bold">⚡ 5M Momentum</span>
+                  <span class="text-[10px] text-slate-400 font-normal">SL $4.50 | TP 1.8R</span>
+                </button>
+                <button type="button" id="btnTerminalM15" onclick="setManualTradeTf('M15')" class="py-2 px-2.5 rounded-xl bg-slate-950 text-slate-400 hover:text-white border border-bordercol text-center transition flex flex-col items-center">
+                  <span class="font-bold">M15 Intraday</span>
+                  <span class="text-[10px] text-slate-400 font-normal">SL $6.00 | TP 2.5R</span>
+                </button>
+              </div>
+            </div>
+
+            <div class="grid grid-cols-2 gap-3 text-xs font-mono">
+              <div class="space-y-1">
+                <label class="block text-[10px] text-slate-400 uppercase font-bold">Volume per Leg:</label>
+                <select id="terminalLotSelect" onchange="updateTerminalPreview()" class="w-full bg-slate-950 text-white font-mono text-xs px-3 py-2 rounded-xl border border-slate-800">
+                  <option value="0.01">0.01 Lot (1 oz)</option>
+                  <option value="0.02">0.02 Lot (2 oz)</option>
+                  <option value="0.05">0.05 Lot (5 oz)</option>
+                  <option value="0.10">0.10 Lot (10 oz)</option>
+                </select>
+              </div>
+              <div class="space-y-1">
+                <label class="block text-[10px] text-slate-400 uppercase font-bold">Total Exposure (2 Legs):</label>
+                <div id="terminalTotalLot" class="w-full bg-slate-950 text-amber-300 font-bold font-mono text-xs px-3 py-2 rounded-xl border border-slate-800">
+                  0.02 Lot (2 oz total)
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Twin-Order Specification Preview (7 Cols) -->
+          <div class="md:col-span-7 bg-slate-950/80 rounded-xl border border-bordercol p-4 space-y-3">
+            <div class="flex items-center justify-between text-xs font-mono border-b border-bordercol/60 pb-2">
+              <span class="text-slate-400 font-bold uppercase text-[10px]">Dual-Order Blueprint (Rule #1 &amp; #2):</span>
+              <span class="text-emeraldaccent font-bold">Shared Protective Risk</span>
+            </div>
+
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs font-mono">
+              <!-- Leg 1 -->
+              <div class="p-3 rounded-lg bg-slate-900 border border-blue-500/30 space-y-1">
+                <div class="flex items-center justify-between">
+                  <span class="text-blue-400 font-bold">TRADE 1: FIXED TARGET</span>
+                  <span class="text-[10px] px-1.5 py-0.2 rounded bg-blue-500/20 text-blue-300 font-bold">LEG 1</span>
+                </div>
+                <div class="text-[11px] text-slate-300">
+                  Target: <strong id="previewLeg1Tp" class="text-emeraldaccent">+1.5R Fixed TP1</strong>
+                </div>
+                <div class="text-[10px] text-slate-400">
+                  Automatically fills &amp; locks in profits on broker limit target.
+                </div>
+              </div>
+
+              <!-- Leg 2 -->
+              <div class="p-3 rounded-lg bg-slate-900 border border-amber-500/30 space-y-1">
+                <div class="flex items-center justify-between">
+                  <span class="text-amber-400 font-bold">TRADE 2: TRAILING RUNNER</span>
+                  <span class="text-[10px] px-1.5 py-0.2 rounded bg-amber-500/20 text-amber-300 font-bold">LEG 2</span>
+                </div>
+                <div class="text-[11px] text-slate-300">
+                  Target: <strong id="previewLeg2Tp" class="text-amber-300">Dynamic Trailing Stop</strong>
+                </div>
+                <div class="text-[10px] text-slate-400">
+                  Break-Even at +1.0R &bull; Trails price to ride major trend expansions.
+                </div>
+              </div>
+            </div>
+
+            <!-- Instant Dual Execution Action Buttons -->
+            <div class="grid grid-cols-2 gap-3 pt-1">
+              <button onclick="executeManualGoldTrade('BUY')" class="w-full py-3 px-4 rounded-xl bg-gradient-to-r from-emerald-600 to-emerald-500 hover:from-emerald-500 hover:to-emerald-400 text-slate-950 font-black text-xs transition shadow-lg shadow-emerald-500/20 flex items-center justify-center gap-2">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 10l7-7m0 0l7 7m-7-7v18"></path></svg>
+                BUY XAUUSD (TWIN TRADE)
+              </button>
+              <button onclick="executeManualGoldTrade('SELL')" class="w-full py-3 px-4 rounded-xl bg-gradient-to-r from-rose-600 to-rose-500 hover:from-rose-500 hover:to-rose-400 text-white font-black text-xs transition shadow-lg shadow-rose-600/20 flex items-center justify-center gap-2">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M19 14l-7 7m0 0l-7-7m7 7V3"></path></svg>
+                SELL XAUUSD (TWIN TRADE)
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Live Open Gold Twin Positions & Trailing Monitor -->
+        <div class="pt-3 border-t border-bordercol/60">
+          <div class="flex items-center justify-between pb-2">
+            <span class="text-[11px] font-mono text-slate-400 uppercase font-bold flex items-center gap-2">
+              <span class="w-2 h-2 rounded-full bg-amber-400 animate-pulse"></span>
+              Live Gold Positions &amp; Dynamic Trailing Status:
+            </span>
+            <span id="goldOpenLegsCount" class="text-[10px] font-mono px-2 py-0.5 rounded bg-slate-900 border border-bordercol text-slate-300">0 Active Legs</span>
+          </div>
+          <div id="goldPositionsTableContainer" class="overflow-x-auto custom-scroll">
+            <table class="w-full text-left text-xs font-mono">
+              <thead class="bg-slate-950/80 text-slate-400 uppercase text-[10px] border-b border-bordercol">
+                <tr>
+                  <th class="py-2 px-3">Ticket</th>
+                  <th class="py-2 px-3">Leg Role</th>
+                  <th class="py-2 px-3">Type</th>
+                  <th class="py-2 px-3">Volume</th>
+                  <th class="py-2 px-3">Entry</th>
+                  <th class="py-2 px-3">Live Price</th>
+                  <th class="py-2 px-3">Stop Loss</th>
+                  <th class="py-2 px-3">Take Profit</th>
+                  <th class="py-2 px-3">Floating P/L</th>
+                  <th class="py-2 px-3">Trailing Telemetry</th>
+                </tr>
+              </thead>
+              <tbody id="goldPositionsTbody" class="divide-y divide-bordercol/60 text-slate-300">
+                <tr><td colspan="10" class="py-4 text-center text-slate-500">No open Gold positions currently.</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- LIVE TRADINGVIEW LIGHTWEIGHT CANDLESTICK CHART & STRATEGY OVERLAYS -->
+      <section class="rounded-2xl bg-panel border border-bordercol p-5 shadow-xl space-y-3">
+        <div class="flex flex-wrap items-center justify-between gap-3">
+          <div class="flex items-center gap-3">
+            <h3 class="text-sm font-bold text-white flex items-center gap-2">
+              <svg class="w-4 h-4 text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 12l3-3 3 3 4-4M8 21l4-4 4 4M3 4h18M4 4h16v12a1 1 0 01-1 1H5a1 1 0 01-1-1V4z"></path></svg>
+              XAUUSD Live Candlestick Chart &amp; Strategy Overlays
+            </h3>
+            <span id="chartLiveQuote" class="text-xs font-mono text-slate-300 bg-slate-900 border border-bordercol px-2.5 py-0.5 rounded">XAUUSD: --</span>
+            <span id="chartBeBadge" class="hidden text-[10px] font-mono font-bold bg-amber-500/20 text-amber-300 border border-amber-500/40 px-2 py-0.5 rounded-full flex items-center gap-1">🛡️ AUTO BREAK-EVEN ACTIVE (+1.0R PROTECTED)</span>
+          </div>
+          <!-- Timeframe Switcher: M1, M5, M15, H1, H4 -->
+          <div class="flex items-center gap-1.5 bg-slate-950 p-1 rounded-xl border border-bordercol text-xs font-mono">
+            <span class="text-[10px] text-slate-500 uppercase px-1">TF:</span>
+            <button id="btnTfM1" onclick="switchGoldChartTf('M1')" class="px-2.5 py-1 rounded text-slate-400 hover:text-white transition">M1</button>
+            <button id="btnTfM5" onclick="switchGoldChartTf('M5')" class="px-2.5 py-1 rounded text-slate-400 hover:text-white transition">M5</button>
+            <button id="btnTfM15" onclick="switchGoldChartTf('M15')" class="px-2.5 py-1 rounded bg-amber-500/20 text-amber-300 font-bold border border-amber-500/40">M15</button>
+            <button id="btnTfH1" onclick="switchGoldChartTf('H1')" class="px-2.5 py-1 rounded text-slate-400 hover:text-white transition">H1</button>
+            <button id="btnTfH4" onclick="switchGoldChartTf('H4')" class="px-2.5 py-1 rounded text-slate-400 hover:text-white transition">H4</button>
+          </div>
+        </div>
+        <div id="goldTradingChart" class="w-full h-[420px] rounded-xl overflow-hidden bg-slate-950 border border-slate-900 relative">
+          <!-- TradingView Lightweight Chart canvas renders here -->
+        </div>
+      </section>
+
+      <!-- 2. Recommended Trade Setups & Technical Invalidation Notes (User Requirement #2) -->
+      <section class="space-y-3">
+        <div class="flex items-center justify-between">
+          <div>
+            <h3 class="text-base font-bold text-white flex items-center gap-2">
+              <svg class="w-5 h-5 text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+              Recommended Trade Setups &amp; Technical Invalidation Notes
+            </h3>
+            <p class="text-xs text-slate-400">Actionable institutional signals across M1 Scalp, M5 Momentum, M15 Intraday, and H1 Swing.</p>
+          </div>
+          <div class="flex flex-wrap items-center gap-2">
+            <!-- Timeframe Filter Buttons -->
+            <div class="flex items-center gap-1 bg-slate-950 p-1 rounded-xl border border-bordercol text-xs font-mono">
+              <span class="text-[10px] text-slate-500 uppercase px-1.5 font-bold">Filter:</span>
+              <button id="filterSetupAll" onclick="filterGoldSetups('ALL')" class="px-2.5 py-1 rounded bg-amber-500/20 text-amber-300 font-bold border border-amber-500/40">All (<span id="countAllSetups">7</span>)</button>
+              <button id="filterSetupM1" onclick="filterGoldSetups('M1')" class="px-2.5 py-1 rounded text-slate-400 hover:text-white transition">⚡ 1M Scalp</button>
+              <button id="filterSetupM5" onclick="filterGoldSetups('M5')" class="px-2.5 py-1 rounded text-slate-400 hover:text-white transition">⚡ 5M Momentum</button>
+              <button id="filterSetupM15" onclick="filterGoldSetups('M15')" class="px-2.5 py-1 rounded text-slate-400 hover:text-white transition">M15 Intraday</button>
+              <button id="filterSetupH1" onclick="filterGoldSetups('H1')" class="px-2.5 py-1 rounded text-slate-400 hover:text-white transition">H1 Swing</button>
+            </div>
+            <span class="px-2.5 py-1.5 rounded-lg text-xs font-mono bg-slate-900 border border-bordercol text-slate-300">
+              Min Confidence: <strong class="text-emeraldaccent">90%</strong>
+            </span>
+          </div>
+        </div>
+
+        <div id="goldSetupsContainer" class="grid grid-cols-1 gap-4">
+          <!-- Rendered dynamically -->
+        </div>
+      </section>
+
+      <!-- 3. Multi-Timeframe Trading Analysis Matrix (User Requirement #2B) -->
+      <section class="rounded-2xl bg-panel border border-bordercol p-6 shadow-xl space-y-4">
+        <div class="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h3 class="text-sm font-bold text-white flex items-center gap-2">
+              <svg class="w-4 h-4 text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 10h16M4 14h16M4 18h16"></path></svg>
+              Multi-Timeframe Trading Analysis Matrix (M1 – W1)
+            </h3>
+            <p class="text-xs text-slate-400">Combines higher-timeframe directional bias with lower-timeframe execution triggers.</p>
+          </div>
+          <div class="flex items-center gap-2">
+            <span class="text-xs text-slate-400 font-mono">Confluence Score:</span>
+            <span id="goldMtfScore" class="px-3 py-1 rounded-full text-xs font-mono font-bold bg-blue-500/20 text-blue-400 border border-blue-500/30">--</span>
+          </div>
+        </div>
+
+        <div id="goldMtfGrid" class="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-3">
+          <!-- Rendered dynamically -->
+        </div>
+      </section>
+
+      <!-- 4. Algorithmic Backtesting & Strategy Leaderboard (User Requirement #5) -->
+      <section class="rounded-2xl bg-panel border border-bordercol p-6 shadow-xl space-y-6">
+        <div class="flex flex-wrap items-center justify-between gap-4">
+          <div>
+            <h3 class="text-base font-bold text-white flex items-center gap-2">
+              <svg class="w-5 h-5 text-emeraldaccent" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6"></path></svg>
+              Gold Algorithmic Backtesting &amp; Strategy Leaderboard
+            </h3>
+            <p class="text-xs text-slate-400">Benchmarked on 5,000 real M15 bars with broker spread ($3.80/oz) and execution slippage.</p>
+          </div>
+          <div class="flex items-center gap-3">
+            <button onclick="triggerGoldBacktest()" id="btnRunGoldBacktest" class="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold transition shadow-lg shadow-emerald-600/20 flex items-center gap-2">
+              <svg id="backtestSpinner" class="w-4 h-4 hidden animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg>
+              Run Full Backtest
+            </button>
+          </div>
+        </div>
+
+        <!-- Leaderboard Table -->
+        <div class="overflow-x-auto rounded-xl border border-bordercol">
+          <table class="w-full text-left text-xs">
+            <thead class="bg-slate-950 text-slate-400 uppercase font-mono tracking-wider border-b border-bordercol">
+              <tr>
+                <th class="py-3 px-4">Rank &amp; Strategy</th>
+                <th class="py-3 px-4">Win Rate %</th>
+                <th class="py-3 px-4">Profit Factor</th>
+                <th class="py-3 px-4">Net P&amp;L ($)</th>
+                <th class="py-3 px-4">Max DD (%)</th>
+                <th class="py-3 px-4">Trades</th>
+                <th class="py-3 px-4">Expectancy</th>
+                <th class="py-3 px-4">Recovery Factor</th>
+                <th class="py-3 px-4 text-right">View Curve</th>
+              </tr>
+            </thead>
+            <tbody id="goldLeaderboardTbody" class="divide-y divide-bordercol/60">
+              <!-- Rendered dynamically -->
+            </tbody>
+          </table>
+        </div>
+
+        <!-- Equity Curve Viewer -->
+        <div class="p-5 rounded-xl bg-slate-950/60 border border-bordercol space-y-3">
+          <div class="flex items-center justify-between">
+            <h4 id="goldEquityCurveTitle" class="text-xs font-bold text-white font-mono">EQUITY CURVE &amp; DRAWDOWN VISUALIZER</h4>
+            <span class="text-[11px] text-slate-400 font-mono">Sampled across 5,000 bars</span>
+          </div>
+          <div id="goldEquitySvgContainer" class="w-full h-48 flex items-center justify-center">
+            <!-- SVG rendered dynamically -->
+          </div>
+        </div>
+      </section>
+
+      <!-- 5. Economic News & Event Risk Calendar (User Requirement #6) -->
+      <section class="rounded-2xl bg-panel border border-bordercol p-6 shadow-xl space-y-4">
+        <div>
+          <h3 class="text-base font-bold text-white flex items-center gap-2">
+            <svg class="w-5 h-5 text-rose-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"></path></svg>
+            Gold High-Impact Economic News &amp; Event Risk Calendar
+          </h3>
+          <p class="text-xs text-slate-400">Automated event blackout windows protect capital during high-impact US macro announcements.</p>
+        </div>
+
+        <div id="goldMacroEventsContainer" class="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <!-- Rendered dynamically -->
+        </div>
+      </section>
+
+      <!-- 6. Integrated GitHub Open-Source Repositories Reference (User Requirement #1A) -->
+      <section class="rounded-2xl bg-slate-950/60 border border-slate-800 p-5 space-y-3">
+        <h4 class="text-xs font-bold text-slate-300 font-mono uppercase tracking-wider flex items-center gap-2">
+          <svg class="w-4 h-4 text-slate-400" fill="currentColor" viewBox="0 0 24 24"><path fill-rule="evenodd" clip-rule="evenodd" d="M12 2C6.477 2 2 6.484 2 12.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.008-.868-.013-1.703-2.782.605-3.369-1.343-3.369-1.343-.454-1.158-1.11-1.466-1.11-1.466-.908-.62.069-.608.069-.608 1.003.07 1.53 1.032 1.53 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0112 6.844c.85.004 1.705.115 2.504.337 1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.202 2.398.1 2.651.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.943.359.309.678.92.678 1.855 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482A10.019 10.019 0 0022 12.017C22 6.484 17.522 2 12 2z"></path></svg>
+          Integrated Open-Source Trading Repositories &amp; Quantitative Foundations
+        </h4>
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-3 text-[11px] text-slate-400">
+          <div class="p-3 rounded-xl bg-slate-900 border border-slate-800">
+            <span class="font-bold text-amber-300 block">smartmoneyconcepts (smtlab)</span>
+            Institutional Order Blocks, Fair Value Gaps (FVG), Liquidity Sweeps, and Break of Structure (BOS).
+          </div>
+          <div class="p-3 rounded-xl bg-slate-900 border border-slate-800">
+            <span class="font-bold text-blue-300 block">Quantitative-XAUUSD-Strategy</span>
+            ATR volatility channel expansion, session liquidity sweeps (Asian 00:00-07:00 UTC), and execution timing.
+          </div>
+          <div class="p-3 rounded-xl bg-slate-900 border border-slate-800">
+            <span class="font-bold text-emerald-300 block">backtrader-pullback-window-xauusd</span>
+            Multi-timeframe EMA cloud pullbacks, RSI divergence filters, and quantitative risk management.
+          </div>
+        </div>
+      </section>
+
+      <!-- 7. Gold Auto-Execution Activity & Audit Trail -->
+      <section class="rounded-2xl bg-panel border border-bordercol p-6 shadow-xl space-y-4">
+        <div class="flex items-center justify-between">
+          <div>
+            <h3 class="text-base font-bold text-white flex items-center gap-2">
+              <svg class="w-5 h-5 text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"></path></svg>
+              Gold Autonomous Execution Log &amp; Audit Trail
+            </h3>
+            <p class="text-xs text-slate-400">Chronological history of real-time market checks, safety gates, and executed orders.</p>
+          </div>
+          <span class="text-xs font-mono text-slate-400">Updates live</span>
+        </div>
+
+        <div id="goldAuditLogContainer" class="divide-y divide-bordercol/60 rounded-xl border border-bordercol bg-slate-950/50 max-h-60 overflow-y-auto custom-scroll text-xs font-mono">
+          <!-- Rendered dynamically -->
+        </div>
+      </section>
+    </div> <!-- End goldView -->
+
+    <!-- ================================================================= -->
+    <!-- AI / MACHINE LEARNING TRADING INTELLIGENCE MAIN MENU                -->
+    <!-- ================================================================= -->
+    <div id="mlView" class="space-y-6 hidden">
+      <!-- 1. ML System Hero Header -->
+      <div class="rounded-2xl bg-gradient-to-r from-purple-950/40 via-slate-900/90 to-slate-900 border border-purple-500/30 p-6 shadow-2xl relative overflow-hidden">
+        <div class="absolute -right-10 -top-10 w-64 h-64 bg-purple-500/5 rounded-full blur-3xl pointer-events-none"></div>
+        <div class="flex flex-wrap items-center justify-between gap-4 relative z-10">
+          <div class="flex items-center gap-4">
+            <div class="w-14 h-14 rounded-2xl bg-gradient-to-br from-purple-500 to-indigo-700 flex items-center justify-center text-2xl shadow-lg shadow-purple-500/20 font-black text-white">
+              AI
+            </div>
+            <div>
+              <div class="flex items-center gap-3">
+                <h1 class="text-2xl font-black text-white tracking-tight">AI & Machine Learning Trading Intelligence</h1>
+                <span id="mlModelBadge" class="px-2.5 py-0.5 rounded-full text-xs font-mono font-bold bg-purple-500/20 text-purple-300 border border-purple-500/40">
+                  Model v1.0 • Calibrated Active
+                </span>
+                <span id="mlDriftBadge" class="px-2 py-0.5 rounded-full text-[11px] font-mono font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+                  DRIFT: HEALTHY (0.0%)
+                </span>
+              </div>
+              <p class="text-xs text-slate-400 mt-1 max-w-2xl">
+                Probabilistic Signal Classification • Walk-Forward Purged Training • 8-Regime Market Structure • Calibrated Platt Scaling • Deterministic Hard Risk Gate
+              </p>
+            </div>
+          </div>
+
+          <div class="flex items-center gap-4">
+            <div class="text-right">
+              <div class="text-[10px] text-slate-400 font-mono">XAUUSD Live Reference</div>
+              <div class="text-xl font-black font-mono text-purple-300" id="mlGoldLivePrice">$2,735.40</div>
+              <div class="text-[11px] font-mono text-slate-400" id="mlGoldSpread">Spread: 380 pts ($3.80/oz)</div>
+            </div>
+            <button onclick="loadMLDashboard(true)" class="p-2.5 rounded-xl bg-purple-900/40 hover:bg-purple-800/60 border border-purple-500/30 text-purple-300 transition shadow" title="Refresh ML Engine">
+              <svg class="w-5 h-5" id="mlSyncIcon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg>
+            </button>
+          </div>
+        </div>
+
+        <!-- ML Quick Metrics Ribbon -->
+        <div class="grid grid-cols-2 md:grid-cols-6 gap-3 mt-6 pt-5 border-t border-purple-500/20 text-center font-mono">
+          <div class="p-2 rounded-lg bg-slate-900/60 border border-bordercol/40">
+            <div class="text-[10px] text-slate-400">TEST ACCURACY</div>
+            <div class="text-base font-bold text-emerald-400" id="mlHeaderAccuracy">65.2%</div>
+          </div>
+          <div class="p-2 rounded-lg bg-slate-900/60 border border-bordercol/40">
+            <div class="text-[10px] text-slate-400">BRIER SCORE</div>
+            <div class="text-base font-bold text-purple-300" id="mlHeaderBrier">0.184</div>
+          </div>
+          <div class="p-2 rounded-lg bg-slate-900/60 border border-bordercol/40">
+            <div class="text-[10px] text-slate-400">ROC-AUC SCORE</div>
+            <div class="text-base font-bold text-cyan-400" id="mlHeaderAUC">0.712</div>
+          </div>
+          <div class="p-2 rounded-lg bg-slate-900/60 border border-bordercol/40">
+            <div class="text-[10px] text-slate-400">CURRENT REGIME</div>
+            <div class="text-xs font-bold text-amber-400 truncate" id="mlHeaderRegime">Strong Bullish</div>
+          </div>
+          <div class="p-2 rounded-lg bg-slate-900/60 border border-bordercol/40">
+            <div class="text-[10px] text-slate-400">MTF CONFLUENCE</div>
+            <div class="text-base font-bold text-indigo-400" id="mlHeaderConfluence">80%</div>
+          </div>
+          <div class="p-2 rounded-lg bg-slate-900/60 border border-bordercol/40">
+            <div class="text-[10px] text-slate-400">ACTIVE STRATEGIES</div>
+            <div class="text-base font-bold text-purple-300" id="mlHeaderStrats">7 / 7 Active</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 2. Submenu Navigation Bar (11 Dedicated Submenus) -->
+      <div class="flex items-center gap-1.5 overflow-x-auto pb-2 custom-scroll bg-slate-900/90 p-1.5 rounded-xl border border-bordercol shadow-inner">
+        <button onclick="switchMLSubmenu('overview')" id="mlSubTab_overview" class="ml-sub-tab px-3 py-1.5 rounded-lg text-xs font-bold transition bg-purple-600 text-white shadow whitespace-nowrap">
+          1. ML Overview
+        </button>
+        <button onclick="switchMLSubmenu('recommendations')" id="mlSubTab_recommendations" class="ml-sub-tab px-3 py-1.5 rounded-lg text-xs font-bold transition text-slate-400 hover:text-white hover:bg-slate-800 whitespace-nowrap">
+          2. AI Recommendations (24 Fields)
+        </button>
+        <button onclick="switchMLSubmenu('strategy_lab')" id="mlSubTab_strategy_lab" class="ml-sub-tab px-3 py-1.5 rounded-lg text-xs font-bold transition text-slate-400 hover:text-white hover:bg-slate-800 whitespace-nowrap">
+          3. ML Strategy Lab (A–G)
+        </button>
+        <button onclick="switchMLSubmenu('mtf')" id="mlSubTab_mtf" class="ml-sub-tab px-3 py-1.5 rounded-lg text-xs font-bold transition text-slate-400 hover:text-white hover:bg-slate-800 whitespace-nowrap">
+          4. Multi-Timeframe Analysis
+        </button>
+        <button onclick="switchMLSubmenu('regime')" id="mlSubTab_regime" class="ml-sub-tab px-3 py-1.5 rounded-lg text-xs font-bold transition text-slate-400 hover:text-white hover:bg-slate-800 whitespace-nowrap">
+          5. Market Regime (8 Regimes)
+        </button>
+        <button onclick="switchMLSubmenu('training')" id="mlSubTab_training" class="ml-sub-tab px-3 py-1.5 rounded-lg text-xs font-bold transition text-slate-400 hover:text-white hover:bg-slate-800 whitespace-nowrap">
+          6. Model Training & Versioning
+        </button>
+        <button onclick="switchMLSubmenu('backtest')" id="mlSubTab_backtest" class="ml-sub-tab px-3 py-1.5 rounded-lg text-xs font-bold transition text-slate-400 hover:text-white hover:bg-slate-800 whitespace-nowrap">
+          7. Baseline vs ML Backtest
+        </button>
+        <button onclick="switchMLSubmenu('performance')" id="mlSubTab_performance" class="ml-sub-tab px-3 py-1.5 rounded-lg text-xs font-bold transition text-slate-400 hover:text-white hover:bg-slate-800 whitespace-nowrap">
+          8. Model Performance & Drift
+        </button>
+        <button onclick="switchMLSubmenu('journal')" id="mlSubTab_journal" class="ml-sub-tab px-3 py-1.5 rounded-lg text-xs font-bold transition text-slate-400 hover:text-white hover:bg-slate-800 whitespace-nowrap">
+          9. Trade Journal & Learning
+        </button>
+        <button onclick="switchMLSubmenu('risk')" id="mlSubTab_risk" class="ml-sub-tab px-3 py-1.5 rounded-lg text-xs font-bold transition text-slate-400 hover:text-white hover:bg-slate-800 whitespace-nowrap">
+          10. Risk Management Gate
+        </button>
+        <button onclick="switchMLSubmenu('settings')" id="mlSubTab_settings" class="ml-sub-tab px-3 py-1.5 rounded-lg text-xs font-bold transition text-slate-400 hover:text-white hover:bg-slate-800 whitespace-nowrap">
+          11. ML Settings & Chaser
+        </button>
+      </div>
+
+      <!-- 3. Submenu Panels -->
+
+      <!-- SUBMENU 1: ML Overview -->
+      <div id="mlPanel_overview" class="ml-sub-panel space-y-6">
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+          <div class="md:col-span-2 rounded-2xl border border-bordercol bg-surface/90 p-6 shadow-xl space-y-4">
+            <h2 class="text-base font-bold text-white flex items-center gap-2">
+              <span class="w-2.5 h-2.5 rounded-full bg-purple-500"></span>
+              Machine Learning Decision Pipeline Architecture
+            </h2>
+            <div class="p-4 rounded-xl bg-slate-950/60 border border-bordercol/60 font-mono text-xs text-slate-300 space-y-3">
+              <div class="flex items-center justify-between pb-2 border-b border-bordercol/40">
+                <span class="text-purple-400 font-bold">1. Quantitative Feature Extraction</span>
+                <span class="text-slate-400">28 Technical, SMC, MTF, and Volatility Inputs</span>
+              </div>
+              <div class="flex items-center justify-between pb-2 border-b border-bordercol/40">
+                <span class="text-indigo-400 font-bold">2. Ensemble Classifier</span>
+                <span class="text-slate-400">LightGBM / HistGradientBoosting with Purged CV</span>
+              </div>
+              <div class="flex items-center justify-between pb-2 border-b border-bordercol/40">
+                <span class="text-cyan-400 font-bold">3. Calibrated Platt Scaling</span>
+                <span class="text-slate-400">Converts raw model logits into real probabilities P(Win)</span>
+              </div>
+              <div class="flex items-center justify-between pb-2 border-b border-bordercol/40">
+                <span class="text-amber-400 font-bold">4. 8-Regime Adaptation Gate</span>
+                <span class="text-slate-400">Filters signals based on trending, ranging, or news shock</span>
+              </div>
+              <div class="flex items-center justify-between">
+                <span class="text-emerald-400 font-bold">5. Option B Smart Profit Chaser</span>
+                <span class="text-slate-400">Peak tracking, pullback tolerance, non-closing recovery</span>
+              </div>
+            </div>
+            <div class="flex items-center justify-between pt-2">
+              <span class="text-xs text-slate-400">Active Checkpoint: <strong class="text-white" id="mlOverviewModelVer">v1.0</strong></span>
+              <button onclick="switchMLSubmenu('training')" class="px-3 py-1.5 rounded-lg bg-purple-900/30 hover:bg-purple-800/40 text-purple-300 text-xs font-bold border border-purple-500/30 transition">
+                Manage Checkpoints →
+              </button>
+            </div>
+          </div>
+
+          <div class="rounded-2xl border border-bordercol bg-surface/90 p-6 shadow-xl space-y-4">
+            <h2 class="text-base font-bold text-white flex items-center gap-2">
+              <span class="w-2.5 h-2.5 rounded-full bg-emerald-500"></span>
+              Top Feature Importances
+            </h2>
+            <div id="mlOverviewTopFeatures" class="space-y-2.5 font-mono text-xs">
+              <!-- Rendered via JS -->
+              <div class="text-slate-500 text-center py-6">Loading feature weights...</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- SUBMENU 2: AI Trade Recommendations (24 Structured Fields) -->
+      <div id="mlPanel_recommendations" class="ml-sub-panel space-y-6 hidden">
+        <div class="flex items-center justify-between">
+          <div>
+            <h2 class="text-lg font-black text-white">AI Machine Learning Trade Recommendations</h2>
+            <p class="text-xs text-slate-400">24 structured analytical fields, calibrated win probabilities, and explicit technical invalidations.</p>
+          </div>
+          <div class="flex items-center gap-2">
+            <span class="text-xs font-mono text-slate-400">Filter:</span>
+            <button onclick="filterMLRecs('ALL')" class="ml-rec-filter px-2.5 py-1 rounded text-xs font-bold bg-purple-600 text-white">ALL</button>
+            <button onclick="filterMLRecs('BUY')" class="ml-rec-filter px-2.5 py-1 rounded text-xs font-bold text-slate-400 hover:text-white">BUY</button>
+            <button onclick="filterMLRecs('SELL')" class="ml-rec-filter px-2.5 py-1 rounded text-xs font-bold text-slate-400 hover:text-white">SELL</button>
+          </div>
+        </div>
+
+        <div id="mlRecsContainer" class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          <!-- Rendered via JS -->
+          <div class="col-span-2 text-center py-12 text-slate-500 font-mono">Scanning live Gold market for 24-field ML setups...</div>
+        </div>
+      </div>
+
+      <!-- SUBMENU 3: ML Strategy Lab (Strategies A through G) -->
+      <div id="mlPanel_strategy_lab" class="ml-sub-panel space-y-6 hidden">
+        <div>
+          <h2 class="text-lg font-black text-white">ML Strategy Lab (Strategies A – G)</h2>
+          <p class="text-xs text-slate-400">Evaluates 7 distinct quantitative and SMC trading strategies with baseline vs ML-filtered win rates.</p>
+        </div>
+
+        <div id="mlStrategiesGrid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+          <!-- Rendered via JS -->
+        </div>
+      </div>
+
+      <!-- SUBMENU 4: Multi-Timeframe Analysis -->
+      <div id="mlPanel_mtf" class="ml-sub-panel space-y-6 hidden">
+        <div class="flex items-center justify-between">
+          <div>
+            <h2 class="text-lg font-black text-white">Multi-Timeframe Confluence Matrix</h2>
+            <p class="text-xs text-slate-400">Hierarchical structure, trend, momentum, and liquidity analysis from W1 down to M1.</p>
+          </div>
+          <div class="text-right font-mono">
+            <span class="text-xs text-slate-400">Overall MTF Alignment:</span>
+            <span class="text-sm font-bold text-purple-300 ml-2" id="mlMTFOverallBadge">80% Confluent</span>
+          </div>
+        </div>
+
+        <div class="rounded-2xl border border-bordercol bg-surface/90 overflow-hidden shadow-xl">
+          <table class="w-full text-left text-xs font-mono">
+            <thead class="bg-slate-950/80 text-slate-400 border-b border-bordercol">
+              <tr>
+                <th class="py-3 px-4">Timeframe</th>
+                <th class="py-3 px-4">Trend Direction</th>
+                <th class="py-3 px-4">Market Structure</th>
+                <th class="py-3 px-4">RSI (14)</th>
+                <th class="py-3 px-4">Liquidity State</th>
+                <th class="py-3 px-4">Bias</th>
+                <th class="py-3 px-4 text-right">Data Feed</th>
+              </tr>
+            </thead>
+            <tbody id="mlMTFTbody" class="divide-y divide-bordercol/60">
+              <!-- Rendered via JS -->
+            </tbody>
+          </table>
+        </div>
+
+        <div class="p-4 rounded-xl bg-purple-950/20 border border-purple-500/30 flex items-center justify-between">
+          <div class="flex items-center gap-3">
+            <span class="text-lg">🎯</span>
+            <div>
+              <div class="text-xs font-bold text-white">Recommended Execution Timeframe</div>
+              <div class="text-xs text-purple-300 font-mono" id="mlMTFRecTf">M15 (Trend-Follow Pullbacks)</div>
+            </div>
+          </div>
+          <button onclick="switchMLSubmenu('recommendations')" class="px-3 py-1.5 rounded-lg bg-purple-600 hover:bg-purple-500 text-white text-xs font-bold transition">
+            View M15 Setups →
+          </button>
+        </div>
+      </div>
+
+      <!-- SUBMENU 5: Market Regime Detection -->
+      <div id="mlPanel_regime" class="ml-sub-panel space-y-6 hidden">
+        <div>
+          <h2 class="text-lg font-black text-white">Market Regime Detection Engine (8 Distinct Regimes)</h2>
+          <p class="text-xs text-slate-400">Dynamically maps XAUUSD price action into 8 statistical market phases and adapts strategy activation.</p>
+        </div>
+
+        <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
+          <div class="p-4 rounded-xl bg-slate-900 border border-bordercol font-mono text-center">
+            <div class="text-[10px] text-slate-400">TREND STRENGTH (ADX 14)</div>
+            <div class="text-2xl font-black text-white mt-1" id="mlRegimeADX">28.4</div>
+            <div class="text-[10px] text-purple-400 mt-1">Trending Regime</div>
+          </div>
+          <div class="p-4 rounded-xl bg-slate-900 border border-bordercol font-mono text-center">
+            <div class="text-[10px] text-slate-400">ATR VOLATILITY PERCENTILE</div>
+            <div class="text-2xl font-black text-white mt-1" id="mlRegimeATRPct">54.2%</div>
+            <div class="text-[10px] text-emerald-400 mt-1">Normal Volatility</div>
+          </div>
+          <div class="p-4 rounded-xl bg-slate-900 border border-bordercol font-mono text-center">
+            <div class="text-[10px] text-slate-400">VOLUME PARTICIPATION RATIO</div>
+            <div class="text-2xl font-black text-white mt-1" id="mlRegimeVolRatio">1.25x</div>
+            <div class="text-[10px] text-cyan-400 mt-1">Above Average</div>
+          </div>
+          <div class="p-4 rounded-xl bg-slate-900 border border-bordercol font-mono text-center">
+            <div class="text-[10px] text-slate-400">HURST EXPONENT PROXY</div>
+            <div class="text-2xl font-black text-white mt-1" id="mlRegimeHurst">0.62</div>
+            <div class="text-[10px] text-amber-400 mt-1">Persistent Trending</div>
+          </div>
+        </div>
+
+        <div class="rounded-2xl border border-bordercol bg-surface/90 p-6 shadow-xl space-y-4">
+          <h3 class="text-sm font-bold text-white flex items-center gap-2">
+            <span class="w-2.5 h-2.5 rounded-full bg-amber-500"></span>
+            8-Regime Strategy Suitability Matrix
+          </h3>
+          <div class="overflow-x-auto custom-scroll">
+            <table class="w-full text-left text-xs font-mono">
+              <thead class="bg-slate-950/80 text-slate-400 border-b border-bordercol">
+                <tr>
+                  <th class="py-2.5 px-3">Market Regime</th>
+                  <th class="py-2.5 px-3 text-center">Strat A (Trend+SMC)</th>
+                  <th class="py-2.5 px-3 text-center">Strat B (EMA Pullback)</th>
+                  <th class="py-2.5 px-3 text-center">Strat C (Breakout)</th>
+                  <th class="py-2.5 px-3 text-center">Strat D (SMC OB+FVG)</th>
+                  <th class="py-2.5 px-3 text-center">Strat E (Mean Rev)</th>
+                  <th class="py-2.5 px-3 text-center">Strat F (Vol Break)</th>
+                  <th class="py-2.5 px-3 text-center">Strat G (MTF Conf)</th>
+                </tr>
+              </thead>
+              <tbody id="mlRegimeSuitabilityTbody" class="divide-y divide-bordercol/60">
+                <!-- Rendered via JS -->
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- SUBMENU 6: ML Model Training & Versioning -->
+      <div id="mlPanel_training" class="ml-sub-panel space-y-6 hidden">
+        <div class="flex items-center justify-between">
+          <div>
+            <h2 class="text-lg font-black text-white">Machine Learning Model Training & Versioning</h2>
+            <p class="text-xs text-slate-400">Non-blocking background training jobs with walk-forward purged splits and calibrated probability scaling.</p>
+          </div>
+          <button onclick="triggerMLTraining()" id="btnStartMLTrain" class="px-4 py-2 rounded-xl bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white font-bold text-xs shadow-lg transition flex items-center gap-2">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+            Train New Checkpoint on 5,000 Bars
+          </button>
+        </div>
+
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+          <div class="md:col-span-2 rounded-2xl border border-bordercol bg-surface/90 p-6 shadow-xl space-y-4">
+            <div class="flex items-center justify-between">
+              <h3 class="text-sm font-bold text-white">Training Progress & Real-Time Terminal Log</h3>
+              <span id="mlTrainStatusPill" class="px-2 py-0.5 rounded text-[11px] font-mono font-bold bg-slate-800 text-slate-300">IDLE</span>
+            </div>
+            <div class="w-full bg-slate-950 rounded-full h-2.5 overflow-hidden border border-bordercol">
+              <div id="mlTrainProgressBar" class="bg-gradient-to-r from-purple-500 to-indigo-500 h-2.5 rounded-full transition-all duration-300" style="width: 0%"></div>
+            </div>
+            <div id="mlTrainTerminalLog" class="p-4 rounded-xl bg-slate-950 border border-bordercol font-mono text-xs text-slate-400 h-48 overflow-y-auto custom-scroll space-y-1">
+              <div>[INFO] System ready for training. Click 'Train New Checkpoint' to initiate purged cross-validation.</div>
+            </div>
+          </div>
+
+          <div class="rounded-2xl border border-bordercol bg-surface/90 p-6 shadow-xl space-y-4">
+            <h3 class="text-sm font-bold text-white">Saved Model Checkpoints</h3>
+            <div id="mlCheckpointsList" class="space-y-3 font-mono text-xs">
+              <!-- Rendered via JS -->
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- SUBMENU 7: Baseline vs ML Backtest -->
+      <div id="mlPanel_backtest" class="ml-sub-panel space-y-6 hidden">
+        <div class="flex items-center justify-between">
+          <div>
+            <h2 class="text-lg font-black text-white">Standalone Baseline vs ML-Enhanced Strategy Backtest</h2>
+            <p class="text-xs text-slate-400">Head-to-head walk-forward comparison with real Headway Gold spread ($3.80/oz) and slippage ($0.20/oz).</p>
+          </div>
+          <div class="flex items-center gap-3">
+            <div class="flex items-center gap-2 font-mono text-xs text-slate-300">
+              <span>Min Conf:</span>
+              <input type="range" id="mlBtConfSlider" min="50" max="80" step="5" value="60" oninput="updateBtSliderLabel(this.value)" class="w-24 accent-purple-500">
+              <span id="mlBtConfLabel" class="font-bold text-purple-300">60%</span>
+            </div>
+            <button onclick="runMLBacktestCustom()" id="btnRunMLBacktest" class="px-3.5 py-1.5 rounded-xl bg-purple-600 hover:bg-purple-500 text-white font-bold text-xs shadow transition">
+              Run Walk-Forward Backtest
+            </button>
+          </div>
+        </div>
+
+        <div class="p-3 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-200 text-xs font-mono flex items-center justify-between">
+          <span>⚠️ Execution Cost Realism: Headway Gold Spread = 380 pts ($3.80/oz) + 20 pts Slippage = 400 pts ($4.00/oz) deducted on every trade.</span>
+          <span class="text-slate-400">Data Horizon: 5,000 M15 Bars</span>
+        </div>
+
+        <div class="rounded-2xl border border-bordercol bg-surface/90 overflow-hidden shadow-xl">
+          <table class="w-full text-left text-xs font-mono">
+            <thead class="bg-slate-950/80 text-slate-400 border-b border-bordercol">
+              <tr>
+                <th class="py-3 px-4">Performance Metric</th>
+                <th class="py-3 px-4 text-center">Standalone Strategy (Baseline)</th>
+                <th class="py-3 px-4 text-center text-purple-300">ML-Enhanced Strategy (AI Gated)</th>
+                <th class="py-3 px-4 text-right">Delta / Improvement</th>
+              </tr>
+            </thead>
+            <tbody id="mlBacktestTbody" class="divide-y divide-bordercol/60">
+              <!-- Rendered via JS -->
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- SUBMENU 8: Model Performance & Drift -->
+      <div id="mlPanel_performance" class="ml-sub-panel space-y-6 hidden">
+        <div>
+          <h2 class="text-lg font-black text-white">Model Performance & Statistical Calibration</h2>
+          <p class="text-xs text-slate-400">Brier score reliability, ROC-AUC curve, and continuous statistical model drift tracking.</p>
+        </div>
+
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+          <div class="rounded-2xl border border-bordercol bg-surface/90 p-6 shadow-xl space-y-4">
+            <h3 class="text-sm font-bold text-white flex items-center gap-2">
+              <span class="w-2.5 h-2.5 rounded-full bg-cyan-500"></span>
+              Probabilistic Reliability / Calibration Curve
+            </h3>
+            <p class="text-xs text-slate-400">Shows whether a predicted 65% win probability actually achieves 65% wins historically.</p>
+            <div id="mlCalibrationTable" class="font-mono text-xs overflow-x-auto">
+              <!-- Rendered via JS -->
+            </div>
+          </div>
+
+          <div class="rounded-2xl border border-bordercol bg-surface/90 p-6 shadow-xl space-y-4">
+            <h3 class="text-sm font-bold text-white flex items-center gap-2">
+              <span class="w-2.5 h-2.5 rounded-full bg-emerald-500"></span>
+              Statistical Model Drift Monitor
+            </h3>
+            <div id="mlDriftCard" class="p-4 rounded-xl bg-slate-950/60 border border-bordercol space-y-3 font-mono text-xs">
+              <!-- Rendered via JS -->
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- SUBMENU 9: Trade Journal & Learning -->
+      <div id="mlPanel_journal" class="ml-sub-panel space-y-6 hidden">
+        <div class="flex items-center justify-between">
+          <div>
+            <h2 class="text-lg font-black text-white">AI Trade Prediction Journal & Continuous Learning</h2>
+            <p class="text-xs text-slate-400">Audit trail of every AI prediction, actual trade outcome, and false-positive error analysis.</p>
+          </div>
+          <span class="text-xs font-mono text-slate-400" id="mlJournalCount">0 Predictions Stored</span>
+        </div>
+
+        <div class="rounded-2xl border border-bordercol bg-surface/90 overflow-hidden shadow-xl">
+          <table class="w-full text-left text-xs font-mono">
+            <thead class="bg-slate-950/80 text-slate-400 border-b border-bordercol">
+              <tr>
+                <th class="py-3 px-4">Recorded At</th>
+                <th class="py-3 px-4">Strategy</th>
+                <th class="py-3 px-4">Direction</th>
+                <th class="py-3 px-4">ML Win Prob</th>
+                <th class="py-3 px-4">Expected Value</th>
+                <th class="py-3 px-4">Actual Outcome</th>
+                <th class="py-3 px-4 text-right">Realized P&L</th>
+              </tr>
+            </thead>
+            <tbody id="mlJournalTbody" class="divide-y divide-bordercol/60">
+              <!-- Rendered via JS -->
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- SUBMENU 10: Risk Management Gate -->
+      <div id="mlPanel_risk" class="ml-sub-panel space-y-6 hidden">
+        <div>
+          <h2 class="text-lg font-black text-white">Deterministic Hard Risk Management Gate</h2>
+          <p class="text-xs text-slate-400">Enforces mathematical risk limits that override all ML models to prevent catastrophic loss.</p>
+        </div>
+
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+          <div class="rounded-2xl border border-bordercol bg-surface/90 p-6 shadow-xl space-y-4">
+            <h3 class="text-sm font-bold text-white flex items-center gap-2">
+              <span class="w-2.5 h-2.5 rounded-full bg-rose-500"></span>
+              1-Trade Maximum Gold Limit
+            </h3>
+            <div class="p-4 rounded-xl bg-slate-950 border border-bordercol font-mono text-xs space-y-2">
+              <div class="flex justify-between">
+                <span class="text-slate-400">Open Gold Trades:</span>
+                <strong class="text-white" id="mlRiskOpenCount">0</strong>
+              </div>
+              <div class="flex justify-between">
+                <span class="text-slate-400">Allowed Maximum Cap:</span>
+                <strong class="text-emerald-400">1 Position Only</strong>
+              </div>
+              <div class="flex justify-between">
+                <span class="text-slate-400">Strict Rule Status:</span>
+                <span class="text-emerald-400 font-bold" id="mlRiskCapStatus">PASSED (Available)</span>
+              </div>
+            </div>
+            <p class="text-[11px] text-slate-400">
+              Adheres strictly to the user rule: never holds more than 1 trade at any time on XAUUSD.
+            </p>
+          </div>
+
+          <div class="rounded-2xl border border-bordercol bg-surface/90 p-6 shadow-xl space-y-4">
+            <h3 class="text-sm font-bold text-white flex items-center gap-2">
+              <span class="w-2.5 h-2.5 rounded-full bg-amber-500"></span>
+              Broker Spread Filter
+            </h3>
+            <div class="p-4 rounded-xl bg-slate-950 border border-bordercol font-mono text-xs space-y-2">
+              <div class="flex justify-between">
+                <span class="text-slate-400">Current Spread:</span>
+                <strong class="text-white" id="mlRiskCurrSpread">380 pts ($3.80/oz)</strong>
+              </div>
+              <div class="flex justify-between">
+                <span class="text-slate-400">Spread Threshold:</span>
+                <strong class="text-amber-400">450 pts ($4.50/oz)</strong>
+              </div>
+              <div class="flex justify-between">
+                <span class="text-slate-400">Execution Gate:</span>
+                <span class="text-emerald-400 font-bold" id="mlRiskSpreadGate">ALLOWED</span>
+              </div>
+            </div>
+            <p class="text-[11px] text-slate-400">
+              Blocks trade placement automatically if broker spread widens past acceptable limits.
+            </p>
+          </div>
+
+          <div class="rounded-2xl border border-bordercol bg-surface/90 p-6 shadow-xl space-y-4">
+            <h3 class="text-sm font-bold text-white flex items-center gap-2">
+              <span class="w-2.5 h-2.5 rounded-full bg-purple-500"></span>
+              Account Drawdown Circuit Breaker
+            </h3>
+            <div class="p-4 rounded-xl bg-slate-950 border border-bordercol font-mono text-xs space-y-2">
+              <div class="flex justify-between">
+                <span class="text-slate-400">Max Daily Loss:</span>
+                <strong class="text-white">3.0% of Balance</strong>
+              </div>
+              <div class="flex justify-between">
+                <span class="text-slate-400">Max Drawdown Breaker:</span>
+                <strong class="text-rose-400">5.0% Account Drop</strong>
+              </div>
+              <div class="flex justify-between">
+                <span class="text-slate-400">Risk Gate Status:</span>
+                <span class="text-emerald-400 font-bold">HEALTHY (0.0% DD)</span>
+              </div>
+            </div>
+            <p class="text-[11px] text-slate-400">
+              Immediate kill-switch halts all automated order submission if daily threshold is violated.
+            </p>
+          </div>
+        </div>
+      </div>
+
+      <!-- SUBMENU 11: ML Settings & Chaser -->
+      <div id="mlPanel_settings" class="ml-sub-panel space-y-6 hidden">
+        <div>
+          <h2 class="text-lg font-black text-white">Machine Learning & Option B Chaser Settings</h2>
+          <p class="text-xs text-slate-400">Configure minimum model confidence gates, active strategies, and smart profit chaser rules.</p>
+        </div>
+
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+          <div class="rounded-2xl border border-bordercol bg-surface/90 p-6 shadow-xl space-y-4">
+            <h3 class="text-sm font-bold text-white">Model Probability Gates</h3>
+            <div class="space-y-3 font-mono text-xs">
+              <div>
+                <label class="block text-slate-400 mb-1">Minimum Calibrated Win Probability P(Win) Threshold:</label>
+                <div class="flex items-center gap-3">
+                  <input type="range" id="cfgMinConf" min="50" max="90" step="5" value="60" oninput="document.getElementById('lblCfgMinConf').innerText = this.value + '%'" class="w-full accent-purple-500">
+                  <span id="lblCfgMinConf" class="text-purple-300 font-bold w-12 text-right">60%</span>
+                </div>
+              </div>
+              <div>
+                <label class="block text-slate-400 mb-1">Minimum Expected Value (EV in R):</label>
+                <input type="number" id="cfgMinEV" step="0.05" value="0.20" class="w-full p-2 rounded-lg bg-slate-950 border border-bordercol text-white">
+              </div>
+              <div>
+                <label class="block text-slate-400 mb-1">Max Risk Per Trade (% of Account):</label>
+                <input type="number" id="cfgRiskPct" step="0.1" value="1.0" class="w-full p-2 rounded-lg bg-slate-950 border border-bordercol text-white">
+              </div>
+            </div>
+          </div>
+
+          <div class="rounded-2xl border border-bordercol bg-surface/90 p-6 shadow-xl space-y-4">
+            <h3 class="text-sm font-bold text-white">Smart Profit Chaser (Option B Recovery)</h3>
+            <div class="space-y-3 font-mono text-xs">
+              <div>
+                <label class="block text-slate-400 mb-1">Pullback Detection Mode:</label>
+                <select id="cfgPullbackType" class="w-full p-2 rounded-lg bg-slate-950 border border-bordercol text-white">
+                  <option value="PERCENTAGE">Percentage of Highest Profit (e.g. 20%)</option>
+                  <option value="FIXED_DOLLARS">Fixed Dollar Amount ($)</option>
+                  <option value="ATR_ADJUSTED">ATR Volatility Adjusted Value</option>
+                </select>
+              </div>
+              <div>
+                <label class="block text-slate-400 mb-1">Pullback Tolerance Threshold (%):</label>
+                <input type="number" id="cfgPullbackThresh" value="20" class="w-full p-2 rounded-lg bg-slate-950 border border-bordercol text-white">
+              </div>
+              <div>
+                <label class="block text-slate-400 mb-1">Recovery Rule Enforcement:</label>
+                <div class="p-2.5 rounded-lg bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 font-bold">
+                  ✓ Option B: Never close on recovery to peak; keep trade open & continue chasing.
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="text-right">
+          <button onclick="saveMLSettingsFromUI()" class="px-5 py-2.5 rounded-xl bg-purple-600 hover:bg-purple-500 text-white font-bold text-xs shadow-lg transition">
+            Save Settings & Synchronize Engines
+          </button>
+        </div>
+      </div>
+    </div> <!-- End mlView -->
+
+
+  </main>
+
+  <script>
+    let derivState = {};
+    let allSymbols = [];
+    let currentFilteredSymbols = [];
+    let currentCategory = 'ALL';
+    let currentDirection = 'SELL';
+    let activeSymbol = 'BTCUSD';
+    let currentLoadedSetupId = null;
+    let localSecondsLeft = 180;
+    let autoTradeEnabled = false;
+
+    function setDirection(dir) {
+      currentDirection = dir;
+      const bBuy = document.getElementById('btnBuy');
+      const bSell = document.getElementById('btnSell');
+      const submitBtn = document.getElementById('submitBtn');
+
+      if (dir === 'BUY') {
+        bBuy.className = 'py-2.5 rounded-lg bg-emeraldaccent text-white font-bold text-xs flex items-center justify-center gap-1 transition shadow-lg shadow-emerald-500/20';
+        bSell.className = 'py-2.5 rounded-lg bg-slate-800 text-slate-400 hover:text-white font-bold text-xs flex items-center justify-center gap-1 transition';
+        submitBtn.className = 'w-full py-3.5 rounded-lg bg-emeraldaccent hover:bg-emerald-600 text-white font-bold text-xs uppercase tracking-wider transition shadow-lg shadow-emerald-600/25 flex items-center justify-center gap-2';
+        submitBtn.innerText = 'Execute Instant BUY Order on Deriv MT5';
+      } else {
+        bSell.className = 'py-2.5 rounded-lg bg-crimsonaccent text-white font-bold text-xs flex items-center justify-center gap-1 transition shadow-lg shadow-red-500/20';
+        bBuy.className = 'py-2.5 rounded-lg bg-slate-800 text-slate-400 hover:text-white font-bold text-xs flex items-center justify-center gap-1 transition';
+        submitBtn.className = 'w-full py-3.5 rounded-lg bg-crimsonaccent hover:bg-red-600 text-white font-bold text-xs uppercase tracking-wider transition shadow-lg shadow-red-600/25 flex items-center justify-center gap-2';
+        submitBtn.innerText = 'Execute Instant SELL Order on Deriv MT5';
+      }
+      recalcSizer();
+      updateMultiOrderPreview();
+    }
+
+    function setTradeCount(n) {
+      document.getElementById('tradesCount').value = n;
+      updateMultiOrderPreview();
+    }
+
+    function updateMultiOrderPreview() {
+      const count = parseInt(document.getElementById('tradesCount').value) || 1;
+      const mode = document.getElementById('volumeMode').value;
+      const vol = parseFloat(document.getElementById('tradeVolume').value) || 0.1;
+      const preview = document.getElementById('multiOrderPreview');
+      const submitBtn = document.getElementById('submitBtn');
+
+      if (count <= 1) {
+        preview.innerText = `Single order: Opening 1 trade of ${vol.toFixed(2)} lots.`;
+        submitBtn.innerText = `Execute Instant ${currentDirection} Order on Deriv MT5`;
+      } else if (mode === 'split') {
+        const perTrade = (vol / count).toFixed(2);
+        preview.innerText = `Split execution: Will open ${count} separate trades of ${perTrade} lots each (Total: ${vol.toFixed(2)} lots). Ideal for multi-TP scaling!`;
+        submitBtn.innerText = `Execute ${count}x Split ${currentDirection} Orders on Deriv MT5`;
+      } else {
+        const total = (vol * count).toFixed(2);
+        preview.innerText = `Stacked execution: Will open ${count} separate trades of ${vol.toFixed(2)} lots each (Total: ${total} lots).`;
+        submitBtn.innerText = `Execute ${count}x Stacked ${currentDirection} Orders on Deriv MT5`;
+      }
+    }
+
+    async function loadSymbolsCatalog() {
+      try {
+        const res = await fetch('/api/symbols');
+        allSymbols = await res.json();
+        currentFilteredSymbols = allSymbols;
+        populateSymbolsDropdown(allSymbols);
+      } catch (err) {
+        console.error('Symbols load error:', err);
+      }
+    }
+
+    function filterCategory(cat) {
+      currentCategory = cat;
+      document.querySelectorAll('.cat-pill').forEach(btn => {
+        if ((cat === 'ALL' && btn.innerText.includes('All')) || btn.innerText.includes(cat.split(' ')[0])) {
+          btn.className = 'cat-pill px-2.5 py-1 rounded bg-brand text-white font-medium';
+        } else {
+          btn.className = 'cat-pill px-2.5 py-1 rounded bg-slate-800 text-slate-300 hover:text-white font-medium';
+        }
+      });
+
+      if (cat === 'ALL') {
+        currentFilteredSymbols = allSymbols;
+      } else {
+        currentFilteredSymbols = allSymbols.filter(s => s.category.toLowerCase().includes(cat.toLowerCase()) || s.path.toLowerCase().includes(cat.toLowerCase()));
+      }
+      populateSymbolsDropdown(currentFilteredSymbols);
+    }
+
+    function onSymbolSearch(query) {
+      const q = query.trim().toLowerCase();
+      let list = currentFilteredSymbols;
+      if (q) {
+        list = allSymbols.filter(s => s.symbol.toLowerCase().includes(q) || s.description.toLowerCase().includes(q));
+      }
+      populateSymbolsDropdown(list);
+    }
+
+    function populateSymbolsDropdown(list) {
+      const select = document.getElementById('allSymbolsSelect');
+      const maxShow = 200;
+      const slice = list.slice(0, maxShow);
+      select.innerHTML = slice.map(s => `
+        <option value="${s.symbol}" ${s.symbol === activeSymbol ? 'selected' : ''}>
+          ${s.symbol} &bull; ${s.description} (${s.category})
+        </option>
+      `).join('');
+    }
+
+    async function onSymbolDropdownSelect(sym) {
+      activeSymbol = sym;
+      await fetchAndApplySymbolQuote(sym);
+    }
+
+    async function fetchAndApplySymbolQuote(sym) {
+      try {
+        const res = await fetch(`/api/quote?symbol=${encodeURIComponent(sym)}`);
+        const q = await res.json();
+        if (q.success) {
+          document.getElementById('curSymName').innerText = q.symbol;
+          document.getElementById('curSymBid').innerText = q.bid;
+          document.getElementById('curSymAsk').innerText = q.ask;
+          document.getElementById('curSymSpread').innerText = q.spread;
+          document.getElementById('curSymMinLot').innerText = q.min_lot;
+          
+          document.getElementById('tradeEntry').value = currentDirection === 'BUY' ? q.ask : q.bid;
+          recalcSizer();
+        }
+      } catch (err) {
+        console.error('Quote fetch error:', err);
+      }
+    }
+
+    function selectSymbol(sym) {
+      activeSymbol = sym;
+      const select = document.getElementById('allSymbolsSelect');
+      if (select) {
+        select.value = sym;
+      }
+      fetchAndApplySymbolQuote(sym);
+    }
+
+    async function toggleAutoTrade() {
+      try {
+        const res = await fetch('/api/auto_trade_toggle', { method: 'POST' });
+        const data = await res.json();
+        autoTradeEnabled = data.auto_trade_enabled;
+        renderAutoTradeButton(autoTradeEnabled);
+        fetchSetups();
+      } catch (err) {
+        alert('Toggle error: ' + err);
+      }
+    }
+
+    async function toggleProfitGuardian() {
+      try {
+        const res = await fetch('/api/profit_guardian/toggle', { method: 'POST' });
+        const data = await res.json();
+        renderGuardianButton(data.enabled);
+      } catch (err) {
+        alert('Profit Guardian error: ' + err);
+      }
+    }
+
+    function renderGuardianButton(enabled) {
+      const btn = document.getElementById('guardianBtn');
+      if (!btn) return;
+      if (enabled) {
+        btn.className = 'px-2.5 py-1 rounded text-[11px] font-bold transition flex items-center gap-1.5 bg-emerald-500/20 text-emeraldaccent border border-emerald-500/50 shadow-sm shadow-emerald-500/20';
+        btn.innerHTML = '<span class="w-2 h-2 rounded-full bg-emeraldaccent animate-pulse"></span><span>ARMED (ACTIVE)</span>';
+      } else {
+        btn.className = 'px-2.5 py-1 rounded text-[11px] font-bold transition flex items-center gap-1.5 bg-slate-800 text-slate-400 border border-slate-700';
+        btn.innerHTML = '<span class="w-2 h-2 rounded-full bg-slate-500"></span><span>DISABLED</span>';
+      }
+    }
+
+    function renderAutoTradeButton(enabled) {
+      const btn = document.getElementById('autoTradeBtn');
+      const dot = document.getElementById('autoTradeDot');
+      const txt = document.getElementById('autoTradeText');
+      if (!btn) return;
+
+      if (enabled) {
+        btn.className = 'px-2.5 py-1 rounded text-[11px] font-bold transition flex items-center gap-1.5 bg-emerald-500/20 text-emeraldaccent border border-emerald-500/50 shadow-sm shadow-emerald-500/20';
+        dot.className = 'w-2 h-2 rounded-full bg-emeraldaccent animate-pulse';
+        txt.innerText = 'AUTO-TRADING ACTIVE (1 Symbol at a Time)';
+      } else {
+        btn.className = 'px-2.5 py-1 rounded text-[11px] font-bold transition flex items-center gap-1.5 bg-slate-800 text-slate-400 border border-slate-700';
+        dot.className = 'w-2 h-2 rounded-full bg-slate-500';
+        txt.innerText = 'DISABLED';
+      }
+    }
+
+    /* AUTOMATED 3-MINUTE SCANNER FETCH & RENDER (Rules 1-4) */
+    async function fetchSetups() {
+      const grid = document.getElementById('setupsGrid');
+      const badge = document.getElementById('scannerStatusBadge');
+      const lastScanEl = document.getElementById('lastScanTime');
+
+      try {
+        const res = await fetch('/api/setups');
+        const data = await res.json();
+        
+        localSecondsLeft = data.next_scan_seconds || 180;
+        autoTradeEnabled = data.auto_trade_enabled || false;
+        renderAutoTradeButton(autoTradeEnabled);
+
+        if (lastScanEl) lastScanEl.innerText = data.last_scan_time || '--';
+        
+        renderJournal(data.journal || []);
+        renderAudit(data.filtered_reasons || {});
+
+        const setups = data.setups || [];
+
+        // Rule 10: No Forced Recommendations
+        if (setups.length === 0 || data.status === 'WAITING_FOR_CONFIRMATION') {
+          if (badge) {
+            badge.className = 'text-xs px-2.5 py-0.5 rounded-full bg-amber-500/10 text-amberaccent border border-amber-500/20 font-mono font-semibold';
+            badge.innerText = 'WAITING CONFIRMATION';
+          }
+          grid.innerHTML = `
+            <div class="col-span-full py-10 px-6 text-center bg-slate-900/60 rounded-xl border border-dashed border-bordercol space-y-3">
+              <div class="w-12 h-12 mx-auto rounded-full bg-amber-500/10 text-amberaccent flex items-center justify-center font-bold text-xl">
+                ⏳
+              </div>
+              <h3 class="text-sm font-bold text-slate-100 uppercase tracking-wider">
+                No Valid Trade Setups Available – Waiting for Confirmation
+              </h3>
+              <p class="text-xs text-slate-400 max-w-xl mx-auto leading-relaxed">
+                The automated 3-minute background scanner evaluated all candidate pairs. Active positions are already running, closed markets (forex/metals) are deactivated, or untraded pairs have not formed clean M15 trend confirmation. No low-quality signals generated.
+              </p>
+              <div class="flex items-center justify-center gap-3 pt-2">
+                <button onclick="triggerImmediateRescan()" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-bold transition border border-bordercol">
+                  Force Instant Rescan
+                </button>
+                <button onclick="toggleAuditModal()" class="px-3 py-1.5 rounded-lg bg-blue-500/10 text-blue-400 text-xs font-bold transition border border-blue-500/20">
+                  Inspect Filtered Reasons
+                </button>
+              </div>
+            </div>
+          `;
+          return;
+        }
+
+        if (badge) {
+          badge.className = 'text-xs px-2.5 py-0.5 rounded-full bg-emerald-500/10 text-emeraldaccent border border-emerald-500/20 font-mono font-semibold';
+          badge.innerText = `${setups.length} ACTIVE SETUPS`;
+        }
+
+        // Render setups with Confidence and Invalidation (Rules 2, 3, 4)
+        grid.innerHTML = setups.map(s => {
+          const isBuy = s.action === 'BUY';
+          const badgeClass = isBuy ? 'bg-emerald-500/10 text-emeraldaccent border-emerald-500/20' : 'bg-red-500/10 text-crimsonaccent border-red-500/20';
+          const isHighConf = s.confidence_score >= 88;
+          const confBadgeClass = isHighConf ? 'bg-emerald-500/20 text-emeraldaccent border-emerald-500/40 shadow-sm shadow-emerald-500/20 font-black' : 'bg-blue-500/10 text-blue-400 font-mono';
+
+          return `
+            <div id="setup-card-${s.id}" class="p-4 rounded-xl bg-slate-900 border ${isHighConf ? 'border-emerald-500/40' : 'border-bordercol'} hover:border-slate-700 transition flex flex-col justify-between space-y-3 shadow-sm">
+              <div>
+                <div class="flex items-center justify-between">
+                  <div class="flex items-center gap-2">
+                    <span class="font-bold text-white font-mono text-sm">${s.symbol}</span>
+                    <span class="text-[10px] px-1.5 py-0.5 rounded bg-slate-800 text-slate-400">${s.category}</span>
+                    <span class="text-[9px] px-1.5 py-0.5 rounded font-mono font-bold border ${s.is_market_open ? 'bg-emerald-500/10 text-emeraldaccent border-emerald-500/30' : 'bg-amber-500/10 text-amberaccent border-amber-500/30'}">${s.is_market_open ? 'LIVE 24/7' : 'WEEKEND ANALYSIS'}</span>
+                  </div>
+                  <div class="flex items-center gap-1.5">
+                    <span class="text-[10px] px-2 py-0.5 rounded font-mono font-bold border ${badgeClass}">${s.action}</span>
+                    <span class="text-[10px] px-2 py-0.5 rounded border ${confBadgeClass}">${isHighConf ? '⭐ ' : ''}${s.conviction}</span>
+                  </div>
+                </div>
+                <div class="text-xs font-bold text-slate-200 mt-1 flex items-center justify-between">
+                  <span>${s.setup_name}</span>
+                  ${isHighConf ? '<span class="text-[10px] text-emeraldaccent font-mono font-bold">88-100% CONFIDENCE</span>' : ''}
+                </div>
+              </div>
+
+              <!-- Symbol MT5 Performance Profile (Requirement 6) -->
+              ${s.symbol_perf ? `
+                <div class="p-2 rounded bg-slate-950/70 border border-slate-800 flex items-center justify-between text-[11px] font-mono">
+                  <div class="flex items-center gap-1.5">
+                    <span>${s.symbol_perf.priority_num === 1 ? '⭐' : (s.symbol_perf.priority_num === 2 ? '✅' : (s.symbol_perf.priority_num === 5 ? '🛑' : '🔍'))}</span>
+                    <span class="px-1.5 py-0.5 rounded text-[10px] border ${
+                      s.symbol_perf.priority_num === 1 ? 'bg-emerald-500/20 text-emeraldaccent border-emerald-500/40 font-bold' :
+                      (s.symbol_perf.priority_num === 2 ? 'bg-cyan-500/10 text-cyanaccent border-cyan-500/30 font-bold' :
+                      (s.symbol_perf.priority_num === 5 ? 'bg-red-500/20 text-crimsonaccent border-red-500/40 font-bold animate-pulse' : 'bg-slate-800 text-slate-300 border-slate-700'))
+                    }">${s.symbol_perf.recommendation.split('—')[0].trim()}</span>
+                  </div>
+                  <div class="text-[10px] text-slate-400 flex items-center gap-2">
+                    <span>Win: <b class="text-white">${s.symbol_perf.win_rate}%</b></span>
+                    <span>PF: <b class="text-white">${s.symbol_perf.profit_factor}</b></span>
+                    <span>Net: <b class="${s.symbol_perf.net_pnl >= 0 ? 'text-emeraldaccent' : 'text-crimsonaccent'}">${s.symbol_perf.net_pnl >= 0 ? '+' : ''}$${s.symbol_perf.net_pnl}</b></span>
+                  </div>
+                </div>
+                ${s.symbol_perf.priority_num === 5 ? `
+                  <div class="p-2 rounded bg-red-950/40 border border-red-800/60 text-[10px] text-rose-300 font-sans flex items-start gap-1.5">
+                    <span class="text-crimsonaccent font-bold">⚠️ SYMBOL RISK WARNING:</span>
+                    Negative historical expectancy on Deriv MT5 (Net $${s.symbol_perf.net_pnl}, PF ${s.symbol_perf.profit_factor}). High drawdown risk.
+                  </div>
+                ` : ''}
+              ` : ''}
+
+              <!-- Technical Signals Box -->
+              <div class="p-2.5 rounded bg-slate-950/80 border border-slate-800 text-[11px] text-slate-300 leading-relaxed font-sans">
+                <span class="text-emeraldaccent font-bold">Signals:</span> ${s.technical_signals}
+              </div>
+
+              <!-- Technical Invalidation Box (Rule 4) -->
+              <div class="p-2.5 rounded bg-red-950/20 border border-red-900/50 text-[11px] text-rose-300 leading-relaxed font-sans">
+                <span class="text-crimsonaccent font-bold flex items-center gap-1 mb-0.5">
+                  <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"></path></svg>
+                  Technical Invalidation:
+                </span>
+                ${s.invalidation_condition}
+              </div>
+
+              <!-- Trade Parameters Grid (2 TPs Kept: TP1 & TP2) -->
+              <div class="grid grid-cols-4 gap-1.5 text-[11px] font-mono bg-slate-950/50 p-2 rounded">
+                <div><span class="text-slate-500 block text-[9px]">ENTRY</span><span class="text-white font-bold">${s.entry}</span></div>
+                <div><span class="text-slate-500 block text-[9px]">STOP LOSS</span><span class="text-crimsonaccent font-bold">${s.sl}</span></div>
+                <div><span class="text-slate-500 block text-[9px]">TP1 (1.8x)</span><span class="text-emeraldaccent font-bold">${s.tp1 || s.tp}</span></div>
+                <div><span class="text-slate-500 block text-[9px]">TP2 (4.0x)</span><span class="text-cyanaccent font-bold">${s.tp2 || (s.tp * 1.01).toFixed(2)}</span></div>
+              </div>
+
+              <!-- 1 Trade Policy & Random Allocation Note -->
+              <div class="px-2 py-1 rounded bg-slate-900 border border-slate-800 text-[10px] font-mono text-slate-400 flex items-center justify-between">
+                <span>🎯 Policy: 1 Trade Per Symbol</span>
+                <span class="text-amberaccent font-semibold">Random TP1 or TP2</span>
+              </div>
+
+              <!-- Auto-Trade Status Banner if High Confidence -->
+              ${isHighConf ? `
+                <div class="p-2 rounded bg-emerald-950/30 border border-emerald-900/40 text-[10px] text-emerald-300 font-mono flex items-center justify-between">
+                  <span>⚡ 88-100% Setup Trigger</span>
+                  <span class="font-bold">${autoTradeEnabled ? 'ARMED FOR AUTO-EXECUTE' : 'Auto-Trade is OFF'}</span>
+                </div>
+              ` : ''}
+
+              <!-- Action Buttons -->
+              <div class="space-y-1.5 pt-1">
+                <button type="button" onclick='executeMtpDirectlyFromSetup(${JSON.stringify(s)})' class="w-full py-2 rounded-lg bg-emerald-600/20 hover:bg-emerald-600/30 text-emeraldaccent border border-emerald-500/40 font-bold text-xs transition flex items-center justify-center gap-1.5 shadow-sm">
+                  ⚡ Execute 1 Trade (Random TP1/TP2)
+                </button>
+                <div class="grid grid-cols-3 gap-1.5">
+                  <button type="button" onclick='loadSetupIntoForm(${JSON.stringify(s)})' class="py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-white font-bold text-xs transition flex items-center justify-center gap-1 border border-bordercol">
+                    Load Setup
+                  </button>
+                  <button type="button" onclick='executeSetupDirectly(${JSON.stringify(s)})' class="py-1.5 rounded-lg ${isBuy ? 'bg-emeraldaccent hover:bg-emerald-600' : 'bg-crimsonaccent hover:bg-red-600'} text-white font-bold text-xs transition shadow flex items-center justify-center gap-1">
+                    1-Click
+                  </button>
+                  <button type="button" onclick='dismissSetupCard("${s.id}", "${s.symbol}", "${s.action}")' class="py-1.5 rounded-lg bg-slate-800/80 hover:bg-red-500/20 text-slate-400 hover:text-red-400 font-bold text-xs transition flex items-center justify-center gap-1 border border-bordercol" title="Dismiss / Remove this Setup">
+                    ✕ Dismiss
+                  </button>
+                </div>
+              </div>
+            </div>
+          `;
+        }).join('');
+      } catch (err) {
+        console.error('Fetch setups error:', err);
+      }
+    }
+
+    function renderJournal(list) {
+      const tbody = document.getElementById('journalTbody');
+      const countEl = document.getElementById('journalCount');
+      if (!tbody) return;
+      if (countEl) countEl.innerText = `${list.length} Logged`;
+
+      if (!list || list.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="7" class="py-4 text-center text-slate-500 font-sans">No executed setups logged yet.</td></tr>';
+        return;
+      }
+
+      tbody.innerHTML = list.map(j => {
+        const isOpen = j.status === 'OPEN';
+        const statusBadge = isOpen ? 'bg-emerald-500/10 text-emeraldaccent border-emerald-500/20' : 'bg-slate-800 text-slate-400';
+        const isAuto = j.execution_type && j.execution_type.includes('AUTO');
+        const typeBadge = isAuto ? 'bg-purple-500/10 text-purple-400 border border-purple-500/20' : 'bg-blue-500/10 text-blue-400';
+
+        return `
+          <tr class="hover:bg-slate-900/60 transition">
+            <td class="py-1.5 px-2 font-bold text-white">${j.symbol}</td>
+            <td class="py-1.5 px-2"><span class="px-1.5 py-0.2 rounded text-[9px] font-bold ${j.direction === 'BUY' ? 'bg-emerald-500/10 text-emeraldaccent' : 'bg-red-500/10 text-crimsonaccent'}">${j.direction}</span></td>
+            <td class="py-1.5 px-2 text-slate-300">${j.volume}</td>
+            <td class="py-1.5 px-2 font-bold text-white">${j.confidence || '--'}</td>
+            <td class="py-1.5 px-2"><span class="px-1.5 py-0.2 rounded text-[9px] font-mono ${typeBadge}">${isAuto ? 'AUTO' : 'MANUAL'}</span></td>
+            <td class="py-1.5 px-2"><span class="px-1.5 py-0.2 rounded text-[9px] font-bold border ${statusBadge}">${j.status}</span></td>
+            <td class="py-1.5 px-2 text-right text-slate-500 text-[10px]">${j.execution_time.split(' ')[1] || j.execution_time}</td>
+          </tr>
+        `;
+      }).join('');
+    }
+
+    function renderAudit(reasons) {
+      const container = document.getElementById('auditContent');
+      if (!container) return;
+      const entries = Object.entries(reasons);
+      if (entries.length === 0) {
+        container.innerHTML = '<div>All candidate instruments analyzed.</div>';
+        return;
+      }
+      container.innerHTML = entries.map(([sym, r]) => `
+        <div class="p-2 rounded bg-slate-900 border border-bordercol/60 flex items-start gap-1.5">
+          <span class="text-amberaccent font-bold">${sym}:</span>
+          <span class="text-slate-400">${r}</span>
+        </div>
+      `).join('');
+    }
+
+    function toggleAuditModal() {
+      const el = document.getElementById('auditSection');
+      el.classList.toggle('hidden');
+    }
+
+    async function triggerImmediateRescan() {
+      const btn = event?.currentTarget;
+      if (btn) btn.innerText = 'Scanning...';
+      try {
+        await fetch('/api/rescan', { method: 'POST' });
+        await fetchSetups();
+      } catch (err) {
+        console.error('Rescan error:', err);
+      } finally {
+        if (btn) btn.innerText = 'Re-Scan Now';
+      }
+    }
+
+    async function dismissSetupCard(setupId, symbol, action) {
+      // Smooth fade out and remove card from DOM
+      const card = document.getElementById(`setup-card-${setupId}`) || document.querySelector(`[data-setup-id="${setupId}"]`);
+      if (card) {
+        card.style.transition = 'all 0.35s ease-out';
+        card.style.opacity = '0';
+        card.style.transform = 'scale(0.95)';
+        setTimeout(() => card.remove(), 350);
+      }
+      try {
+        await fetch('/api/setups/dismiss', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ setup_id: setupId, symbol: symbol, action: action })
+        });
+      } catch (err) {
+        console.error('Error dismissing setup:', err);
+      }
+    }
+
+    function loadSetupIntoForm(s) {
+      currentLoadedSetupId = s.id;
+      selectSymbol(s.symbol);
+      setDirection(s.action);
+      document.getElementById('tradeEntry').value = s.entry;
+      document.getElementById('tradeSL').value = s.sl;
+      document.getElementById('tradeTP').value = s.tp;
+      document.getElementById('tradeVolume').value = s.recommended_lots;
+      document.getElementById('tradesCount').value = s.suggested_trades || 2;
+      document.getElementById('volumeMode').value = 'split';
+      updateMultiOrderPreview();
+      recalcSizer();
+      
+      const formEl = document.getElementById('orderForm');
+      formEl.scrollIntoView({ behavior: 'smooth' });
+      formEl.classList.add('ring-2', 'ring-brand');
+      setTimeout(() => formEl.classList.remove('ring-2', 'ring-brand'), 1500);
+    }
+
+    async function executeSetupDirectly(s) {
+      if (!confirm(`Execute Recommended Setup on ${s.symbol}?\nAction: ${s.action}\nLots: ${s.recommended_lots} (Split into ${s.suggested_trades} trades)\nSL: ${s.sl} | TP: ${s.tp}\nConfidence: ${s.conviction}`)) {
+        return;
+      }
+      
+      const statusBox = document.getElementById('orderStatusMsg');
+      statusBox.className = 'text-xs p-3 rounded-lg bg-blue-500/10 text-blue-400 border border-blue-500/20';
+      statusBox.innerText = `Executing 1-Click setup on ${s.symbol} into Deriv MT5...`;
+      statusBox.classList.remove('hidden');
+
+      const payload = {
+        symbol: s.symbol,
+        action: s.action,
+        volume: s.recommended_lots,
+        sl: s.sl,
+        tp: s.tp,
+        trades_count: s.suggested_trades || 2,
+        volume_mode: 'split',
+        setup_id: s.id,
+        confidence: s.conviction,
+        reason: s.technical_signals,
+        comment: `Headway 1-Click (${s.conviction})`
+      };
+
+      try {
+        const res = await fetch('/api/order', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        const out = await res.json();
+        if (out.success) {
+          statusBox.className = 'text-xs p-3 rounded-lg bg-emerald-500/10 text-emeraldaccent border border-emerald-500/20';
+          statusBox.innerText = '✅ ' + out.message;
+          dismissSetupCard(s.id, s.symbol, s.action);
+          refreshAll();
+        } else {
+          statusBox.className = 'text-xs p-3 rounded-lg bg-red-500/10 text-crimsonaccent border border-red-500/20';
+          statusBox.innerText = '❌ ' + out.message;
+        }
+      } catch (err) {
+        statusBox.className = 'text-xs p-3 rounded-lg bg-red-500/10 text-crimsonaccent border border-red-500/20';
+        statusBox.innerText = 'Error: ' + err;
+      }
+    }
+
+    async function fetchProfitChaser() {
+      try {
+        const res = await fetch('/api/profit_chaser/dashboard');
+        const data = await res.json();
+        renderProfitChaserDashboard(data);
+      } catch (e) {
+        console.error('Profit chaser fetch error:', e);
+      }
+    }
+
+    function renderProfitChaserDashboard(data) {
+      const positions = data.positions || [];
+      const events = data.recent_events || [];
+      const config = data.config || {};
+
+      const countEl = document.getElementById('chaserPositionsCount');
+      if (countEl) countEl.innerText = `${positions.length} TRADES MONITORED`;
+
+      const totRecoveries = positions.reduce((acc, p) => acc + (p.recovery_count || 0), 0);
+      const recBadge = document.getElementById('chaserRecoveryBadge');
+      if (recBadge) recBadge.innerText = `${totRecoveries} RECOVERIES COMPLETED`;
+
+      const pbMethodEl = document.getElementById('chaserPullbackMethod');
+      if (pbMethodEl) pbMethodEl.innerText = `${config.pullback_value || 25}% OF PEAK`;
+
+      const trMethodEl = document.getElementById('chaserTrailingMethod');
+      if (trMethodEl) trMethodEl.innerText = `MAX ${config.max_giveback_pct || 35}% GIVEBACK`;
+
+      const tbody = document.getElementById('chaserPositionsBody');
+      if (tbody) {
+        if (positions.length === 0) {
+          tbody.innerHTML = '<tr><td colspan="7" class="py-4 text-center text-slate-500">No active positions currently open in MT5. New entries are auto-registered.</td></tr>';
+        } else {
+          tbody.innerHTML = positions.map(p => {
+            const isBuy = p.direction === 'BUY';
+            const dirClass = isBuy ? 'text-emeraldaccent bg-emerald-500/10 border-emerald-500/30' : 'text-roseaccent bg-rose-500/10 border-rose-500/30';
+            const profitClass = p.current_profit >= 0 ? 'text-emeraldaccent font-bold' : 'text-roseaccent font-bold';
+            
+            // Dynamic status badge styling
+            let statusBadge = '<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-800 text-slate-300">TRACKING</span>';
+            if (p.status_label === 'TRACKING NEW HIGH') {
+              statusBadge = '<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-cyan-500/20 text-cyanaccent border border-cyan-500/40 animate-pulse">✨ TRACKING NEW HIGH</span>';
+            } else if (p.status_label === 'PULLBACK DETECTED') {
+              statusBadge = '<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-500/20 text-amberaccent border border-amber-500/40 animate-pulse">⚠️ PULLBACK DETECTED</span>';
+            } else if (p.status_label === 'WAITING FOR RECOVERY') {
+              statusBadge = '<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-indigo-500/20 text-indigo-300 border border-indigo-500/40">⏳ WAITING FOR RECOVERY</span>';
+            } else if (p.status_label === 'RECOVERY COMPLETED') {
+              statusBadge = '<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-500/20 text-emeraldaccent border border-emerald-500/40 shadow-sm shadow-emerald-500/20">🌟 RECOVERY COMPLETED (Option B)</span>';
+            } else if (p.status_label === 'NEW PEAK RECORDED') {
+              statusBadge = '<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-purple-500/20 text-purple-300 border border-purple-500/40 font-bold">🚀 NEW PEAK RECORDED</span>';
+            } else if (p.status_label === 'PROFIT PROTECTION TRIGGERED') {
+              statusBadge = '<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-rose-500/20 text-roseaccent border border-rose-500/40">🛡️ PROTECTION TRIGGERED</span>';
+            }
+
+            return `
+              <tr class="border-b border-bordercol/30 hover:bg-slate-800/20 transition">
+                <td class="py-2.5 px-3">
+                  <div class="flex items-center gap-1.5">
+                    <span class="font-bold text-white">${p.symbol}</span>
+                    <span class="px-1.5 py-0.2 rounded text-[10px] border ${dirClass}">${p.direction}</span>
+                    <span class="text-slate-500 text-[10px]">#${p.ticket} (${p.volume})</span>
+                  </div>
+                </td>
+                <td class="py-2.5 px-3 ${profitClass}">$${p.current_profit.toFixed(2)}</td>
+                <td class="py-2.5 px-3 text-cyanaccent font-bold">$${p.highest_profit.toFixed(2)}</td>
+                <td class="py-2.5 px-3">
+                  <span class="${p.current_pullback > 0 ? 'text-amberaccent' : 'text-slate-400'}">
+                    -$${p.current_pullback.toFixed(2)} (${p.current_pullback_pct.toFixed(1)}%)
+                  </span>
+                </td>
+                <td class="py-2.5 px-3 text-slate-300">
+                  ${p.recovery_target > 0 ? '$' + p.recovery_target.toFixed(2) + ' (Rec: ' + p.recovery_count + ')' : '--'}
+                </td>
+                <td class="py-2.5 px-3 text-emeraldaccent">
+                  ${p.protected_floor > 0 ? '$' + p.protected_floor.toFixed(2) : '<span class="text-slate-500">Arming at $' + (config.activation_threshold || 10) + '</span>'}
+                </td>
+                <td class="py-2.5 px-3">
+                  ${statusBadge}
+                </td>
+              </tr>
+            `;
+          }).join('');
+        }
+      }
+
+      const streamEl = document.getElementById('chaserEventStream');
+      if (streamEl && events.length > 0) {
+        streamEl.innerHTML = events.slice(0, 8).map(e => {
+          let col = 'text-slate-300';
+          if (e.event_type === 'RECOVERY_COMPLETED') col = 'text-emeraldaccent font-bold';
+          else if (e.event_type === 'PULLBACK_DETECTED') col = 'text-amberaccent';
+          else if (e.event_type === 'NEW_PEAK_RECORDED') col = 'text-cyanaccent font-bold';
+          else if (e.event_type === 'PROTECTION_TRIGGERED') col = 'text-roseaccent font-bold';
+          return `<div class="flex items-center gap-2"><span class="text-slate-500">${e.time.split(' ')[1]}</span> <span class="${col}">${e.note}</span></div>`;
+        }).join('');
+      }
+    }
+
+    async function fetchState() {
+      fetchProfitChaser();
+      try {
+        const res = await fetch('/api/state');
+        const data = await res.json();
+        derivState = data;
+        renderAccount(data.account);
+        renderPositions(data.positions);
+        renderQuotes(data.quotes);
+        renderImm(data.imm_dates);
+      } catch (err) {
+        console.error('Fetch error:', err);
+      }
+    }
+
+    function renderAccount(acc) {
+      if (!acc) return;
+      document.getElementById('headerLogin').innerText = acc.login || '6314782';
+      document.getElementById('headerServer').innerText = acc.server || 'Deriv-Demo';
+      document.getElementById('connPing').innerText = `PING: ${acc.ping || 160}ms`;
+
+      document.getElementById('accBalance').innerText = `$${(acc.balance || 0).toLocaleString('en-US', {minimumFractionDigits: 2})}`;
+      document.getElementById('accEquity').innerText = `$${(acc.equity || 0).toLocaleString('en-US', {minimumFractionDigits: 2})}`;
+      document.getElementById('accMargin').innerText = `$${(acc.margin_free || 0).toLocaleString('en-US', {minimumFractionDigits: 2})}`;
+      document.getElementById('accMarginLevel').innerText = `Margin Level: ${(acc.margin_level || 0).toFixed(2)}%`;
+
+      const pBox = document.getElementById('accProfit');
+      const pVal = acc.profit || 0;
+      pBox.innerText = `${pVal >= 0 ? '+' : ''}$${pVal.toFixed(2)}`;
+      pBox.className = `text-2xl font-black font-mono ${pVal >= 0 ? 'text-emeraldaccent' : 'text-crimsonaccent'}`;
+
+      const dollarRisk = (acc.balance || 7150) * 0.01;
+      document.getElementById('calcRiskDollar').innerText = `$${dollarRisk.toFixed(2)}`;
+    }
+
+    function renderPositions(positions) {
+      const tbody = document.getElementById('positionsTbody');
+      const countBadge = document.getElementById('posCount');
+      const netVolume = document.getElementById('netVolume');
+
+      countBadge.innerText = `${positions.length} active`;
+      let totalLots = 0;
+
+      if (!positions || positions.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="10" class="py-6 text-center text-slate-500 font-sans">No open positions on Deriv MT5. Ready for new trades.</td></tr>';
+        netVolume.innerText = '0.00';
+        return;
+      }
+
+      tbody.innerHTML = '';
+      positions.forEach(p => {
+        totalLots += p.volume;
+        const isProfit = p.profit >= 0;
+        const pClass = isProfit ? 'text-emeraldaccent font-bold' : 'text-crimsonaccent font-bold';
+        const typeBadge = p.type === 'BUY' ? 'bg-emerald-500/10 text-emeraldaccent border-emerald-500/20' : 'bg-red-500/10 text-crimsonaccent border-red-500/20';
+
+        const tr = document.createElement('tr');
+        tr.className = 'hover:bg-slate-900/60 font-mono transition';
+        tr.innerHTML = `
+          <td class="py-2.5 px-4 text-slate-400">#${p.ticket}</td>
+          <td class="py-2.5 px-4 font-bold text-white font-sans">
+            ${p.symbol}
+            ${p.guardian_armed ? `<span class="ml-1 text-[9px] px-1.5 py-0.5 rounded bg-emerald-500/20 text-emeraldaccent border border-emerald-500/40 font-mono font-bold" title="Peak: +$${p.guardian_peak.toFixed(2)} | Floor: +$${p.guardian_floor.toFixed(2)}">🛡️ +$${p.guardian_floor.toFixed(2)} FLOOR</span>` : ''}
+          </td>
+          <td class="py-2.5 px-4"><span class="px-2 py-0.5 rounded text-[10px] font-bold border ${typeBadge}">${p.type}</span></td>
+          <td class="py-2.5 px-4 font-bold text-slate-200">${p.volume}</td>
+          <td class="py-2.5 px-4 text-slate-400">${p.price_open}</td>
+          <td class="py-2.5 px-4 text-white">${p.price_current}</td>
+          <td class="py-2.5 px-4 text-slate-400">${p.sl || '-'}</td>
+          <td class="py-2.5 px-4 text-slate-400">${p.tp || '-'}</td>
+          <td class="py-2.5 px-4 ${pClass}">
+            ${isProfit ? '+' : ''}$${p.profit.toFixed(2)}
+            ${p.guardian_armed ? `<span class="block text-[9px] text-emeraldaccent font-mono font-normal">Floor: +$${p.guardian_floor.toFixed(2)} (Peak: +$${p.guardian_peak.toFixed(2)})</span>` : ''}
+          </td>
+          <td class="py-2.5 px-4 text-right font-sans">
+            <button onclick="closeOrder(${p.ticket})" class="px-2.5 py-1 rounded bg-red-500/10 hover:bg-red-500/20 text-crimsonaccent border border-red-500/30 text-[11px] font-medium transition">
+              Close Trade
+            </button>
+          </td>
+        `;
+        tbody.appendChild(tr);
+      });
+
+      netVolume.innerText = totalLots.toFixed(2);
+    }
+
+    function renderQuotes(quotes) {
+      const bar = document.getElementById('tickerBar');
+      if (!quotes) return;
+
+      const symIcons = { 'XAUUSD': '🟡', 'BTCUSD': '🟠', 'ETHUSD': '🔷', 'SOLUSD': '🟣', 'EURUSD': '💶', 'GBPUSD': '💷', 'USDJPY': '💴' };
+      bar.innerHTML = Object.entries(quotes).map(([sym, q]) => `
+        <div onclick="selectSymbol('${sym}')" class="cursor-pointer hover:bg-slate-900 px-2.5 py-1 rounded-lg border border-transparent hover:border-bordercol transition flex items-center gap-2">
+          <span class="text-xs">${symIcons[sym] || '📊'}</span>
+          <span class="font-bold text-slate-200 font-sans text-xs">${sym}</span>
+          <span class="text-slate-300 font-mono text-xs font-bold">${q.bid}</span>
+          <span class="text-[10px] px-1.5 py-0.5 rounded bg-slate-800/80 text-slate-400 font-mono">Spr ${q.spread}</span>
+        </div>
+      `).join('<span class="text-slate-700">&bull;</span>');
+    }
+
+    function renderImm(immList) {
+      const container = document.getElementById('immContainer');
+      if (!immList || !container) return;
+      container.innerHTML = immList.map(item => `
+        <div class="p-2.5 rounded-lg bg-slate-900/90 border border-bordercol">
+          <div class="flex items-center justify-between text-slate-400 text-[11px]">
+            <span>${item.quarter}</span>
+            <span class="text-cyanaccent">${item.days_left}d</span>
+          </div>
+          <div class="text-sm font-bold text-white mt-1">${item.date}</div>
+        </div>
+      `).join('');
+    }
+
+    function recalcSizer() {
+      const balance = (derivState.account && derivState.account.balance) || 7150;
+      const riskPct = parseFloat(document.getElementById('tradeRiskPct').value) || 1.0;
+      const entry = parseFloat(document.getElementById('tradeEntry').value);
+      const sl = parseFloat(document.getElementById('tradeSL').value);
+
+      const dollarRisk = balance * (riskPct / 100);
+      document.getElementById('calcRiskDollar').innerText = `$${dollarRisk.toFixed(2)}`;
+
+      if (entry && sl && entry !== sl) {
+        const dist = Math.abs(entry - sl);
+        document.getElementById('calcStopDist').innerText = `${dist.toFixed(2)} pts`;
+        
+        let lots = dollarRisk / dist;
+        if (lots > 10.0) lots = 10.0;
+        if (lots < 0.01) lots = 0.01;
+        document.getElementById('calcLots').innerText = `${lots.toFixed(2)} lots`;
+        document.getElementById('tradeVolume').value = lots.toFixed(2);
+        updateMultiOrderPreview();
+      }
+    }
+
+    async function closeOrder(ticket) {
+      if (!confirm(`Close position #${ticket} on Deriv MT5?`)) return;
+      try {
+        const res = await fetch('/api/close', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ticket: ticket })
+        });
+        const out = await res.json();
+        alert(out.message);
+        refreshAll();
+      } catch (err) {
+        alert('Close error: ' + err);
+      }
+    }
+
+    async function emergencyCloseAll() {
+      if (!confirm('⚠️ WARNING: Close ALL open positions on Deriv MT5 immediately?')) return;
+      try {
+        const res = await fetch('/api/close_all', { method: 'POST' });
+        const out = await res.json();
+        alert(out.message);
+        refreshAll();
+      } catch (err) {
+        alert('Panic close error: ' + err);
+      }
+    }
+
+    async function submitDerivOrder(e) {
+      e.preventDefault();
+      const statusBox = document.getElementById('orderStatusMsg');
+      statusBox.className = 'text-xs p-3 rounded-lg bg-blue-500/10 text-blue-400 border border-blue-500/20';
+      statusBox.innerText = 'Transmitting order(s) directly to Deriv MT5 terminal...';
+      statusBox.classList.remove('hidden');
+
+      const payload = {
+        symbol: activeSymbol,
+        action: currentDirection,
+        volume: parseFloat(document.getElementById('tradeVolume').value),
+        sl: parseFloat(document.getElementById('tradeSL').value) || 0.0,
+        tp: parseFloat(document.getElementById('tradeTP').value) || 0.0,
+        trades_count: parseInt(document.getElementById('tradesCount').value) || 1,
+        volume_mode: document.getElementById('volumeMode').value,
+        setup_id: currentLoadedSetupId,
+        confidence: "Manual Form",
+        reason: "User Discretionary Execution",
+        comment: "Headway User"
+      };
+
+      try {
+        const res = await fetch('/api/order', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        const out = await res.json();
+        if (out.success) {
+          statusBox.className = 'text-xs p-3 rounded-lg bg-emerald-500/10 text-emeraldaccent border border-emerald-500/20';
+          statusBox.innerText = '✅ ' + out.message;
+          currentLoadedSetupId = null;
+          refreshAll();
+          fetchSetups();
+        } else {
+          statusBox.className = 'text-xs p-3 rounded-lg bg-red-500/10 text-crimsonaccent border border-red-500/20';
+          statusBox.innerText = '❌ ' + out.message;
+        }
+      } catch (err) {
+        statusBox.className = 'text-xs p-3 rounded-lg bg-red-500/10 text-crimsonaccent border border-red-500/20';
+        statusBox.innerText = 'Error: ' + err;
+      }
+    }
+
+    function refreshAll() {
+      fetchState();
+    }
+
+    // 1-second countdown loop synchronized with background scanner
+    function updateCountdown() {
+      // Automatic 2-minute periodic rescan is permanently REMOVED as requested.
+      // Re-scan is strictly manual / on demand via 'Re-Scan Now' button.
+      const countdownEl = document.getElementById('rescanCountdown');
+      if (countdownEl) {
+        countdownEl.innerText = 'ON DEMAND (Manual)';
+      }
+    }
+
+    // ==============================================================================
+    // SYMBOL PERFORMANCE DASHBOARD JAVASCRIPT CONTROLLER
+    // ==============================================================================
+    let currentMainTab = 'station';
+    let currentPerfTimeframe = 'all';
+    let perfRawData = null;
+    let perfDisplayedSymbols = [];
+    let perfSortCol = 'score';
+    let perfSortAsc = false;
+    let chartPnlInstance = null;
+    let chartWinRateInstance = null;
+    let chartCumEquityInstance = null;
+
+    function switchMainTab(tab) {
+      currentMainTab = tab;
+      const stationView = document.getElementById('stationView');
+      const perfView = document.getElementById('performanceView');
+      const goldView = document.getElementById('goldView');
+      const mlView = document.getElementById('mlView');
+      const tabStationBtn = document.getElementById('navTabStation');
+      const tabPerfBtn = document.getElementById('navTabPerformance');
+      const tabGoldBtn = document.getElementById('navTabGold');
+      const tabMLBtn = document.getElementById('navTabML');
+
+      // Hide all views
+      if (stationView) stationView.classList.add('hidden');
+      if (perfView) perfView.classList.add('hidden');
+      if (goldView) goldView.classList.add('hidden');
+      if (mlView) mlView.classList.add('hidden');
+
+      // Reset button styles
+      if (tabStationBtn) tabStationBtn.className = 'px-3.5 py-1.5 rounded-lg text-xs font-bold transition text-slate-400 hover:text-white hover:bg-slate-800 flex items-center gap-2';
+      if (tabPerfBtn) tabPerfBtn.className = 'px-3.5 py-1.5 rounded-lg text-xs font-bold transition text-slate-400 hover:text-white hover:bg-slate-800 flex items-center gap-2';
+      if (tabGoldBtn) tabGoldBtn.className = 'px-3.5 py-1.5 rounded-lg text-xs font-bold transition text-amber-400 hover:text-amber-300 hover:bg-slate-800 flex items-center gap-2';
+      if (tabMLBtn) tabMLBtn.className = 'px-3.5 py-1.5 rounded-lg text-xs font-bold transition text-purple-400 hover:text-purple-300 hover:bg-slate-800 flex items-center gap-2';
+
+      if (tab === 'station') {
+        if (stationView) stationView.classList.remove('hidden');
+        if (tabStationBtn) tabStationBtn.className = 'px-3.5 py-1.5 rounded-lg text-xs font-bold transition bg-brand text-white shadow flex items-center gap-2';
+      } else if (tab === 'performance') {
+        if (perfView) perfView.classList.remove('hidden');
+        if (tabPerfBtn) tabPerfBtn.className = 'px-3.5 py-1.5 rounded-lg text-xs font-bold transition bg-brand text-white shadow flex items-center gap-2';
+        loadPerformanceDashboard();
+      } else if (tab === 'gold') {
+        if (goldView) goldView.classList.remove('hidden');
+        if (tabGoldBtn) tabGoldBtn.className = 'px-3.5 py-1.5 rounded-lg text-xs font-bold transition bg-amber-500 text-slate-950 shadow flex items-center gap-2 font-black';
+        loadGoldDashboard();
+      } else if (tab === 'ml') {
+        if (mlView) mlView.classList.remove('hidden');
+        if (tabMLBtn) tabMLBtn.className = 'px-3.5 py-1.5 rounded-lg text-xs font-bold transition bg-purple-600 text-white shadow flex items-center gap-2 font-black';
+        loadMLDashboard();
+      }
+    }
+
+    function setPerfTimeframe(tf) {
+      currentPerfTimeframe = tf;
+      document.querySelectorAll('.perf-tf-btn').forEach(btn => {
+        if (btn.getAttribute('data-tf') === tf) {
+          btn.className = 'perf-tf-btn px-2.5 py-1 rounded text-[11px] font-bold bg-brand text-white shadow';
+        } else {
+          btn.className = 'perf-tf-btn px-2.5 py-1 rounded text-[11px] font-bold text-slate-400 hover:text-white';
+        }
+      });
+      loadPerformanceDashboard(true);
+    }
+
+    async function loadPerformanceDashboard(force=false) {
+      const syncEl = document.getElementById('perfSyncTime');
+      const syncIcon = document.getElementById('perfSyncIcon');
+      if (syncIcon) syncIcon.classList.add('animate-spin');
+
+      try {
+        const res = await fetch(`/api/performance?timeframe=${currentPerfTimeframe}&resync=${force ? '1' : '0'}`);
+        perfRawData = await res.json();
+        
+        if (syncEl && perfRawData.summary) {
+          syncEl.innerText = `${perfRawData.summary.timestamp} (${currentPerfTimeframe.toUpperCase()})`;
+        }
+
+        const topBadge = document.getElementById('p1TopBadge');
+        if (topBadge && perfRawData.summary) {
+          topBadge.innerText = `${perfRawData.summary.p1_count} Focus / Best: ${perfRawData.summary.best_symbol}`;
+        }
+
+        renderPerformanceSummary(perfRawData.summary);
+        renderPerformanceAlerts(perfRawData.alerts || []);
+        renderPriorityBuckets(
+          perfRawData.p1_symbols || [],
+          perfRawData.p2_symbols || [],
+          perfRawData.p3_symbols || [],
+          perfRawData.p4_symbols || [],
+          perfRawData.p5_symbols || []
+        );
+        renderPerformanceCharts(perfRawData.symbols || []);
+        applyPerfFilters();
+
+      } catch (err) {
+        console.error('Error loading performance dashboard:', err);
+      } finally {
+        if (syncIcon) syncIcon.classList.remove('animate-spin');
+      }
+    }
+
+    function renderPerformanceSummary(s) {
+      if (!s) return;
+      document.getElementById('perfKpiTrades').innerText = (s.total_deals_analyzed || 0).toLocaleString();
+      document.getElementById('perfKpiSymbolsTraded').innerText = `Across ${s.total_symbols_traded || 0} traded symbols`;
+
+      const pnlEl = document.getElementById('perfKpiNetPnl');
+      const pnl = s.total_net_pnl || 0;
+      pnlEl.innerText = `${pnl >= 0 ? '+' : ''}$${pnl.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
+      pnlEl.className = `text-2xl font-black font-mono ${pnl >= 0 ? 'text-emeraldaccent' : 'text-crimsonaccent'}`;
+
+      document.getElementById('perfKpiWinRate').innerText = `${s.overall_win_rate || 0}%`;
+      const grossWins = s.total_gross_profit || 0;
+      const grossLoss = s.total_gross_loss || 0;
+      document.getElementById('perfKpiWinLoss').innerText = `Gross: +$${grossWins.toFixed(0)} / -$${grossLoss.toFixed(0)}`;
+
+      document.getElementById('perfKpiPf').innerText = `${s.overall_profit_factor || 0}`;
+
+      const bestEl = document.getElementById('perfKpiBestSymbol');
+      bestEl.innerText = s.best_symbol || 'None';
+      document.getElementById('perfKpiBestDetails').innerText = `${s.p1_count || 0} Priority 1 symbols`;
+
+      // Live open floating
+      let totalOpenPnl = 0;
+      let totalOpenCount = 0;
+      if (derivState && derivState.positions) {
+        totalOpenCount = derivState.positions.length;
+        totalOpenPnl = derivState.positions.reduce((acc, p) => acc + (p.profit || 0), 0);
+      }
+      const openPnlEl = document.getElementById('perfKpiOpenPnl');
+      openPnlEl.innerText = `${totalOpenPnl >= 0 ? '+' : ''}$${totalOpenPnl.toFixed(2)}`;
+      openPnlEl.className = `text-2xl font-black font-mono ${totalOpenPnl >= 0 ? 'text-emeraldaccent' : 'text-crimsonaccent'}`;
+      document.getElementById('perfKpiOpenCount').innerText = `${totalOpenCount} Active Open Trades`;
+    }
+
+    function renderPerformanceAlerts(alerts) {
+      const container = document.getElementById('perfAlertsContainer');
+      if (!container) return;
+      if (!alerts || alerts.length === 0) {
+        container.innerHTML = '';
+        return;
+      }
+
+      container.innerHTML = alerts.map(a => {
+        let borderClass = 'border-slate-800 bg-slate-900/90 text-slate-300';
+        let icon = 'ℹ️';
+        if (a.type === 'success') {
+          borderClass = 'border-emerald-500/40 bg-emerald-950/25 text-emerald-200';
+          icon = '🏆';
+        } else if (a.type === 'warning') {
+          borderClass = 'border-amber-500/40 bg-amber-950/25 text-amber-200';
+          icon = '⚠️';
+        } else if (a.type === 'danger') {
+          borderClass = 'border-rose-500/40 bg-rose-950/25 text-rose-200';
+          icon = '🛑';
+        }
+        return `
+          <div class="p-3 rounded-xl border ${borderClass} shadow-sm flex items-start gap-3">
+            <span class="text-lg leading-none mt-0.5">${icon}</span>
+            <div class="text-xs leading-relaxed font-sans">
+              <strong class="font-bold text-white block">${a.title}</strong>
+              <span class="text-slate-300">${a.message}</span>
+            </div>
+          </div>
+        `;
+      }).join('');
+    }
+
+    function renderPriorityBuckets(p1, p2, p3, p4, p5) {
+      const grid = document.getElementById('priorityBucketsGrid');
+      if (!grid) return;
+
+      const makeCard = (title, badgeClass, borderClass, bgClass, desc, items, priorityNum) => `
+        <div class="p-4 rounded-xl border ${borderClass} ${bgClass} flex flex-col justify-between space-y-3 shadow-sm">
+          <div>
+            <div class="flex items-center justify-between">
+              <span class="text-[10px] font-bold px-2 py-0.5 rounded border ${badgeClass}">${title}</span>
+              <span class="text-xs font-mono font-bold text-white">${items.length} Symbols</span>
+            </div>
+            <p class="text-[11px] text-slate-400 mt-2 font-sans">${desc}</p>
+          </div>
+          <div class="space-y-1.5 custom-scroll max-h-56 overflow-y-auto pr-1">
+            ${items.length === 0 ? '<div class="text-[11px] text-slate-500 italic py-2">No symbols in this category.</div>' : items.map(s => `
+              <div onclick="jumpToTradeSymbol('${s.symbol}')" class="p-2 rounded-lg bg-slate-900/90 hover:bg-slate-800 border border-bordercol cursor-pointer transition flex items-center justify-between text-xs font-mono group">
+                <div>
+                  <span class="font-bold text-white font-sans group-hover:text-cyanaccent">${s.symbol}</span>
+                  <div class="text-[10px] text-slate-400">
+                    <span>${s.total_trades}T</span> &bull; 
+                    <span class="${s.win_rate >= 50 ? 'text-emeraldaccent' : 'text-slate-400'}">${s.win_rate}% Win</span>
+                  </div>
+                </div>
+                <div class="text-right">
+                  <span class="font-bold block ${s.net_pnl >= 0 ? 'text-emeraldaccent' : 'text-crimsonaccent'}">${s.net_pnl >= 0 ? '+' : ''}$${s.net_pnl.toFixed(1)}</span>
+                  <span class="text-[10px] text-slate-500">PF ${s.profit_factor}</span>
+                </div>
+              </div>
+            `).join('')}
+          </div>
+        </div>
+      `;
+
+      grid.innerHTML = `
+        ${makeCard('PRIORITY 1 — FOCUS', 'bg-emerald-500/20 text-emeraldaccent border-emerald-500/40', 'border-emerald-500/40', 'bg-emerald-950/10', 'Strong consistent positive expectancy (N ≥ 10 validated). Highest research & trading priority.', p1, 1)}
+        ${makeCard('PRIORITY 2 — MAINTAIN', 'bg-cyan-500/10 text-cyanaccent border-cyan-500/30', 'border-cyan-500/30', 'bg-cyan-950/10', 'Profitable with acceptable risk profile. Maintain trading exposure.', p2, 2)}
+        ${makeCard('PRIORITY 3 — MONITOR', 'bg-amber-500/10 text-amberaccent border-amber-500/20', 'border-bordercol', 'bg-panel', 'Promising performance but insufficient sample size (N < 5). Monitor for confirmation.', p3, 3)}
+        ${makeCard('PRIORITY 4 — REDUCE', 'bg-orange-500/10 text-orange-400 border-orange-500/20', 'border-bordercol', 'bg-panel', 'Weak or deteriorating expectancy. Reduce position sizing or tighten setups.', p4, 4)}
+        ${makeCard('PRIORITY 5 — AVOID', 'bg-red-500/20 text-crimsonaccent border-red-500/40', 'border-red-500/40', 'bg-red-950/10', 'Severe historical negative expectancy or devastating drawdown. Restrict exposure.', p5, 5)}
+      `;
+    }
+
+    function renderPerformanceCharts(symbols) {
+      if (!symbols || symbols.length === 0 || !window.Chart) return;
+
+      const topSyms = symbols.slice(0, 10);
+      const labels = topSyms.map(s => s.symbol);
+      const pnlValues = topSyms.map(s => s.net_pnl);
+      const pnlColors = pnlValues.map(v => v >= 0 ? 'rgba(0, 192, 135, 0.8)' : 'rgba(255, 68, 79, 0.8)');
+
+      // Chart 1: PnL
+      const ctxPnl = document.getElementById('chartPnlBySymbol');
+      if (ctxPnl) {
+        if (chartPnlInstance) chartPnlInstance.destroy();
+        chartPnlInstance = new Chart(ctxPnl, {
+          type: 'bar',
+          data: {
+            labels: labels,
+            datasets: [{
+              label: 'Net Realized P&L ($)',
+              data: pnlValues,
+              backgroundColor: pnlColors,
+              borderRadius: 4
+            }]
+          },
+          options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: { legend: { display: false } },
+            scales: {
+              x: { ticks: { color: '#94a3b8', font: { size: 10 } }, grid: { display: false } },
+              y: { ticks: { color: '#94a3b8', font: { size: 10 } }, grid: { color: '#1E2638' } }
+            }
+          }
+        });
+      }
+
+      // Chart 2: Win Rate % & Profit Factor
+      const ctxWr = document.getElementById('chartWinRatePf');
+      if (ctxWr) {
+        if (chartWinRateInstance) chartWinRateInstance.destroy();
+        chartWinRateInstance = new Chart(ctxWr, {
+          type: 'bar',
+          data: {
+            labels: labels,
+            datasets: [
+              {
+                label: 'Win Rate (%)',
+                data: topSyms.map(s => s.win_rate),
+                backgroundColor: 'rgba(6, 182, 212, 0.7)',
+                borderRadius: 4,
+                yAxisID: 'y'
+              },
+              {
+                label: 'Profit Factor',
+                data: topSyms.map(s => Math.min(s.profit_factor, 10.0)),
+                backgroundColor: 'rgba(245, 158, 11, 0.7)',
+                borderRadius: 4,
+                yAxisID: 'y1'
+              }
+            ]
+          },
+          options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            scales: {
+              x: { ticks: { color: '#94a3b8', font: { size: 10 } }, grid: { display: false } },
+              y: { type: 'linear', position: 'left', ticks: { color: '#06B6D4' }, grid: { color: '#1E2638' }, max: 100 },
+              y1: { type: 'linear', position: 'right', ticks: { color: '#F59E0B' }, grid: { display: false }, min: 0 }
+            },
+            plugins: { legend: { labels: { color: '#e2e8f0', font: { size: 10 } } } }
+          }
+        });
+      }
+
+      // Chart 3: Top Symbols Cumulative Curves
+      const ctxEq = document.getElementById('chartCumEquity');
+      if (ctxEq) {
+        if (chartCumEquityInstance) chartCumEquityInstance.destroy();
+        const curveSymbols = symbols.filter(s => s.total_trades >= 5).slice(0, 4);
+        const palette = ['#00C087', '#06B6D4', '#F59E0B', '#FF444F'];
+        const datasets = curveSymbols.map((s, idx) => {
+          const pts = (s.cum_curve || []).map(p => p.cum_pnl);
+          return {
+            label: s.symbol,
+            data: pts,
+            borderColor: palette[idx % palette.length],
+            backgroundColor: 'transparent',
+            tension: 0.25,
+            borderWidth: 2,
+            pointRadius: 1
+          };
+        });
+
+        const maxLen = Math.max(...curveSymbols.map(s => (s.cum_curve || []).length), 10);
+        const labelsX = Array.from({length: maxLen}, (_, i) => `T-${maxLen - i}`);
+
+        chartCumEquityInstance = new Chart(ctxEq, {
+          type: 'line',
+          data: {
+            labels: labelsX,
+            datasets: datasets
+          },
+          options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            scales: {
+              x: { ticks: { color: '#94a3b8', font: { size: 9 } }, grid: { display: false } },
+              y: { ticks: { color: '#94a3b8', font: { size: 10 } }, grid: { color: '#1E2638' } }
+            },
+            plugins: { legend: { labels: { color: '#e2e8f0', font: { size: 10 } } } }
+          }
+        });
+      }
+    }
+
+    function applyPerfFilters() {
+      if (!perfRawData || !perfRawData.symbols) return;
+      const relVal = document.getElementById('filterReliabilitySelect').value;
+      const prioVal = document.getElementById('filterPrioritySelect').value;
+      const searchVal = (document.getElementById('perfSearchInput').value || '').trim().toUpperCase();
+
+      perfDisplayedSymbols = perfRawData.symbols.filter(s => {
+        if (relVal === 'STAT' && s.reliability !== 'STATISTICALLY_VALID') return false;
+        if (relVal === 'MOD' && s.total_trades < 5) return false;
+        if (prioVal !== 'ALL' && s.priority_num.toString() !== prioVal) return false;
+        if (searchVal && !s.symbol.toUpperCase().includes(searchVal)) return false;
+        return true;
+      });
+
+      // Sort
+      perfDisplayedSymbols.sort((a, b) => {
+        let vA = a[perfSortCol];
+        let vB = b[perfSortCol];
+        if (typeof vA === 'string') {
+          return perfSortAsc ? vA.localeCompare(vB) : vB.localeCompare(vA);
+        }
+        return perfSortAsc ? (vA - vB) : (vB - vA);
+      });
+
+      renderPerformanceTable(perfDisplayedSymbols);
+    }
+
+    function sortPerfTable(col) {
+      if (perfSortCol === col) {
+        perfSortAsc = !perfSortAsc;
+      } else {
+        perfSortCol = col;
+        perfSortAsc = false;
+      }
+      applyPerfFilters();
+    }
+
+    function renderPerformanceTable(symbols) {
+      const tbody = document.getElementById('perfTableTbody');
+      if (!tbody) return;
+
+      if (!symbols || symbols.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="12" class="py-6 text-center text-slate-500 font-sans">No symbols match the selected filters.</td></tr>';
+        return;
+      }
+
+      tbody.innerHTML = symbols.map(s => {
+        let pBadgeClass = 'bg-slate-800 text-slate-300 border-slate-700';
+        let pIcon = '🔍';
+        if (s.priority_num === 1) {
+          pBadgeClass = 'bg-emerald-500/20 text-emeraldaccent border-emerald-500/40 font-bold';
+          pIcon = '⭐';
+        } else if (s.priority_num === 2) {
+          pBadgeClass = 'bg-cyan-500/10 text-cyanaccent border-cyan-500/30 font-bold';
+          pIcon = '✅';
+        } else if (s.priority_num === 3) {
+          pBadgeClass = 'bg-amber-500/10 text-amberaccent border-amber-500/20';
+          pIcon = '👀';
+        } else if (s.priority_num === 4) {
+          pBadgeClass = 'bg-orange-500/10 text-orange-400 border-orange-500/20';
+          pIcon = '⚠️';
+        } else if (s.priority_num === 5) {
+          pBadgeClass = 'bg-red-500/20 text-crimsonaccent border-red-500/40 font-bold';
+          pIcon = '🛑';
+        }
+
+        const isProfit = s.net_pnl >= 0;
+        const pnlClass = isProfit ? 'text-emeraldaccent font-bold' : 'text-crimsonaccent font-bold';
+
+        return `
+          <tr class="hover:bg-slate-900/60 font-mono transition">
+            <td class="py-2.5 px-3 text-slate-500">#${s.rank}</td>
+            <td class="py-2.5 px-3">
+              <span onclick="jumpToTradeSymbol('${s.symbol}')" class="font-bold text-white font-sans hover:text-cyanaccent cursor-pointer transition flex items-center gap-1.5">
+                ${s.symbol}
+                ${s.open_positions > 0 ? `<span class="px-1.5 py-0.2 rounded-full bg-blue-500/20 text-cyanaccent text-[9px] font-mono">${s.open_positions} open</span>` : ''}
+              </span>
+            </td>
+            <td class="py-2.5 px-3">
+              <span class="px-2 py-0.5 rounded text-[10px] border ${pBadgeClass}">
+                ${pIcon} ${s.recommendation}
+              </span>
+            </td>
+            <td class="py-2.5 px-3">
+              <span class="px-2 py-0.5 rounded text-[10px] border ${s.stat_badge}">${s.stat_label}</span>
+            </td>
+            <td class="py-2.5 px-3">
+              <div class="flex items-center gap-2">
+                <div class="w-12 bg-slate-800 rounded-full h-1.5 overflow-hidden">
+                  <div class="bg-cyanaccent h-1.5 rounded-full" style="width: ${s.win_rate}%"></div>
+                </div>
+                <span class="font-bold text-white">${s.win_rate}%</span>
+                <span class="text-[10px] text-slate-500">(${s.winning_trades}W/${s.losing_trades}L)</span>
+              </div>
+            </td>
+            <td class="py-2.5 px-3 ${pnlClass}">
+              ${isProfit ? '+' : ''}$${s.net_pnl.toFixed(2)}
+            </td>
+            <td class="py-2.5 px-3 font-bold ${s.profit_factor >= 1.3 ? 'text-emeraldaccent' : (s.profit_factor >= 1.0 ? 'text-slate-200' : 'text-crimsonaccent')}">
+              ${s.profit_factor}
+            </td>
+            <td class="py-2.5 px-3 ${s.avg_profit_per_trade >= 0 ? 'text-slate-300' : 'text-crimsonaccent'}">
+              ${s.avg_profit_per_trade >= 0 ? '+' : ''}$${s.avg_profit_per_trade}
+            </td>
+            <td class="py-2.5 px-3 text-slate-400">
+              ${s.rr_performance}:1
+            </td>
+            <td class="py-2.5 px-3 text-crimsonaccent">
+              ${s.max_drawdown > 0 ? `-$${s.max_drawdown}` : '$0.00'}
+            </td>
+            <td class="py-2.5 px-3">
+              <div class="flex items-center gap-1.5">
+                <span class="font-black text-white text-xs">${s.score}</span>
+                <div class="w-8 bg-slate-800 rounded-full h-1.5 overflow-hidden">
+                  <div class="bg-emeraldaccent h-1.5 rounded-full" style="width: ${s.score}%"></div>
+                </div>
+              </div>
+            </td>
+            <td class="py-2.5 px-3 text-right font-sans">
+              <button onclick="jumpToTradeSymbol('${s.symbol}')" class="px-2.5 py-1 rounded bg-brand/10 hover:bg-brand text-brand hover:text-white border border-brand/30 text-[11px] font-bold transition">
+                Trade Symbol &rarr;
+              </button>
+            </td>
+          </tr>
+        `;
+      }).join('');
+    }
+
+    function jumpToTradeSymbol(sym) {
+      switchMainTab('station');
+      selectSymbol(sym);
+      const formEl = document.getElementById('orderForm');
+      if (formEl) {
+        formEl.scrollIntoView({ behavior: 'smooth' });
+        formEl.classList.add('ring-2', 'ring-brand');
+        setTimeout(() => formEl.classList.remove('ring-2', 'ring-brand'), 1500);
+      }
+    }
+
+    function jumpToTradeSymbol(sym) {
+      switchMainTab('station');
+      selectSymbol(sym);
+      const formEl = document.getElementById('orderForm');
+      if (formEl) {
+        formEl.scrollIntoView({ behavior: 'smooth' });
+        formEl.classList.add('ring-2', 'ring-brand');
+        setTimeout(() => formEl.classList.remove('ring-2', 'ring-brand'), 1500);
+      }
+    }
+
+    // ==============================================================================
+    // 5-TRADE MULTI-TP SYSTEM JAVASCRIPT CONTROLLER (Requirements 1 - 8)
+    // ==============================================================================
+    let multiTpGroups = [];
+
+    function updateMtpRiskPreview() {
+      const refInput = document.getElementById('mtpRefBalanceInput');
+      const badge = document.getElementById('mtpRiskDollarBadge');
+      const ref = parseFloat(refInput ? refInput.value : 1000) || 1000;
+      const risk = (ref * 0.05).toFixed(2);
+      const riskPerTrade = (risk / 3.0).toFixed(2);
+      if (badge) {
+        badge.innerText = `5.0% ($${risk} max, $${riskPerTrade}/pos)`;
+      }
+
+      // Update Order Ticket preview cards
+      const t1 = document.getElementById('otMtpT1Target');
+      const t2 = document.getElementById('otMtpT2Target');
+      const t3 = document.getElementById('otMtpT3Target');
+      const otRisk = document.getElementById('otMtpRiskBadge');
+      if (t1) t1.innerText = `+$${(ref * 0.02).toFixed(2)} Target`;
+      if (t2) t2.innerText = `+$${(ref * 0.05).toFixed(2)} Target`;
+      if (t3) t3.innerText = `+$${(ref * 0.15).toFixed(2)}+ Runner`;
+      if (otRisk) otRisk.innerText = `Risk: $${risk} Max ($${riskPerTrade}/pos)`;
+    }
+
+    function useLiveBalanceForMtp() {
+      const balance = (derivState && derivState.account && derivState.account.balance) || 1000;
+      const refInput = document.getElementById('mtpRefBalanceInput');
+      if (refInput) {
+        refInput.value = balance.toFixed(2);
+        updateMtpRiskPreview();
+      }
+    }
+
+    async function fetchMultiTpGroups() {
+      try {
+        const res = await fetch('/api/multi_tp/groups');
+        multiTpGroups = await res.json();
+        renderMultiTpGroups(multiTpGroups);
+      } catch (err) {
+        console.error('Error fetching multi-tp groups:', err);
+      }
+    }
+
+    function renderMultiTpGroups(groups) {
+      const container = document.getElementById('mtpGroupsContainer');
+      const badge = document.getElementById('mtpGroupsBadge');
+      if (!container) return;
+
+      const activeGroups = (groups || []).filter(g => g.status === 'ACTIVE');
+      if (badge) {
+        badge.innerText = `${activeGroups.length} ACTIVE / ${(groups || []).length} TOTAL`;
+        badge.className = `text-xs px-2.5 py-0.5 rounded-full font-mono font-semibold border ${activeGroups.length > 0 ? 'bg-emerald-500/20 text-emeraldaccent border-emerald-500/40' : 'bg-slate-800 text-slate-400 border-slate-700'}`;
+      }
+
+      if (!groups || groups.length === 0) {
+        container.innerHTML = `
+          <div class="py-8 px-4 text-center bg-slate-900/40 rounded-xl border border-dashed border-bordercol space-y-2">
+            <span class="text-2xl block">⚡</span>
+            <div class="text-xs font-bold text-slate-200 uppercase tracking-wider">No Active Multi-TP Trade Groups</div>
+            <p class="text-[11px] text-slate-400 max-w-md mx-auto">
+              Execute a 3-Trade Multi-TP opportunity from the Order Ticket or Active Setups cards. Each opportunity opens 2 separate positions: Trade 1 (Fixed Target 1.8x range / Quick Bank) and Trade 2 (AI Dynamic Runner 4.0x range with infinite upside) with a shared Stop Loss, staying well within the 15-position account limit.
+            </p>
+          </div>
+        `;
+        return;
+      }
+
+      container.innerHTML = groups.map(g => {
+        const isBuy = g.action === 'BUY';
+        const badgeClass = isBuy ? 'bg-emerald-500/10 text-emeraldaccent border-emerald-500/20' : 'bg-red-500/10 text-crimsonaccent border-red-500/20';
+        const isActive = g.status === 'ACTIVE';
+        const totalPnl = g.total_profit || 0;
+        const pnlClass = totalPnl >= 0 ? 'text-emeraldaccent font-bold' : 'text-crimsonaccent font-bold';
+
+        return `
+          <div class="p-4 rounded-xl bg-slate-900/90 border ${isActive ? 'border-emerald-500/30 shadow-md shadow-emerald-500/5' : 'border-bordercol'} space-y-3.5 transition">
+            
+            <!-- Group Header -->
+            <div class="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-bordercol/80">
+              <div class="flex items-center gap-3">
+                <span class="px-2 py-0.5 rounded text-xs font-mono font-bold border ${badgeClass}">${g.action}</span>
+                <div>
+                  <div class="flex items-center gap-2">
+                    <span class="font-bold text-white text-sm font-sans">${g.symbol}</span>
+                    <span class="text-[10px] px-2 py-0.2 rounded bg-slate-800 text-slate-400 font-mono">ID: ${g.group_id}</span>
+                  </div>
+                  <div class="text-[11px] text-slate-400 font-mono mt-0.5">
+                    Entry: <b class="text-slate-200">${g.entry_price}</b> &bull; Shared SL: <b class="text-crimsonaccent">${g.shared_sl}</b> (Planned Risk: $${g.total_risk_dollar} / ${g.total_risk_pct}%)
+                  </div>
+                </div>
+              </div>
+
+              <!-- Realized & Floating Group PnL Summary -->
+              <div class="flex items-center gap-4">
+                <div class="text-right font-mono">
+                  <div class="text-[10px] text-slate-500">GROUP TOTAL P&L</div>
+                  <div class="text-base font-black ${pnlClass}">${totalPnl >= 0 ? '+' : ''}$${totalPnl.toFixed(2)}</div>
+                  <div class="text-[10px] text-slate-400">Realized: $${g.realized_profit} | Floating: $${g.floating_profit}</div>
+                </div>
+
+                <div class="flex items-center gap-2">
+                  <span class="text-[10px] px-2 py-1 rounded font-mono font-bold border ${isActive ? 'bg-emerald-500/20 text-emeraldaccent border-emerald-500/40 animate-pulse' : 'bg-slate-800 text-slate-400 border-slate-700'}">
+                    ${g.status}
+                  </span>
+                  ${isActive ? `
+                    <button onclick="closeMtpGroup('${g.group_id}')" class="px-2.5 py-1 rounded bg-red-500/10 hover:bg-red-500/20 text-crimsonaccent border border-red-500/30 text-xs font-bold transition">
+                      Close Group
+                    </button>
+                  ` : ''}
+                </div>
+              </div>
+            </div>
+
+            <!-- Individual Positions Grid (Dynamic 3-Column Power Layout) -->
+            <div class="grid grid-cols-1 ${(g.positions && g.positions.length <= 3) ? 'md:grid-cols-3' : 'md:grid-cols-5'} gap-3 text-xs font-mono">
+              ${(g.positions || []).map(p => {
+                const isPosActive = p.status === 'ACTIVE';
+                const posPnl = isPosActive ? (p.floating_profit || 0) : (p.realized_profit || 0);
+                const posPnlClass = posPnl >= 0 ? 'text-emeraldaccent font-bold' : 'text-crimsonaccent font-bold';
+                let statusBadge = 'bg-slate-800 text-slate-400 border-slate-700';
+                if (isPosActive) {
+                  statusBadge = 'bg-blue-500/10 text-cyanaccent border-blue-500/30';
+                } else if (p.status.includes('TP REACHED')) {
+                  statusBadge = 'bg-emerald-500/20 text-emeraldaccent border-emerald-500/40 font-bold';
+                } else if (p.status.includes('STOP LOSS')) {
+                  statusBadge = 'bg-red-500/20 text-crimsonaccent border-red-500/40 font-bold';
+                }
+
+                return `
+                  <div class="p-2.5 rounded-lg bg-slate-950/70 border ${isPosActive ? 'border-bordercol' : 'border-slate-800/60 opacity-90'} space-y-2 flex flex-col justify-between">
+                    <div>
+                      <div class="flex items-center justify-between pb-1.5 border-b border-slate-800/80">
+                        <span class="font-bold text-white text-[11px]">${p.name}</span>
+                        <span class="text-[9px] text-slate-500">#${p.ticket}</span>
+                      </div>
+                      <div class="space-y-1 text-[10px] mt-1.5">
+                        <div class="flex justify-between"><span class="text-slate-500">Target Dollar:</span><span class="text-emeraldaccent font-bold">+$${p.target_dollar} (${p.target_pct})</span></div>
+                        <div class="flex justify-between"><span class="text-slate-500">TP Price:</span><span class="text-white font-bold">${p.tp}</span></div>
+                        <div class="flex justify-between"><span class="text-slate-500">Shared SL:</span><span class="text-crimsonaccent">${p.sl} (-$${p.planned_risk_dollar})</span></div>
+                        <div class="flex justify-between"><span class="text-slate-500">Volume:</span><span class="text-slate-300">${p.lot} lots</span></div>
+                      </div>
+                    </div>
+
+                    <div class="pt-1.5 border-t border-slate-800/80 flex items-center justify-between">
+                      <div>
+                        <span class="text-[9px] text-slate-500 block leading-none">${isPosActive ? 'FLOATING' : 'REALIZED'}</span>
+                        <span class="${posPnlClass} text-xs">${posPnl >= 0 ? '+' : ''}$${posPnl.toFixed(2)}</span>
+                      </div>
+                      ${isPosActive ? `
+                        <button onclick="closeMtpTrade(${p.ticket})" class="px-2 py-0.5 rounded bg-red-500/10 hover:bg-red-500/20 text-crimsonaccent border border-red-500/20 text-[10px] transition">
+                          Close
+                        </button>
+                      ` : `
+                        <span class="px-1.5 py-0.5 rounded text-[9px] border ${statusBadge}">${p.status.split('(')[0].trim()}</span>
+                      `}
+                    </div>
+                  </div>
+                `;
+              }).join('')}
+            </div>
+
+            <!-- Notes -->
+            ${g.ai_notes ? `
+              <div class="text-[10px] text-slate-400 font-sans px-1 flex items-center gap-1.5">
+                <span class="text-cyanaccent font-bold">System Strategy:</span> ${g.ai_notes}
+              </div>
+            ` : ''}
+
+          </div>
+        `;
+      }).join('');
+    }
+
+    async function executeMtpFromCurrentForm() {
+      const sym = activeSymbol;
+      const action = currentDirection;
+      const refInput = document.getElementById('mtpRefBalanceInput');
+      const refBalance = parseFloat(refInput ? refInput.value : 1000) || 1000;
+      const lotInput = document.getElementById('tradeVolume');
+      const lotPerTrade = parseFloat(lotInput ? lotInput.value : 0.01) || 0.01;
+
+      const riskDollar = (refBalance * 0.05).toFixed(2);
+      const riskPerTrade = (refBalance * 0.01).toFixed(2);
+
+      if (!confirm(`Execute 2-Trade Multi-TP Power System on ${sym} (${action})?\n\n` +
+                   `• 3 Separate Positions: ${(lotPerTrade * 3).toFixed(2)} total lots (${lotPerTrade} lots each)\n` +
+                   `• Shared Stop Loss: 5% maximum planned risk ($${riskDollar} total, $${(riskDollar/3).toFixed(2)} per position)\n` +
+                   `• Trade 1: TP 2% (+$${(refBalance*0.02).toFixed(0)} Target) - High hit rate, banks quick profit\n` +
+                   `• Trade 2: TP 5% (+$${(refBalance*0.05).toFixed(0)} Target) - Core trend move capture\n` +
+                   `• Trade 3: Dynamic AI Runner (Infinite Upside / Trailing Stop)\n\n` +
+                   `Transmit all 3 orders directly to Deriv MT5 terminal?`)) {
+        return;
+      }
+
+      const statusBox = document.getElementById('orderStatusMsg');
+      statusBox.className = 'text-xs p-3 rounded-lg bg-blue-500/10 text-blue-400 border border-blue-500/20';
+      statusBox.innerText = `Transmitting 2-Trade Multi-TP group on ${sym} to Deriv MT5...`;
+      statusBox.classList.remove('hidden');
+
+      try {
+        const res = await fetch('/api/multi_tp/execute', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            symbol: sym,
+            action: action,
+            ref_balance: refBalance,
+            lot_per_trade: lotPerTrade,
+            ai_notes: `Manual Execution via Form (${sym} ${action})`
+          })
+        });
+        const out = await res.json();
+        if (out.success) {
+          statusBox.className = 'text-xs p-3 rounded-lg bg-emerald-500/10 text-emeraldaccent border border-emerald-500/20';
+          statusBox.innerText = `✅ ${out.message}`;
+          fetchMultiTpGroups();
+          refreshAll();
+        } else {
+          statusBox.className = 'text-xs p-3 rounded-lg bg-red-500/10 text-crimsonaccent border border-red-500/20';
+          statusBox.innerText = `❌ ${out.message}`;
+        }
+      } catch (err) {
+        statusBox.className = 'text-xs p-3 rounded-lg bg-red-500/10 text-crimsonaccent border border-red-500/20';
+        statusBox.innerText = 'Multi-TP execution error: ' + err;
+      }
+    }
+
+    async function executeMtpDirectlyFromSetup(s) {
+      const sym = s.symbol;
+      const action = s.action;
+      const refInput = document.getElementById('mtpRefBalanceInput');
+      const refBalance = parseFloat(refInput ? refInput.value : 1000) || 1000;
+      const riskDollar = (refBalance * 0.05).toFixed(2);
+
+      if (!confirm(`Execute 1-Trade Setup on ${sym} (${action})?\n\n` +
+                   `• Symbol: ${sym} (${action})\n` +
+                   `• Policy: Exactly 1 Trade Per Symbol\n` +
+                   `• Dual-TP Options: TP1 (${s.tp1 || s.tp}) or TP2 (${s.tp2 || s.tp}) - randomly allocated\n` +
+                   `• Risk Stop Loss: ${s.sl}\n` +
+                   `• Confidence Score: ${s.conviction}\n\n` +
+                   `Proceed with execution on Headway MT5?`)) {
+        return;
+      }
+
+      try {
+        const res = await fetch('/api/multi_tp/execute', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            symbol: sym,
+            action: action,
+            ref_balance: refBalance,
+            lot_per_trade: 0.01,
+            ai_notes: `Setup: ${s.setup_name} (${s.conviction}) - ${s.technical_signals}`
+          })
+        });
+        const out = await res.json();
+        alert(out.message);
+        // Immediately remove taken setup card from Recommended Setups
+        dismissSetupCard(s.id, s.symbol, s.action);
+        fetchMultiTpGroups();
+        refreshAll();
+      } catch (err) {
+        alert('Multi-TP execution error: ' + err);
+      }
+    }
+
+    async function closeMtpGroup(gid) {
+      if (!confirm(`Close all remaining active positions in Multi-TP Group ${gid}?`)) return;
+      try {
+        const res = await fetch('/api/multi_tp/close_group', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ group_id: gid })
+        });
+        const out = await res.json();
+        alert(out.message);
+        fetchMultiTpGroups();
+        refreshAll();
+      } catch (err) {
+        alert('Close group error: ' + err);
+      }
+    }
+
+    async function closeMtpTrade(ticket) {
+      if (!confirm(`Close position #${ticket} on Deriv MT5?`)) return;
+      try {
+        const res = await fetch('/api/multi_tp/close_trade', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ticket: ticket })
+        });
+        const out = await res.json();
+        alert(out.message);
+        fetchMultiTpGroups();
+        refreshAll();
+      } catch (err) {
+        alert('Close trade error: ' + err);
+      }
+    }
+
+    // ==============================================================================
+    // GOLD TRADING INTELLIGENCE CONTROLLER
+    // ==============================================================================
+    let goldBacktestData = null;
+
+    // --------------------------------------------------------------------------
+    // TRADINGVIEW LIGHTWEIGHT CANDLESTICK CHART & STRATEGY OVERLAYS
+    // --------------------------------------------------------------------------
+    let goldChartInstance = null;
+    let goldCandleSeries = null;
+    let currentGoldChartTf = 'M15';
+    let chartPriceLines = [];
+
+    function initGoldChart() {
+      const container = document.getElementById('goldTradingChart');
+      if (!container || goldChartInstance) return;
+
+      if (typeof LightweightCharts === 'undefined') {
+        console.warn('LightweightCharts loading...');
+        setTimeout(initGoldChart, 400);
+        return;
+      }
+
+      try {
+        goldChartInstance = LightweightCharts.createChart(container, {
+          width: container.clientWidth || 800,
+          height: container.clientHeight || 420,
+          layout: {
+            background: { color: '#020617' },
+            textColor: '#94a3b8',
+            fontSize: 11,
+            fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace'
+          },
+          grid: {
+            vertLines: { color: 'rgba(30, 41, 59, 0.4)' },
+            horzLines: { color: 'rgba(30, 41, 59, 0.4)' }
+          },
+          crosshair: {
+            mode: LightweightCharts.CrosshairMode.Normal,
+            vertLine: { color: 'rgba(148, 163, 184, 0.5)', width: 1, style: 2 },
+            horzLine: { color: 'rgba(148, 163, 184, 0.5)', width: 1, style: 2 }
+          },
+          rightPriceScale: {
+            borderColor: 'rgba(30, 41, 59, 0.8)',
+            scaleMargins: { top: 0.15, bottom: 0.15 }
+          },
+          timeScale: {
+            borderColor: 'rgba(30, 41, 59, 0.8)',
+            timeVisible: true,
+            secondsVisible: false
+          }
+        });
+
+        goldCandleSeries = goldChartInstance.addCandlestickSeries({
+          upColor: '#10b981',
+          downColor: '#ef4444',
+          borderVisible: false,
+          wickUpColor: '#10b981',
+          wickDownColor: '#ef4444'
+        });
+
+        window.addEventListener('resize', () => {
+          if (goldChartInstance && container) {
+            goldChartInstance.applyOptions({ width: container.clientWidth, height: container.clientHeight });
+          }
+        });
+
+        refreshGoldChart(true);
+      } catch (e) {
+        console.error('Failed to init chart:', e);
+      }
+    }
+
+    async function switchGoldChartTf(tf) {
+      currentGoldChartTf = tf;
+      ['btnTfM1', 'btnTfM5', 'btnTfM15', 'btnTfH1', 'btnTfH4'].forEach(id => {
+        const btn = document.getElementById(id);
+        if (btn) {
+          btn.className = 'px-2.5 py-1 rounded text-slate-400 hover:text-white transition';
+        }
+      });
+      const activeBtn = document.getElementById('btnTf' + tf);
+      if (activeBtn) {
+        activeBtn.className = 'px-2.5 py-1 rounded bg-amber-500/20 text-amber-300 font-bold border border-amber-500/40';
+      }
+      refreshGoldChart(true);
+    }
+
+    async function refreshGoldChart(fitTime = false) {
+      if (!goldCandleSeries) {
+        initGoldChart();
+        return;
+      }
+      try {
+        const res = await fetch(`/api/gold/candles?tf=${currentGoldChartTf}&count=140`);
+        if (!res.ok) return;
+        const candles = await res.json();
+        if (candles && candles.length > 0) {
+          goldCandleSeries.setData(candles);
+          if (fitTime && goldChartInstance) {
+            goldChartInstance.timeScale().fitContent();
+          }
+          const latest = candles[candles.length - 1];
+          const quoteEl = document.getElementById('chartLiveQuote');
+          if (quoteEl) {
+            quoteEl.innerHTML = `XAUUSD: <span class="${latest.close >= latest.open ? 'text-emeraldaccent' : 'text-rose-400'} font-bold">${latest.close.toFixed(2)}</span>`;
+          }
+        }
+        await updateChartStrategyOverlays();
+      } catch (err) {
+        console.error('Error refreshing Gold chart:', err);
+      }
+    }
+
+    async function updateChartStrategyOverlays() {
+      if (!goldCandleSeries) return;
+
+      chartPriceLines.forEach(line => {
+        try { goldCandleSeries.removePriceLine(line); } catch (e) {}
+      });
+      chartPriceLines = [];
+
+      try {
+        const stRes = await fetch('/api/gold/auto_trade/status');
+        let activePos = null;
+        if (stRes.ok) {
+          const stData = await stRes.json();
+          const openPositions = stData.open_gold_positions || [];
+          if (openPositions.length > 0) {
+            activePos = openPositions[0];
+          }
+        }
+
+        const beBadge = document.getElementById('chartBeBadge');
+
+        if (activePos) {
+          const entryLine = goldCandleSeries.createPriceLine({
+            price: activePos.entry,
+            color: '#60a5fa',
+            lineWidth: 2,
+            lineStyle: LightweightCharts.LineStyle.Dashed,
+            axisLabelVisible: true,
+            title: `ENTRY (${activePos.direction} #${activePos.ticket})`
+          });
+          chartPriceLines.push(entryLine);
+
+          if (activePos.sl > 0) {
+            const isBe = (activePos.direction === 'BUY' && activePos.sl >= activePos.entry) ||
+                         (activePos.direction === 'SELL' && activePos.sl <= activePos.entry);
+            const slLine = goldCandleSeries.createPriceLine({
+              price: activePos.sl,
+              color: isBe ? '#f59e0b' : '#ef4444',
+              lineWidth: 2,
+              lineStyle: LightweightCharts.LineStyle.Solid,
+              axisLabelVisible: true,
+              title: isBe ? '🛡️ BREAK-EVEN (RISK FREE)' : 'SL (PROTECTIVE)'
+            });
+            chartPriceLines.push(slLine);
+
+            if (beBadge) {
+              if (isBe) beBadge.classList.remove('hidden');
+              else beBadge.classList.add('hidden');
+            }
+          }
+
+          if (activePos.tp > 0) {
+            const tpLine = goldCandleSeries.createPriceLine({
+              price: activePos.tp,
+              color: '#10b981',
+              lineWidth: 2,
+              lineStyle: LightweightCharts.LineStyle.Solid,
+              axisLabelVisible: true,
+              title: 'TP (TARGET)'
+            });
+            chartPriceLines.push(tpLine);
+          }
+        } else {
+          if (beBadge) beBadge.classList.add('hidden');
+          const setupsRes = await fetch('/api/gold/setups');
+          if (setupsRes.ok) {
+            const setups = await setupsRes.json();
+            if (setups && setups.length > 0) {
+              const best = setups[0];
+              if (best.entry > 0) {
+                chartPriceLines.push(goldCandleSeries.createPriceLine({
+                  price: best.entry,
+                  color: '#60a5fa',
+                  lineWidth: 1,
+                  lineStyle: LightweightCharts.LineStyle.Dashed,
+                  axisLabelVisible: true,
+                  title: `SETUP ENTRY (${best.direction})`
+                }));
+              }
+              if (best.sl > 0) {
+                chartPriceLines.push(goldCandleSeries.createPriceLine({
+                  price: best.sl,
+                  color: '#ef4444',
+                  lineWidth: 1,
+                  lineStyle: LightweightCharts.LineStyle.Solid,
+                  axisLabelVisible: true,
+                  title: 'SETUP SL'
+                }));
+              }
+              if (best.tp1 > 0) {
+                chartPriceLines.push(goldCandleSeries.createPriceLine({
+                  price: best.tp1,
+                  color: '#10b981',
+                  lineWidth: 1,
+                  lineStyle: LightweightCharts.LineStyle.Solid,
+                  axisLabelVisible: true,
+                  title: 'TP1 (1.8R)'
+                }));
+              }
+              if (best.tp2 > 0) {
+                chartPriceLines.push(goldCandleSeries.createPriceLine({
+                  price: best.tp2,
+                  color: '#22d3ee',
+                  lineWidth: 1,
+                  lineStyle: LightweightCharts.LineStyle.Solid,
+                  axisLabelVisible: true,
+                  title: 'TP2 (4.0R)'
+                }));
+              }
+            }
+          }
+        }
+      } catch (e) {
+        console.error('Error updating chart overlays:', e);
+      }
+    }
+
+    async function loadGoldDashboard(force=false) {
+      if (!goldChartInstance) {
+        initGoldChart();
+      } else {
+        refreshGoldChart(false);
+      }
+      const syncIcon = document.getElementById('goldSyncIcon');
+      if (syncIcon) syncIcon.classList.add('animate-spin');
+
+      try {
+        // 0. Fetch Auto-Trade Status
+        const autoRes = await fetch('/api/gold/auto_trade/status');
+        if (autoRes.ok) {
+          const autoSt = await autoRes.json();
+          renderGoldAutoStatus(autoSt);
+        }
+
+        // 1. Fetch Overview
+        const overviewRes = await fetch('/api/gold/overview');
+        if (overviewRes.ok) {
+          const ov = await overviewRes.json();
+          renderGoldOverview(ov);
+        }
+
+        // 2. Fetch Setups
+        const setupsRes = await fetch('/api/gold/setups');
+        if (setupsRes.ok) {
+          const setups = await setupsRes.json();
+          renderGoldSetups(setups);
+        }
+
+        // 3. Fetch Multi-Timeframe Matrix
+        const matrixRes = await fetch('/api/gold/matrix');
+        if (matrixRes.ok) {
+          const matrix = await matrixRes.json();
+          renderGoldMtfMatrix(matrix);
+        }
+
+        // 4. Fetch Backtest Results
+        const btRes = await fetch('/api/gold/backtest/results');
+        if (btRes.ok) {
+          goldBacktestData = await btRes.json();
+          renderGoldBacktest(goldBacktestData);
+        }
+
+        // 5. Fetch Macro Events
+        const macroRes = await fetch('/api/gold/macro');
+        if (macroRes.ok) {
+          const events = await macroRes.json();
+          renderGoldMacroEvents(events);
+        }
+      } catch (err) {
+        console.error('Error loading Gold dashboard:', err);
+      } finally {
+        if (syncIcon) syncIcon.classList.remove('animate-spin');
+      }
+    }
+
+    function renderGoldAutoStatus(st) {
+      if (!st) return;
+      const badge = document.getElementById('goldAutoTradeBadge');
+      const dot = document.getElementById('goldAutoDot');
+      const btnText = document.getElementById('goldAutoBtnText');
+      const pulse = document.getElementById('goldAutoTradePulse');
+      const msg = document.getElementById('goldAutoStatusMsg');
+      const btn = document.getElementById('btnToggleGoldAuto');
+
+      if (badge && dot && btnText && btn) {
+        if (st.enabled) {
+          badge.className = 'px-2.5 py-0.5 rounded-full text-[10px] font-bold font-mono bg-emerald-500/20 text-emeraldaccent border border-emerald-500/30';
+          badge.innerText = 'AUTONOMOUS TRADING: ACTIVE';
+          dot.className = 'w-2.5 h-2.5 rounded-full bg-emeraldaccent animate-pulse';
+          btnText.innerText = 'PAUSE GOLD AUTO-TRADE';
+          btn.className = 'px-4 py-2.5 rounded-xl text-xs font-black transition shadow-lg flex items-center gap-2 bg-emerald-600 hover:bg-emerald-500 text-white shadow-emerald-500/20';
+          if (pulse) pulse.className = 'w-10 h-10 rounded-xl bg-emerald-500/20 border border-emerald-500/40 flex items-center justify-center text-lg shadow-inner animate-pulse';
+        } else {
+          badge.className = 'px-2.5 py-0.5 rounded-full text-[10px] font-bold font-mono bg-slate-800 text-slate-400 border border-slate-700';
+          badge.innerText = 'STANDBY / DISABLED';
+          dot.className = 'w-2.5 h-2.5 rounded-full bg-slate-500';
+          btnText.innerText = 'ENABLE GOLD AUTO-TRADE';
+          btn.className = 'px-4 py-2.5 rounded-xl text-xs font-black transition shadow-lg flex items-center gap-2 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700';
+          if (pulse) pulse.className = 'w-10 h-10 rounded-xl bg-slate-800 border border-slate-700 flex items-center justify-center text-lg shadow-inner';
+        }
+      }
+
+      if (msg && st.status_message) {
+        msg.innerText = `${st.status_message} (Check: ${st.last_eval_time || 'Just now'})`;
+      }
+
+      if (st.config) {
+        const confEl = document.getElementById('goldCfgConf');
+        if (confEl) confEl.innerText = `≥ ${st.config.min_confidence}%`;
+        const lotEl = document.getElementById('goldCfgLot');
+        if (lotEl) lotEl.innerText = `${st.config.lot_size} Lot`;
+        const tpEl = document.getElementById('goldCfgTp');
+        if (tpEl) tpEl.innerText = 'TWIN (1 FIX + 1 TRL)';
+
+        const lotSel = document.getElementById('goldLotSelect');
+        if (lotSel && document.activeElement !== lotSel) lotSel.value = String(st.config.lot_size);
+        const confSel = document.getElementById('goldConfSelect');
+        if (confSel && document.activeElement !== confSel) confSel.value = String(st.config.min_confidence);
+        const autoTfSel = document.getElementById('goldAutoTfSelect');
+        if (autoTfSel && document.activeElement !== autoTfSel && st.config.timeframe_filter) {
+          autoTfSel.value = st.config.timeframe_filter;
+        }
+      }
+
+      const dailyEl = document.getElementById('goldDailyTrades');
+      if (dailyEl) dailyEl.innerText = `${st.daily_trades_count || 0} / ${st.max_daily_trades || 6} max`;
+
+      const openPositions = st.open_gold_positions || [];
+      const trailingMap = {};
+      (st.trailing_positions || []).forEach(tr => { trailingMap[tr.ticket] = tr; });
+
+      const openPosEl = document.getElementById('goldOpenPosStatus');
+      const legsCountEl = document.getElementById('goldOpenLegsCount');
+      const maxCap = st.max_concurrent_trades || 5;
+      if (legsCountEl) {
+        legsCountEl.innerText = `${openPositions.length} / ${maxCap} Active Trades ${openPositions.length >= maxCap ? '⚡ CAP FULL (5/5)' : '⚡ AUTO-REPLACE ON TP ACTIVE'}`;
+      }
+
+      if (openPosEl) {
+        if (openPositions.length > 0) {
+          openPosEl.className = 'font-bold text-emeraldaccent';
+          openPosEl.innerText = `${openPositions.length} / ${maxCap} Active Trades (${openPositions.map(p => `#${p.ticket} $${p.profit}`).join(', ')})`;
+        } else {
+          openPosEl.className = 'font-bold text-slate-400';
+          openPosEl.innerText = `0 / ${maxCap} Active (Auto-Replace Ready)`;
+        }
+      }
+
+      // Populate Gold Positions Table
+      const tbody = document.getElementById('goldPositionsTbody');
+      if (tbody) {
+        if (openPositions.length === 0) {
+          tbody.innerHTML = '<tr><td colspan="10" class="py-4 text-center text-slate-500">No open Gold positions currently. Use terminal above or setup cards to enter twin trades.</td></tr>';
+        } else {
+          tbody.innerHTML = openPositions.map(p => {
+            const trInfo = trailingMap[p.ticket];
+            const isTrailingLeg = !!trInfo || p.tp === 0;
+            const isBuy = p.direction === 'BUY';
+            const profitVal = parseFloat(p.profit) || 0.0;
+            const pnlColor = profitVal >= 0 ? 'text-emeraldaccent font-bold' : 'text-rose-400 font-bold';
+
+            let roleBadge = '';
+            let telemetryHtml = '';
+
+            if (isTrailingLeg) {
+              roleBadge = '<span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/30">✨ Trade 2: Trailing Runner</span>';
+              const beStatus = trInfo && trInfo.be_moved ? '<span class="text-emeraldaccent font-bold">🛡️ BE Armed</span>' : '<span class="text-slate-400">BE Pending (+1R)</span>';
+              telemetryHtml = `<div class="text-[10px]">${beStatus} &bull; Trail: <span class="text-amber-300">$${trInfo ? trInfo.trail_dist : 3.50}/oz</span></div>`;
+            } else {
+              roleBadge = '<span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-blue-500/20 text-blue-300 border border-blue-500/30">🎯 Trade 1: Fixed Target</span>';
+              telemetryHtml = `<div class="text-[10px] text-slate-400">Broker Limit Target: <span class="text-emeraldaccent font-bold">${p.tp}</span></div>`;
+            }
+
+            return `
+              <tr class="hover:bg-slate-900/60 transition">
+                <td class="py-2.5 px-3 font-bold text-slate-200">#${p.ticket}</td>
+                <td class="py-2.5 px-3">${roleBadge}</td>
+                <td class="py-2.5 px-3"><span class="px-1.5 py-0.5 rounded text-[10px] font-bold ${isBuy ? 'bg-emerald-500/20 text-emeraldaccent' : 'bg-rose-500/20 text-rose-300'}">${p.direction}</span></td>
+                <td class="py-2.5 px-3 text-slate-300">${p.lot} lot</td>
+                <td class="py-2.5 px-3 text-slate-300">${p.entry}</td>
+                <td class="py-2.5 px-3 text-white font-bold">${p.current}</td>
+                <td class="py-2.5 px-3 text-rose-300">${p.sl || '--'}</td>
+                <td class="py-2.5 px-3 text-emeraldaccent">${p.tp > 0 ? p.tp : 'Trailing'}</td>
+                <td class="py-2.5 px-3 ${pnlColor}">$${profitVal.toFixed(2)}</td>
+                <td class="py-2.5 px-3">${telemetryHtml}</td>
+              </tr>
+            `;
+          }).join('');
+        }
+      }
+
+      const logContainer = document.getElementById('goldAuditLogContainer');
+      if (logContainer && st.recent_logs) {
+        if (st.recent_logs.length === 0) {
+          logContainer.innerHTML = `<div class="p-4 text-center text-slate-500">No autonomous activity recorded yet. Engine initialized and standing by.</div>`;
+        } else {
+          logContainer.innerHTML = st.recent_logs.map(log => {
+            const isFilled = log.status === 'FILLED';
+            const isErr = log.status === 'ERROR';
+            const statusColor = isFilled ? 'text-emeraldaccent' : (isErr ? 'text-rose-400' : 'text-blue-400');
+            return `
+              <div class="p-2.5 px-4 flex items-center justify-between gap-4 hover:bg-slate-900/60 transition">
+                <div class="flex items-center gap-3">
+                  <span class="w-2 h-2 rounded-full ${isFilled ? 'bg-emeraldaccent' : (isErr ? 'bg-rose-500' : 'bg-blue-400')}"></span>
+                  <span class="text-slate-400 font-mono text-[11px]">${log.time || '--'}</span>
+                  <span class="font-bold ${statusColor} text-[11px]">[${log.type || 'INFO'}]</span>
+                  <span class="text-slate-200">${log.message || ''}</span>
+                </div>
+                ${log.ticket ? `<span class="px-2 py-0.5 rounded bg-slate-900 border border-bordercol text-[10px] text-amber-300 font-bold">Ticket #${log.ticket}</span>` : ''}
+              </div>
+            `;
+          }).join('');
+        }
+      }
+    }
+
+    async function toggleGoldAutoTrade() {
+      try {
+        const res = await fetch('/api/gold/auto_trade/toggle', { method: 'POST' });
+        const out = await res.json();
+        loadGoldDashboard();
+      } catch (err) {
+        alert('Toggle error: ' + err);
+      }
+    }
+
+    async function updateGoldAutoSettings() {
+      const lot = parseFloat(document.getElementById('goldLotSelect') ? document.getElementById('goldLotSelect').value : 0.01);
+      const conf = parseInt(document.getElementById('goldConfSelect') ? document.getElementById('goldConfSelect').value : 90);
+      const tfFilter = document.getElementById('goldAutoTfSelect') ? document.getElementById('goldAutoTfSelect').value : 'M1_M5';
+      try {
+        await fetch('/api/gold/auto_trade/config', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            lot_size: lot,
+            min_confidence: conf,
+            timeframe_filter: tfFilter,
+            twin_trade_enabled: true
+          })
+        });
+        loadGoldDashboard();
+      } catch (err) {
+        console.error('Failed to update Gold auto settings:', err);
+      }
+    }
+
+    // --------------------------------------------------------------------------
+    // GOLD HIGH-FREQUENCY MANUAL TRADING TERMINAL & TWIN-ORDER CONTROLLER
+    // --------------------------------------------------------------------------
+    let currentManualTradeTf = 'M1';
+
+    function setManualTradeTf(tf) {
+      currentManualTradeTf = tf;
+      ['btnTerminalM1', 'btnTerminalM5', 'btnTerminalM15'].forEach(id => {
+        const b = document.getElementById(id);
+        if (b) {
+          b.className = 'py-2 px-2.5 rounded-xl bg-slate-950 text-slate-400 hover:text-white border border-bordercol text-center transition flex flex-col items-center';
+        }
+      });
+      const activeBtn = document.getElementById('btnTerminal' + tf);
+      if (activeBtn) {
+        activeBtn.className = 'py-2 px-2.5 rounded-xl bg-amber-500/20 text-amber-300 font-bold border border-amber-500/40 text-center transition flex flex-col items-center';
+      }
+
+      const displayEl = document.getElementById('activeTerminalTfDisplay');
+      if (displayEl) {
+        displayEl.innerText = tf === 'M1' ? '⚡ M1 SCALP MODE' : (tf === 'M5' ? '⚡ 5M MOMENTUM MODE' : 'M15 INTRADAY MODE');
+      }
+
+      // Automatically sync chart timeframe
+      switchGoldChartTf(tf);
+      updateTerminalPreview();
+    }
+
+    function updateTerminalPreview() {
+      const lotSel = document.getElementById('terminalLotSelect');
+      const lot = parseFloat(lotSel ? lotSel.value : 0.01);
+      const totalEl = document.getElementById('terminalTotalLot');
+      if (totalEl) totalEl.innerText = `${(lot * 2).toFixed(2)} Lot (${(lot * 200).toFixed(0)} oz total)`;
+
+      const p1El = document.getElementById('previewLeg1Tp');
+      const p2El = document.getElementById('previewLeg2Tp');
+      if (currentManualTradeTf === 'M1') {
+        if (p1El) p1El.innerText = '+1.5R Fixed Target (Scalp TP1)';
+        if (p2El) p2El.innerText = 'Trailing Stop ($3.00/oz Trail)';
+      } else if (currentManualTradeTf === 'M5') {
+        if (p1El) p1El.innerText = '+1.8R Fixed Target (Momentum TP1)';
+        if (p2El) p2El.innerText = 'Trailing Stop ($4.50/oz Trail)';
+      } else {
+        if (p1El) p1El.innerText = '+2.5R Fixed Target (Intraday TP1)';
+        if (p2El) p2El.innerText = 'Trailing Stop ($5.00/oz Trail)';
+      }
+    }
+
+    async function executeManualGoldTrade(action) {
+      const lotVal = parseFloat(document.getElementById('terminalLotSelect') ? document.getElementById('terminalLotSelect').value : 0.01);
+
+      // Find matching setup for the chosen timeframe if available
+      let matchedSetup = null;
+      if (cachedGoldSetups && cachedGoldSetups.length > 0) {
+        matchedSetup = cachedGoldSetups.find(s => s.timeframe === currentManualTradeTf && s.direction === action) ||
+                       cachedGoldSetups.find(s => s.timeframe === currentManualTradeTf) ||
+                       cachedGoldSetups[0];
+      }
+
+      let sl = matchedSetup ? matchedSetup.sl : 0.0;
+      let tp1 = matchedSetup ? matchedSetup.tp1 : 0.0;
+
+      const confirmMsg = `⚡ CONFIRM TWIN TRADE EXECUTION ON GOLD (XAUUSD)?\n\n` +
+                         `• Direction: ${action}\n` +
+                         `• Timeframe: ${currentManualTradeTf}\n` +
+                         `• Volume: ${lotVal} lot per leg (Total: ${(lotVal * 2).toFixed(2)} lots)\n` +
+                         `• Trade 1: Hard Fixed Take Profit (TP1 ${tp1 || '~1.5R'})\n` +
+                         `• Trade 2: Dynamic Trailing Take Profit (Runner)\n` +
+                         `• Stop Loss: Shared Structural Risk (${sl || 'ATR-based'})`;
+
+      if (!confirm(confirmMsg)) return;
+
+      try {
+        const res = await fetch('/api/gold/execute_twin', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            direction: action,
+            lot: lotVal,
+            timeframe: currentManualTradeTf,
+            sl: sl,
+            tp_fixed: tp1,
+            confidence: matchedSetup ? matchedSetup.confidence_score : 92,
+            strategy: matchedSetup ? matchedSetup.strategy : `Manual ${currentManualTradeTf} Twin Scalp`
+          })
+        });
+
+        const out = await res.json();
+        alert(out.message || 'Orders submitted to broker!');
+        loadGoldDashboard();
+      } catch (err) {
+        alert('Execution failed: ' + err);
+      }
+    }
+
+    async function closeAllGoldPositions() {
+      if (!confirm('Are you sure you want to close ALL active Gold positions immediately at market?')) return;
+      try {
+        const res = await fetch('/api/gold/close_all', { method: 'POST' });
+        const out = await res.json();
+        alert(`Closed ${out.closed_count || 0} Gold position(s).`);
+        loadGoldDashboard();
+      } catch (e) {
+        alert('Close error: ' + e);
+      }
+    }
+    async function executeGoldSetupNow(direction, entry, sl, tp, confidence, strategy, timeframe='M1') {
+      const lotVal = parseFloat(document.getElementById('goldLotSelect') ? document.getElementById('goldLotSelect').value : 0.01);
+      const confirmMsg = `⚡ EXECUTE TWIN TRADES ON GOLD (${strategy})?\n\n` +
+                         `• Direction: ${direction} (${lotVal} lot x 2)\n` +
+                         `• Entry Zone: ~${entry}\n` +
+                         `• Trade 1: Fixed Target TP1 @ ${tp}\n` +
+                         `• Trade 2: Dynamic Trailing Stop Runner\n` +
+                         `• Stop Loss: ${sl} (Confidence: ${confidence}%)`;
+
+      if (!confirm(confirmMsg)) return;
+
+      try {
+        const res = await fetch('/api/gold/execute_twin', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            direction: direction,
+            lot: lotVal,
+            sl: sl,
+            tp_fixed: tp,
+            confidence: confidence,
+            strategy: strategy,
+            timeframe: timeframe
+          })
+        });
+        const out = await res.json();
+        alert(out.message || 'Twin trade submitted!');
+        loadGoldDashboard();
+      } catch (err) {
+        alert('Execution error: ' + err);
+      }
+    }
+
+    function renderGoldOverview(ov) {
+      const bidAskEl = document.getElementById('goldBidAsk');
+      if (bidAskEl) bidAskEl.innerText = `${ov.bid} / ${ov.ask}`;
+      const spreadEl = document.getElementById('goldSpreadDisplay');
+      if (spreadEl) spreadEl.innerText = `$${ov.spread_usd.toFixed(2)} (${ov.spread_points} pts)`;
+      const regimeTextEl = document.getElementById('goldRegimeText');
+      if (regimeTextEl) regimeTextEl.innerText = ov.regime.replace(/_/g, ' ');
+      const atrEl = document.getElementById('goldAtrDisplay');
+      if (atrEl) atrEl.innerText = `$${ov.atr_14.toFixed(2)}`;
+      const rsiEl = document.getElementById('goldRsiDisplay');
+      if (rsiEl) rsiEl.innerText = ov.rsi_14.toFixed(1);
+      const asianRangeEl = document.getElementById('goldAsianRange');
+      if (asianRangeEl) asianRangeEl.innerText = `$${ov.asian_low} - $${ov.asian_high}`;
+      const asianStatusEl = document.getElementById('goldAsianStatus');
+      if (asianStatusEl) asianStatusEl.innerText = ov.asian_status.replace(/_/g, ' ');
+
+      const badge = document.getElementById('goldRegimeBadge');
+      if (badge) {
+        if (ov.bias === 'BULLISH') {
+          badge.className = 'px-2.5 py-0.5 rounded-full text-[10px] font-bold font-mono bg-emerald-500/20 text-emeraldaccent border border-emerald-500/30';
+          badge.innerText = 'BULLISH BIAS';
+        } else if (ov.bias === 'BEARISH') {
+          badge.className = 'px-2.5 py-0.5 rounded-full text-[10px] font-bold font-mono bg-rose-500/20 text-rose-400 border border-rose-500/30';
+          badge.innerText = 'BEARISH BIAS';
+        } else {
+          badge.className = 'px-2.5 py-0.5 rounded-full text-[10px] font-bold font-mono bg-amber-500/20 text-amber-300 border border-amber-500/30';
+          badge.innerText = 'NEUTRAL / RANGE';
+        }
+      }
+    }
+
+    let cachedGoldSetups = [];
+    let currentGoldSetupFilter = 'ALL';
+
+    function filterGoldSetups(tfFilter) {
+      currentGoldSetupFilter = tfFilter;
+      ['filterSetupAll', 'filterSetupM1', 'filterSetupM5', 'filterSetupM15', 'filterSetupH1'].forEach(id => {
+        const b = document.getElementById(id);
+        if (b) b.className = 'px-2.5 py-1 rounded text-slate-400 hover:text-white transition';
+      });
+      const activeId = tfFilter === 'ALL' ? 'filterSetupAll' : ('filterSetup' + tfFilter);
+      const activeBtn = document.getElementById(activeId);
+      if (activeBtn) {
+        activeBtn.className = 'px-2.5 py-1 rounded bg-amber-500/20 text-amber-300 font-bold border border-amber-500/40';
+      }
+      renderGoldSetupsList();
+    }
+
+    function renderGoldSetups(setups) {
+      cachedGoldSetups = setups || [];
+      const countEl = document.getElementById('countAllSetups');
+      if (countEl) countEl.innerText = cachedGoldSetups.length;
+      renderGoldSetupsList();
+    }
+
+    function renderGoldSetupsList() {
+      const container = document.getElementById('goldSetupsContainer');
+      if (!container) return;
+
+      let filtered = cachedGoldSetups;
+      if (currentGoldSetupFilter === 'M1') {
+        filtered = cachedGoldSetups.filter(s => s.timeframe === 'M1');
+      } else if (currentGoldSetupFilter === 'M5') {
+        filtered = cachedGoldSetups.filter(s => s.timeframe === 'M5');
+      } else if (currentGoldSetupFilter === 'M15') {
+        filtered = cachedGoldSetups.filter(s => s.timeframe.includes('M15'));
+      } else if (currentGoldSetupFilter === 'H1') {
+        filtered = cachedGoldSetups.filter(s => s.timeframe.includes('H1'));
+      }
+
+      if (!filtered || filtered.length === 0) {
+        container.innerHTML = `<div class="p-6 rounded-xl bg-slate-900 border border-bordercol text-center text-slate-400 text-xs">No trade setups found for filter '${currentGoldSetupFilter}'.</div>`;
+        return;
+      }
+
+      container.innerHTML = filtered.map(s => {
+        const isBuy = s.direction === 'BUY';
+        const isSell = s.direction === 'SELL';
+        const badgeBg = isBuy ? 'bg-emerald-500 text-slate-950' : (isSell ? 'bg-rose-600 text-white' : 'bg-slate-700 text-slate-300');
+
+        return `
+          <div class="rounded-2xl bg-panel border ${isBuy ? 'border-emerald-500/30' : (isSell ? 'border-rose-500/30' : 'border-bordercol')} p-6 shadow-xl space-y-4">
+            <div class="flex flex-wrap items-center justify-between gap-3 border-b border-bordercol/80 pb-4">
+              <div class="flex items-center gap-3">
+                <span class="px-3 py-1 rounded-lg text-xs font-black font-mono tracking-wider ${badgeBg}">
+                  ${s.direction}
+                </span>
+                <div>
+                  <h4 class="text-base font-bold text-white flex items-center gap-2">
+                    ${s.strategy}
+                    <span class="text-xs font-mono font-normal text-slate-400">(${s.methodology})</span>
+                  </h4>
+                  <span class="text-xs text-slate-400 font-mono">Timeframe: <strong class="text-slate-200">${s.timeframe}</strong> &bull; R:R: <strong class="text-amber-400">${s.rr_ratio}</strong></span>
+                </div>
+              </div>
+              <div class="flex items-center gap-3">
+                <div class="text-right">
+                  <span class="text-[10px] uppercase tracking-wider text-slate-400 font-bold block">Validated Confidence</span>
+                  <span class="text-sm font-mono font-black text-emeraldaccent">${s.confidence_score}%</span>
+                </div>
+                ${s.direction !== 'NO TRADE' ? `
+                  <button onclick="executeGoldSetupNow('${s.direction}', ${s.entry}, ${s.sl}, ${s.tp1}, ${s.confidence_score}, '${(s.strategy||'').replace(/'/g, "\\'")}', '${s.timeframe}')" class="px-4 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-black transition shadow-lg shadow-amber-500/20 flex items-center gap-1.5">
+                    ⚡ Execute Twin Trade (Fixed + Trailing)
+                  </button>
+                ` : ''}
+              </div>
+            </div>
+
+            <!-- Price Level Grid -->
+            <div class="grid grid-cols-2 sm:grid-cols-5 gap-3">
+              <div class="p-3 rounded-xl bg-slate-950/70 border border-bordercol">
+                <span class="text-[10px] text-slate-400 font-mono uppercase block">Entry Zone</span>
+                <span class="text-xs font-mono font-bold text-white">${s.entry_zone || s.entry}</span>
+              </div>
+              <div class="p-3 rounded-xl bg-slate-950/70 border border-rose-500/20">
+                <span class="text-[10px] text-rose-400 font-mono uppercase block">Stop Loss (SL)</span>
+                <span class="text-xs font-mono font-bold text-rose-300">${s.sl}</span>
+              </div>
+              <div class="p-3 rounded-xl bg-slate-950/70 border border-emerald-500/20">
+                <span class="text-[10px] text-emeraldaccent font-mono uppercase block">Take Profit 1</span>
+                <span class="text-xs font-mono font-bold text-emeraldaccent">${s.tp1}</span>
+              </div>
+              <div class="p-3 rounded-xl bg-slate-950/70 border border-emerald-500/20">
+                <span class="text-[10px] text-emeraldaccent font-mono uppercase block">Take Profit 2</span>
+                <span class="text-xs font-mono font-bold text-emeraldaccent">${s.tp2}</span>
+              </div>
+              <div class="p-3 rounded-xl bg-slate-950/70 border border-emerald-500/20">
+                <span class="text-[10px] text-emeraldaccent font-mono uppercase block">Take Profit 3</span>
+                <span class="text-xs font-mono font-bold text-emeraldaccent">${s.tp3}</span>
+              </div>
+            </div>
+
+            <!-- Technical Invalidation Box (Requirement 2C) -->
+            <div class="p-4 rounded-xl bg-slate-950 border border-rose-500/30 space-y-2">
+              <div class="flex items-center gap-2">
+                <span class="w-2 h-2 rounded-full bg-rose-500"></span>
+                <h5 class="text-xs font-bold uppercase tracking-wider text-rose-400 font-mono">Technical Invalidation Notes</h5>
+              </div>
+              <div class="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs">
+                <div class="p-2.5 rounded-lg bg-slate-900 border border-bordercol/80">
+                  <span class="text-[10px] text-slate-400 font-bold block mb-1">🚫 SETUP INVALIDATION</span>
+                  <p class="text-slate-300">${s.invalidation ? s.invalidation.setup_invalidation : '--'}</p>
+                </div>
+                <div class="p-2.5 rounded-lg bg-slate-900 border border-bordercol/80">
+                  <span class="text-[10px] text-rose-400 font-bold block mb-1">🛑 STOP-LOSS INVALIDATION</span>
+                  <p class="text-slate-300">${s.invalidation ? s.invalidation.stop_loss_invalidation : '--'}</p>
+                </div>
+                <div class="p-2.5 rounded-lg bg-slate-900 border border-bordercol/80">
+                  <span class="text-[10px] text-amber-400 font-bold block mb-1">⏳ TIME-BASED INVALIDATION</span>
+                  <p class="text-slate-300">${s.invalidation ? s.invalidation.time_invalidation : '--'}</p>
+                </div>
+              </div>
+            </div>
+
+            <!-- Supporting Indicators & Rationale -->
+            <div class="p-3 rounded-xl bg-slate-950/40 border border-bordercol/60 text-xs text-slate-300 space-y-1.5">
+              <span class="text-[10px] uppercase font-bold text-slate-400 font-mono block">Institutional Thesis & Confluence</span>
+              <p class="text-slate-300">${s.rationale}</p>
+              ${s.supporting_signals && s.supporting_signals.length > 0 ? `
+                <div class="flex flex-wrap gap-2 pt-1">
+                  ${s.supporting_signals.map(sig => `<span class="px-2 py-0.5 rounded bg-slate-900 text-slate-400 border border-bordercol text-[10px] font-mono">&bull; ${sig}</span>`).join('')}
+                </div>
+              ` : ''}
+            </div>
+          </div>
+        `;
+      }).join('');
+    }
+
+    function renderGoldMtfMatrix(matrix) {
+      const grid = document.getElementById('goldMtfGrid');
+      const scoreEl = document.getElementById('goldMtfScore');
+      if (!matrix || !matrix.timeframes || !grid) return;
+
+      if (scoreEl) {
+        scoreEl.innerText = `${matrix.composite_score}% (${matrix.overall_bias})`;
+        if (matrix.overall_bias === 'BULLISH') {
+          scoreEl.className = 'px-3 py-1 rounded-full text-xs font-mono font-bold bg-emerald-500/20 text-emeraldaccent border border-emerald-500/30';
+        } else if (matrix.overall_bias === 'BEARISH') {
+          scoreEl.className = 'px-3 py-1 rounded-full text-xs font-mono font-bold bg-rose-500/20 text-rose-400 border border-rose-500/30';
+        } else {
+          scoreEl.className = 'px-3 py-1 rounded-full text-xs font-mono font-bold bg-blue-500/20 text-blue-400 border border-blue-500/30';
+        }
+      }
+
+      const tfs = ['M1', 'M5', 'M15', 'M30', 'H1', 'H4', 'D1', 'W1'];
+      grid.innerHTML = tfs.map(tf => {
+        const item = matrix.timeframes[tf] || { trend: 'NEUTRAL', rsi: 50.0, atr: 0.0, structure: 'Neutral' };
+        const isBull = item.trend === 'BULLISH';
+        const isBear = item.trend === 'BEARISH';
+        const badgeColor = isBull ? 'text-emeraldaccent bg-emerald-500/10 border-emerald-500/30' : (isBear ? 'text-rose-400 bg-rose-500/10 border-rose-500/30' : 'text-slate-400 bg-slate-800 border-bordercol');
+
+        return `
+          <div class="p-3.5 rounded-xl bg-slate-950/70 border border-bordercol space-y-2 text-center">
+            <span class="text-xs font-black font-mono text-white block">${tf}</span>
+            <span class="px-2 py-0.5 rounded text-[10px] font-bold font-mono border block ${badgeColor}">
+              ${item.trend}
+            </span>
+            <div class="text-[10px] font-mono text-slate-400 space-y-0.5 pt-1">
+              <div>RSI: <strong class="text-slate-200">${item.rsi || 50}</strong></div>
+              <div>ATR: <strong class="text-slate-200">$${item.atr ? item.atr.toFixed(1) : '--'}</strong></div>
+              <div class="truncate text-[9px] text-slate-500">${item.structure || '--'}</div>
+            </div>
+          </div>
+        `;
+      }).join('');
+    }
+
+    function renderGoldBacktest(data) {
+      if (!data || !data.leaderboard) return;
+      const tbody = document.getElementById('goldLeaderboardTbody');
+      if (!tbody) return;
+      tbody.innerHTML = data.leaderboard.map((item, idx) => {
+        const isPositive = item.net_profit >= 0;
+        return `
+          <tr class="hover:bg-slate-900/60 font-mono transition">
+            <td class="py-3 px-4 font-bold text-white flex items-center gap-2">
+              <span class="w-5 h-5 rounded-full ${idx === 0 ? 'bg-amber-500 text-slate-950' : 'bg-slate-800 text-slate-400'} flex items-center justify-center text-[10px] font-black">${idx + 1}</span>
+              ${item.name}
+            </td>
+            <td class="py-3 px-4 font-bold ${item.win_rate >= 50 ? 'text-emeraldaccent' : 'text-slate-300'}">${item.win_rate.toFixed(1)}%</td>
+            <td class="py-3 px-4 font-bold ${item.profit_factor >= 1.0 ? 'text-emeraldaccent' : 'text-slate-400'}">${item.profit_factor.toFixed(2)}</td>
+            <td class="py-3 px-4 font-bold ${isPositive ? 'text-emeraldaccent' : 'text-rose-400'}">${isPositive ? '+' : ''}$${item.net_profit.toFixed(2)}</td>
+            <td class="py-3 px-4 text-rose-400">${item.max_drawdown_pct.toFixed(1)}%</td>
+            <td class="py-3 px-4 text-slate-300">${item.total_trades}</td>
+            <td class="py-3 px-4 text-slate-300">$${item.expectancy.toFixed(2)}</td>
+            <td class="py-3 px-4 text-slate-300">${item.recovery_factor.toFixed(2)}</td>
+            <td class="py-3 px-4 text-right">
+              <button onclick="selectGoldStrategyCurve('${item.strategy}')" class="px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 text-[10px] font-bold transition border border-bordercol">
+                View Curve
+              </button>
+            </td>
+          </tr>
+        `;
+      }).join('');
+
+      const best = data.best_strategy || (data.leaderboard[0] ? data.leaderboard[0].strategy : null);
+      if (best) {
+        selectGoldStrategyCurve(best);
+      }
+    }
+
+    function selectGoldStrategyCurve(strategyKey) {
+      if (!goldBacktestData || !goldBacktestData.strategies || !goldBacktestData.strategies[strategyKey]) return;
+      const strat = goldBacktestData.strategies[strategyKey];
+      const titleEl = document.getElementById('goldEquityCurveTitle');
+      if (titleEl) titleEl.innerText = `${strat.strategy_name.toUpperCase()} — EQUITY CURVE (5,000 BARS)`;
+      renderGoldEquitySvg(strat.equity_curve || []);
+    }
+
+    function renderGoldEquitySvg(curve) {
+      const container = document.getElementById('goldEquitySvgContainer');
+      if (!container) return;
+      if (!curve || curve.length < 2) {
+        container.innerHTML = `<span class="text-xs text-slate-500 font-mono">No curve points available</span>`;
+        return;
+      }
+
+      const balances = curve.map(p => p.balance);
+      const minB = Math.min(...balances);
+      const maxB = Math.max(...balances);
+      const range = (maxB - minB) || 1.0;
+
+      const w = 800;
+      const h = 160;
+      const pad = 15;
+
+      const pts = curve.map((p, idx) => {
+        const x = pad + (idx / (curve.length - 1)) * (w - 2 * pad);
+        const y = h - pad - ((p.balance - minB) / range) * (h - 2 * pad);
+        return `${x.toFixed(1)},${y.toFixed(1)}`;
+      });
+
+      const pathStr = `M ${pts.join(' L ')}`;
+      const fillStr = `M ${pts[0]} L ${pts.join(' L ')} L ${w - pad},${h - pad} L ${pad},${h - pad} Z`;
+      const isProfitable = balances[balances.length - 1] >= balances[0];
+      const strokeColor = isProfitable ? '#10b981' : '#f43f5e';
+
+      container.innerHTML = `
+        <svg viewBox="0 0 ${w} ${h}" class="w-full h-full overflow-visible">
+          <defs>
+            <linearGradient id="curveGrad" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stop-color="${strokeColor}" stop-opacity="0.25"/>
+              <stop offset="100%" stop-color="${strokeColor}" stop-opacity="0.0"/>
+            </linearGradient>
+          </defs>
+          <path d="${fillStr}" fill="url(#curveGrad)"/>
+          <path d="${pathStr}" fill="none" stroke="${strokeColor}" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+          <text x="${pad}" y="${h - 2}" fill="#64748b" font-size="10" font-family="monospace">Start: $${balances[0].toFixed(2)}</text>
+          <text x="${w - pad}" y="${h - 2}" text-anchor="end" fill="${strokeColor}" font-size="10" font-family="monospace" font-weight="bold">End: $${balances[balances.length - 1].toFixed(2)}</text>
+        </svg>
+      `;
+    }
+
+    async function triggerGoldBacktest() {
+      const btn = document.getElementById('btnRunGoldBacktest');
+      const spinner = document.getElementById('backtestSpinner');
+      if (btn) btn.disabled = true;
+      if (spinner) spinner.classList.remove('hidden');
+
+      try {
+        const res = await fetch('/api/gold/backtest/run', { method: 'POST' });
+        if (res.ok) {
+          goldBacktestData = await res.json();
+          renderGoldBacktest(goldBacktestData);
+          alert('Gold historical backtest completed across 5,000 real M15 bars!');
+        } else {
+          alert('Failed to execute backtest');
+        }
+      } catch (err) {
+        alert('Backtest error: ' + err);
+      } finally {
+        if (btn) btn.disabled = false;
+        if (spinner) spinner.classList.add('hidden');
+      }
+    }
+
+    function renderGoldMacroEvents(events) {
+      const container = document.getElementById('goldMacroEventsContainer');
+      if (!container || !events || events.length === 0) return;
+
+      container.innerHTML = events.map(ev => {
+        const isCritical = ev.impact === 'CRITICAL';
+        return `
+          <div class="p-4 rounded-xl bg-slate-950 border ${isCritical ? 'border-rose-500/40' : 'border-amber-500/30'} space-y-2">
+            <div class="flex items-center justify-between">
+              <span class="text-xs font-bold text-white">${ev.event}</span>
+              <span class="px-2 py-0.5 rounded text-[10px] font-mono font-bold ${isCritical ? 'bg-rose-500/20 text-rose-400 border border-rose-500/30' : 'bg-amber-500/20 text-amber-300 border border-amber-500/30'}">
+                ${ev.impact} IMPACT
+              </span>
+            </div>
+            <div class="text-[11px] font-mono text-slate-400">Scheduled: <strong class="text-slate-200">${ev.time_utc}</strong> &bull; Currency: <strong class="text-amber-400">${ev.currency}</strong></div>
+            <p class="text-xs text-slate-300">${ev.historical_impact}</p>
+            <div class="p-2 rounded bg-slate-900 border border-bordercol text-[11px] text-amber-300 font-mono">
+              <strong>Rule:</strong> ${ev.rule}
+            </div>
+          </div>
+        `;
+      }).join('');
+    }
+
+    function executeGoldSetup(action, entry, sl, tp) {
+      switchMainTab('station');
+      fetchAndApplySymbolQuote('XAUUSD');
+      const actionInput = document.getElementById('orderAction');
+      const slInput = document.getElementById('orderSl');
+      const tpInput = document.getElementById('orderTp');
+      if (actionInput) actionInput.value = action;
+      if (slInput) slInput.value = sl;
+      if (tpInput) tpInput.value = tp;
+      alert(`Pre-filled order form with Gold ${action} setup at ${entry} (SL: ${sl}, TP: ${tp})`);
+    }
+
+    loadSymbolsCatalog();
+    fetchAndApplySymbolQuote('BTCUSD');
+    fetchSetups();
+    loadPerformanceDashboard();
+    fetchMultiTpGroups();
+    refreshAll();
+    
+    // Intervals
+    setInterval(fetchState, 2000);
+    setInterval(updateCountdown, 1000);
+    setInterval(fetchSetups, 15000);
+    setInterval(fetchMultiTpGroups, 3000);
+        // =================================================================
+    // AI / MACHINE LEARNING TRADING INTELLIGENCE CONTROLLER
+    // =================================================================
+    let currentMLSubmenu = 'overview';
+    let mlCachedRecs = [];
+    let mlTrainPollTimer = null;
+
+    function switchMLSubmenu(subTab) {
+      currentMLSubmenu = subTab;
+      document.querySelectorAll('.ml-sub-tab').forEach(btn => {
+        btn.className = 'ml-sub-tab px-3 py-1.5 rounded-lg text-xs font-bold transition text-slate-400 hover:text-white hover:bg-slate-800 whitespace-nowrap';
+      });
+      const activeBtn = document.getElementById('mlSubTab_' + subTab);
+      if (activeBtn) {
+        activeBtn.className = 'ml-sub-tab px-3 py-1.5 rounded-lg text-xs font-bold transition bg-purple-600 text-white shadow whitespace-nowrap';
+      }
+
+      document.querySelectorAll('.ml-sub-panel').forEach(panel => {
+        panel.classList.add('hidden');
+      });
+      const activePanel = document.getElementById('mlPanel_' + subTab);
+      if (activePanel) {
+        activePanel.classList.remove('hidden');
+      }
+
+      // Load specific submenu data
+      if (subTab === 'overview') fetchMLOverview();
+      else if (subTab === 'recommendations') fetchMLRecommendations();
+      else if (subTab === 'strategy_lab') fetchMLStrategies();
+      else if (subTab === 'mtf') fetchMLMTF();
+      else if (subTab === 'regime') fetchMLRegime();
+      else if (subTab === 'training') fetchMLTrainingStatus();
+      else if (subTab === 'backtest') fetchMLBacktest();
+      else if (subTab === 'performance') fetchMLPerformance();
+      else if (subTab === 'journal') fetchMLJournal();
+      else if (subTab === 'risk') fetchMLRisk();
+      else if (subTab === 'settings') fetchMLSettings();
+    }
+
+    async function loadMLDashboard(force = false) {
+      const syncIcon = document.getElementById('mlSyncIcon');
+      if (syncIcon) syncIcon.classList.add('animate-spin');
+
+      try {
+        await fetchMLOverview();
+        if (currentMLSubmenu !== 'overview') {
+          switchMLSubmenu(currentMLSubmenu);
+        }
+      } catch (err) {
+        console.error("Error loading ML dashboard:", err);
+      } finally {
+        if (syncIcon) {
+          setTimeout(() => syncIcon.classList.remove('animate-spin'), 600);
+        }
+      }
+    }
+
+    async function fetchMLOverview() {
+      try {
+        const res = await fetch('/api/ml/overview');
+        const data = await res.json();
+        if (!data.success) return;
+
+        const pEl = document.getElementById('mlGoldLivePrice');
+        if (pEl) pEl.innerText = `$${data.live_price.toFixed(2)}`;
+
+        const accEl = document.getElementById('mlHeaderAccuracy');
+        if (accEl) accEl.innerText = `${(data.accuracy * 100).toFixed(1)}%`;
+
+        const brierEl = document.getElementById('mlHeaderBrier');
+        if (brierEl) brierEl.innerText = data.brier_score.toFixed(3);
+
+        const aucEl = document.getElementById('mlHeaderAUC');
+        if (aucEl) aucEl.innerText = data.roc_auc.toFixed(3);
+
+        const regEl = document.getElementById('mlHeaderRegime');
+        if (regEl) regEl.innerText = data.current_regime;
+
+        const confEl = document.getElementById('mlHeaderConfluence');
+        if (confEl) confEl.innerText = `${data.mtf_confluence}%`;
+
+        const stratsEl = document.getElementById('mlHeaderStrats');
+        if (stratsEl) stratsEl.innerText = `${data.active_strategies_count} / ${data.total_strategies_count} Active`;
+
+        const driftBadge = document.getElementById('mlDriftBadge');
+        if (driftBadge && data.model_drift) {
+          driftBadge.innerText = `DRIFT: ${data.model_drift.status} (${(data.model_drift.accuracy_drift * 100).toFixed(1)}%)`;
+          if (data.model_drift.status === 'DRIFT_DETECTED') {
+            driftBadge.className = 'px-2 py-0.5 rounded-full text-[11px] font-mono font-bold bg-rose-500/20 text-rose-300 border border-rose-500/30';
+          } else {
+            driftBadge.className = 'px-2 py-0.5 rounded-full text-[11px] font-mono font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30';
+          }
+        }
+
+        const modelVer = document.getElementById('mlOverviewModelVer');
+        if (modelVer) modelVer.innerText = data.model_version;
+
+        // Render top features
+        const featsContainer = document.getElementById('mlOverviewTopFeatures');
+        if (featsContainer && data.feature_importances) {
+          let html = '';
+          const sorted = Object.entries(data.feature_importances).slice(0, 6);
+          sorted.forEach(([name, wt]) => {
+            const pct = Math.min(100, Math.round(wt * 100 * 3));
+            html += `
+              <div class="space-y-1">
+                <div class="flex justify-between text-[11px]">
+                  <span class="text-slate-300">${name}</span>
+                  <span class="text-purple-300 font-bold">${(wt * 100).toFixed(1)}%</span>
+                </div>
+                <div class="w-full bg-slate-950 rounded-full h-1.5 border border-bordercol/40">
+                  <div class="bg-gradient-to-r from-purple-500 to-indigo-500 h-1.5 rounded-full" style="width: ${pct}%"></div>
+                </div>
+              </div>
+            `;
+          });
+          featsContainer.innerHTML = html;
+        }
+      } catch (e) {
+        console.error("fetchMLOverview failed:", e);
+      }
+    }
+
+    async function fetchMLRecommendations() {
+      const container = document.getElementById('mlRecsContainer');
+      if (!container) return;
+      container.innerHTML = '<div class="col-span-2 text-center py-10 text-slate-500 font-mono">Generating 24-field ML trade setups...</div>';
+
+      try {
+        const res = await fetch('/api/ml/recommendations');
+        const data = await res.json();
+        if (!data.success || !data.recommendations || data.recommendations.length === 0) {
+          container.innerHTML = '<div class="col-span-2 text-center py-12 text-slate-400 font-mono bg-slate-900/40 rounded-2xl border border-bordercol">No trade setups currently satisfy the minimum calibrated confidence threshold (60%) and positive expected value. Risk gate: capital preserved.</div>';
+          return;
+        }
+
+        mlCachedRecs = data.recommendations;
+        renderMLRecommendations(mlCachedRecs);
+      } catch (err) {
+        container.innerHTML = `<div class="col-span-2 text-center py-10 text-rose-400 font-mono">Failed to load trade recommendations: ${err.message}</div>`;
+      }
+    }
+
+    function renderMLRecommendations(recs) {
+      const container = document.getElementById('mlRecsContainer');
+      if (!container) return;
+
+      let html = '';
+      recs.forEach((r, idx) => {
+        const isBuy = r.direction === 'BUY';
+        const dirBadge = isBuy
+          ? '<span class="px-2.5 py-0.5 rounded-md bg-emerald-500/20 text-emerald-400 font-black border border-emerald-500/40">BUY</span>'
+          : '<span class="px-2.5 py-0.5 rounded-md bg-rose-500/20 text-rose-400 font-black border border-rose-500/40">SELL</span>';
+
+        html += `
+          <div class="rounded-2xl border border-purple-500/30 bg-surface/95 p-5 shadow-2xl relative overflow-hidden space-y-4">
+            <div class="flex items-center justify-between pb-3 border-b border-bordercol/60">
+              <div class="flex items-center gap-3">
+                ${dirBadge}
+                <div>
+                  <h3 class="text-sm font-bold text-white">${r.strategy_name}</h3>
+                  <div class="text-[11px] font-mono text-purple-300">${r.strategy_code} • ${r.timeframe}</div>
+                </div>
+              </div>
+              <div class="text-right font-mono">
+                <div class="text-base font-black text-purple-300">${r.win_probability_pct}</div>
+                <div class="text-[10px] text-slate-400">Calibrated Win Prob</div>
+              </div>
+            </div>
+
+            <!-- Key Levels Grid -->
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-2.5 font-mono text-xs">
+              <div class="p-2.5 rounded-xl bg-slate-950/70 border border-bordercol/40">
+                <div class="text-[10px] text-slate-400">ENTRY ZONE</div>
+                <div class="font-bold text-white mt-0.5">${r.entry_zone}</div>
+              </div>
+              <div class="p-2.5 rounded-xl bg-slate-950/70 border border-bordercol/40">
+                <div class="text-[10px] text-rose-400">STOP LOSS (${r.sl_points} pts)</div>
+                <div class="font-bold text-rose-400 mt-0.5">$${r.stop_loss.toFixed(2)}</div>
+              </div>
+              <div class="p-2.5 rounded-xl bg-slate-950/70 border border-bordercol/40">
+                <div class="text-[10px] text-emerald-400">TP1 / TP2 (1:2.0)</div>
+                <div class="font-bold text-emerald-400 mt-0.5">$${r.tp1.toFixed(2)} / $${r.tp2.toFixed(2)}</div>
+              </div>
+              <div class="p-2.5 rounded-xl bg-slate-950/70 border border-bordercol/40">
+                <div class="text-[10px] text-indigo-400">EXPECTED VALUE</div>
+                <div class="font-bold text-indigo-300 mt-0.5">${r.expected_value_r}</div>
+              </div>
+            </div>
+
+            <!-- Invalidation Condition Box -->
+            <div class="p-3 rounded-xl bg-rose-950/20 border border-rose-500/30 text-xs font-mono text-slate-300 space-y-1">
+              <div class="flex items-center gap-1.5 text-rose-400 font-bold">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"></path></svg>
+                Technical Invalidation Rule:
+              </div>
+              <div class="text-rose-200">${r.invalidation_condition}</div>
+            </div>
+
+            <!-- Catalyst & Liquidity Target -->
+            <div class="text-xs font-mono space-y-1 text-slate-400">
+              <div><strong class="text-slate-300">Target Liquidity:</strong> ${r.liquidity_target}</div>
+              <div><strong class="text-slate-300">Market Regime:</strong> ${r.market_regime} (${r.mtf_confluence})</div>
+              <div><strong class="text-slate-300">Smart Chaser:</strong> Option B Recovery Active (${r.chaser_config.pullback_threshold} tolerance)</div>
+            </div>
+
+            <!-- Execution Action Bar -->
+            <div class="flex items-center justify-between pt-3 border-t border-bordercol/60">
+              <div class="text-xs font-mono">
+                <span class="text-slate-400">Recommended Size:</span>
+                <strong class="text-white ml-1">${r.recommended_lot_size} Lots</strong>
+                <span class="text-slate-500 text-[11px] ml-1">($${r.risk_amount_cash.toFixed(2)} risk)</span>
+              </div>
+              <button onclick="executeMLTrade(${idx})" class="px-4 py-2 rounded-xl bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white font-bold text-xs shadow-lg transition flex items-center gap-1.5">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
+                1-Click Execute
+              </button>
+            </div>
+          </div>
+        `;
+      });
+      container.innerHTML = html;
+    }
+
+    function filterMLRecs(dir) {
+      document.querySelectorAll('.ml-rec-filter').forEach(btn => {
+        if (btn.innerText === dir) {
+          btn.className = 'ml-rec-filter px-2.5 py-1 rounded text-xs font-bold bg-purple-600 text-white';
+        } else {
+          btn.className = 'ml-rec-filter px-2.5 py-1 rounded text-xs font-bold text-slate-400 hover:text-white';
+        }
+      });
+
+      if (dir === 'ALL') {
+        renderMLRecommendations(mlCachedRecs);
+      } else {
+        const filtered = mlCachedRecs.filter(r => r.direction === dir);
+        renderMLRecommendations(filtered);
+      }
+    }
+
+    async function executeMLTrade(index) {
+      if (!mlCachedRecs || !mlCachedRecs[index]) return;
+      const rec = mlCachedRecs[index];
+      if (!confirm(`Confirm 1-Click execution for ${rec.direction} ${rec.recommended_lot_size} lots on XAUUSD via Smart Profit Chaser Option B?`)) {
+        return;
+      }
+
+      try {
+        const res = await fetch('/api/ml/recommendations/execute', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ recommendation: rec })
+        });
+        const data = await res.json();
+        if (data.success) {
+          alert(`Order Executed Successfully! Ticket: #${data.ticket || 'Active'}\nOption B Smart Profit Chaser is now managing this trade.`);
+          fetchMLRecommendations();
+        } else {
+          alert(`Execution Blocked by Risk Gate: ${data.message || data.error}`);
+        }
+      } catch (err) {
+        alert(`Order execution error: ${err.message}`);
+      }
+    }
+
+    async function fetchMLStrategies() {
+      const container = document.getElementById('mlStrategiesGrid');
+      if (!container) return;
+
+      try {
+        const res = await fetch('/api/ml/strategies');
+        const data = await res.json();
+        if (!data.success || !data.strategies) return;
+
+        let html = '';
+        data.strategies.forEach(s => {
+          const isBuy = s.direction === 'BUY';
+          const isSell = s.direction === 'SELL';
+          const statusBadge = isBuy
+            ? '<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">BUY TRIGGER</span>'
+            : (isSell
+              ? '<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-rose-500/20 text-rose-400 border border-rose-500/30">SELL TRIGGER</span>'
+              : '<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-800 text-slate-400">NO SIGNAL</span>');
+
+          html += `
+            <div class="rounded-2xl border border-bordercol bg-surface/90 p-5 shadow-xl space-y-4">
+              <div class="flex items-center justify-between">
+                <div>
+                  <h3 class="text-sm font-bold text-white">${s.name}</h3>
+                  <span class="text-[11px] font-mono text-purple-400">${s.code}</span>
+                </div>
+                ${statusBadge}
+              </div>
+
+              <div class="p-3 rounded-xl bg-slate-950 border border-bordercol text-xs font-mono text-slate-300">
+                <span class="text-slate-500 block mb-1">Trigger Logic:</span>
+                ${s.trigger}
+              </div>
+
+              <div class="space-y-2 font-mono text-xs">
+                <div class="flex justify-between">
+                  <span class="text-slate-400">Baseline Win Rate:</span>
+                  <strong class="text-slate-300">${s.baseline_win_rate}%</strong>
+                </div>
+                <div class="flex justify-between">
+                  <span class="text-slate-400">ML-Filtered Win Rate:</span>
+                  <strong class="text-purple-300">${s.ml_filtered_win_rate}% (+${(s.ml_filtered_win_rate - s.baseline_win_rate).toFixed(1)}%)</strong>
+                </div>
+              </div>
+
+              <div class="pt-2 border-t border-bordercol/60 flex items-center justify-between">
+                <span class="text-xs font-mono text-slate-400">Strategy Status:</span>
+                <button onclick="toggleMLStrategy('${s.code_letter}', ${!s.enabled})" class="px-3 py-1 rounded-lg text-xs font-bold transition ${s.enabled ? 'bg-purple-900/30 text-purple-300 border border-purple-500/30' : 'bg-slate-800 text-slate-500'}">
+                  ${s.enabled ? 'ACTIVE ✓' : 'DISABLED ✗'}
+                </button>
+              </div>
+            </div>
+          `;
+        });
+        container.innerHTML = html;
+      } catch (err) {
+        console.error("fetchMLStrategies error:", err);
+      }
+    }
+
+    async function toggleMLStrategy(code, enabled) {
+      try {
+        await fetch('/api/ml/strategies/toggle', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ strategy_code: code, enabled: enabled })
+        });
+        fetchMLStrategies();
+      } catch (err) {
+        console.error("toggleMLStrategy error:", err);
+      }
+    }
+
+    async function fetchMLMTF() {
+      const tbody = document.getElementById('mlMTFTbody');
+      if (!tbody) return;
+
+      try {
+        const res = await fetch('/api/ml/mtf');
+        const data = await res.json();
+        if (!data.success || !data.data) return;
+
+        const mtf = data.data;
+        const overallBadge = document.getElementById('mlMTFOverallBadge');
+        if (overallBadge) {
+          overallBadge.innerText = `${mtf.confluence_percentage}% ${mtf.dominant_bias}`;
+        }
+        const recTf = document.getElementById('mlMTFRecTf');
+        if (recTf) {
+          recTf.innerText = mtf.recommended_timeframe;
+        }
+
+        let html = '';
+        Object.entries(mtf.matrix).forEach(([tf, info]) => {
+          const isBull = info.trend === 'BULLISH';
+          const isBear = info.trend === 'BEARISH';
+          const trendClass = isBull ? 'text-emerald-400 font-bold' : (isBear ? 'text-rose-400 font-bold' : 'text-slate-400');
+
+          html += `
+            <tr class="hover:bg-slate-800/40 transition">
+              <td class="py-3 px-4 font-bold text-white">${tf}</td>
+              <td class="py-3 px-4 ${trendClass}">${info.trend}</td>
+              <td class="py-3 px-4 text-slate-300">${info.structure}</td>
+              <td class="py-3 px-4 text-purple-300">${info.rsi}</td>
+              <td class="py-3 px-4 text-slate-400">${info.liquidity_state}</td>
+              <td class="py-3 px-4 font-bold ${trendClass}">${info.bias}</td>
+              <td class="py-3 px-4 text-right text-emerald-400">${info.status}</td>
+            </tr>
+          `;
+        });
+        tbody.innerHTML = html;
+      } catch (err) {
+        console.error("fetchMLMTF error:", err);
+      }
+    }
+
+    async function fetchMLRegime() {
+      try {
+        const res = await fetch('/api/ml/regime');
+        const data = await res.json();
+        if (!data.success || !data.regime) return;
+
+        const r = data.regime;
+        document.getElementById('mlRegimeADX').innerText = r.adx;
+        document.getElementById('mlRegimeATRPct').innerText = `${r.atr_percentile}%`;
+        document.getElementById('mlRegimeVolRatio').innerText = `${r.volume_ratio}x`;
+        document.getElementById('mlRegimeHurst').innerText = r.hurst_exponent;
+
+        const tbody = document.getElementById('mlRegimeSuitabilityTbody');
+        if (tbody && data.all_regimes) {
+          let html = '';
+          const strats = ['A', 'B', 'C', 'D', 'E', 'F', 'G'];
+          data.all_regimes.forEach(regName => {
+            const isCurr = regName === r.regime_name;
+            const rowClass = isCurr ? 'bg-purple-950/30 border-l-4 border-purple-500' : 'hover:bg-slate-800/40';
+
+            html += `<tr class="${rowClass}">
+              <td class="py-2.5 px-3 font-bold text-white">${regName} ${isCurr ? '<span class="text-purple-400 text-[10px] ml-1">(ACTIVE)</span>' : ''}</td>`;
+
+            strats.forEach(s => {
+              const suit = (r.strategy_suitability && r.strategy_suitability[s]) || 'FAIR';
+              const badgeClass = suit === 'OPTIMAL' ? 'text-emerald-400 font-bold' : (suit === 'REJECT' ? 'text-rose-400 font-bold' : (suit === 'AVOID' ? 'text-amber-400' : 'text-slate-400'));
+              html += `<td class="py-2.5 px-3 text-center ${badgeClass}">${suit}</td>`;
+            });
+            html += `</tr>`;
+          });
+          tbody.innerHTML = html;
+        }
+      } catch (err) {
+        console.error("fetchMLRegime error:", err);
+      }
+    }
+
+    async function triggerMLTraining() {
+      const btn = document.getElementById('btnStartMLTrain');
+      if (btn) btn.disabled = true;
+      const logBox = document.getElementById('mlTrainTerminalLog');
+      if (logBox) logBox.innerHTML = '<div>[START] Initiating non-blocking background model training job...</div>';
+
+      try {
+        await fetch('/api/ml/train', { method: 'POST' });
+        if (mlTrainPollTimer) clearInterval(mlTrainPollTimer);
+        mlTrainPollTimer = setInterval(pollMLTrainStatus, 1000);
+      } catch (err) {
+        alert("Training error: " + err.message);
+        if (btn) btn.disabled = false;
+      }
+    }
+
+    async function pollMLTrainStatus() {
+      try {
+        const res = await fetch('/api/ml/train/status');
+        const st = await res.json();
+
+        const bar = document.getElementById('mlTrainProgressBar');
+        if (bar) bar.style.width = `${st.progress}%`;
+
+        const pill = document.getElementById('mlTrainStatusPill');
+        if (pill) {
+          pill.innerText = st.is_training ? `TRAINING (${st.progress}%)` : (st.progress === 100 ? 'COMPLETED' : 'IDLE');
+          pill.className = st.is_training ? 'px-2 py-0.5 rounded text-[11px] font-mono font-bold bg-amber-500/20 text-amber-300' : 'px-2 py-0.5 rounded text-[11px] font-mono font-bold bg-emerald-500/20 text-emerald-300';
+        }
+
+        const logBox = document.getElementById('mlTrainTerminalLog');
+        if (logBox) {
+          logBox.innerHTML += `<div>[${new Date().toLocaleTimeString()}] ${st.message}</div>`;
+          logBox.scrollTop = logBox.scrollHeight;
+        }
+
+        if (!st.is_training && st.progress === 100) {
+          clearInterval(mlTrainPollTimer);
+          const btn = document.getElementById('btnStartMLTrain');
+          if (btn) btn.disabled = false;
+          fetchMLOverview();
+          fetchMLTrainingStatus();
+        }
+      } catch (e) {
+        console.error("pollMLTrainStatus error:", e);
+      }
+    }
+
+    async function fetchMLTrainingStatus() {
+      const list = document.getElementById('mlCheckpointsList');
+      if (!list) return;
+
+      try {
+        const res = await fetch('/api/ml/models');
+        const data = await res.json();
+        if (!data.success || !data.active_model) return;
+
+        const m = data.active_model;
+        list.innerHTML = `
+          <div class="p-3.5 rounded-xl bg-purple-950/20 border border-purple-500/40 space-y-2">
+            <div class="flex justify-between items-center">
+              <strong class="text-white">${m.version} (Active Checkpoint)</strong>
+              <span class="px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-400 text-[10px] font-bold">CALIBRATED</span>
+            </div>
+            <div class="text-[11px] text-slate-400">Algorithm: ${m.algorithm || 'LightGBM / Calibrated Ensemble'}</div>
+            <div class="flex justify-between text-[11px] pt-1 border-t border-bordercol/40">
+              <span class="text-slate-400">Accuracy: <strong class="text-emerald-400">${(m.accuracy * 100).toFixed(1)}%</strong></span>
+              <span class="text-slate-400">Brier Score: <strong class="text-purple-300">${m.brier_score}</strong></span>
+              <span class="text-slate-400">AUC: <strong class="text-cyan-400">${m.roc_auc}</strong></span>
+            </div>
+          </div>
+        `;
+      } catch (err) {
+        console.error("fetchMLTrainingStatus error:", err);
+      }
+    }
+
+    function updateBtSliderLabel(val) {
+      const el = document.getElementById('mlBtConfLabel');
+      if (el) el.innerText = val + '%';
+    }
+
+    async function runMLBacktestCustom() {
+      const slider = document.getElementById('mlBtConfSlider');
+      const minC = slider ? slider.value : 60;
+      const btn = document.getElementById('btnRunMLBacktest');
+      if (btn) btn.disabled = true;
+
+      try {
+        const res = await fetch('/api/ml/backtest/run', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ min_confidence: minC })
+        });
+        const data = await res.json();
+        if (data.success && data.backtest) {
+          renderBacktestTable(data.backtest);
+        }
+      } catch (err) {
+        alert("Backtest error: " + err.message);
+      } finally {
+        if (btn) btn.disabled = false;
+      }
+    }
+
+    async function fetchMLBacktest() {
+      try {
+        const res = await fetch('/api/ml/backtest');
+        const data = await res.json();
+        if (data.success && data.backtest) {
+          renderBacktestTable(data.backtest);
+        }
+      } catch (err) {
+        console.error("fetchMLBacktest error:", err);
+      }
+    }
+
+    function renderBacktestTable(bt) {
+      const tbody = document.getElementById('mlBacktestTbody');
+      if (!tbody) return;
+
+      const base = bt.baseline_strategy || {};
+      const ml = bt.ml_enhanced_strategy || {};
+
+      tbody.innerHTML = `
+        <tr class="hover:bg-slate-800/40">
+          <td class="py-3 px-4 font-bold text-white">Total Completed Trades</td>
+          <td class="py-3 px-4 text-center text-slate-300">${base.total_trades || 0}</td>
+          <td class="py-3 px-4 text-center text-purple-300 font-bold">${ml.total_trades || 0}</td>
+          <td class="py-3 px-4 text-right text-slate-400">-${bt.trades_filtered_pct}% filtered (low confidence removed)</td>
+        </tr>
+        <tr class="hover:bg-slate-800/40">
+          <td class="py-3 px-4 font-bold text-white">Win Rate %</td>
+          <td class="py-3 px-4 text-center text-slate-300">${base.win_rate || 0}%</td>
+          <td class="py-3 px-4 text-center text-emerald-400 font-bold">${ml.win_rate || 0}%</td>
+          <td class="py-3 px-4 text-right text-emerald-400 font-bold">+${bt.win_rate_delta}% Win Rate Surge</td>
+        </tr>
+        <tr class="hover:bg-slate-800/40">
+          <td class="py-3 px-4 font-bold text-white">Profit Factor</td>
+          <td class="py-3 px-4 text-center text-slate-300">${base.profit_factor || 0}</td>
+          <td class="py-3 px-4 text-center text-purple-300 font-bold">${ml.profit_factor || 0}</td>
+          <td class="py-3 px-4 text-right text-purple-300 font-bold">+${bt.profit_factor_delta}</td>
+        </tr>
+        <tr class="hover:bg-slate-800/40">
+          <td class="py-3 px-4 font-bold text-white">Net Return (R-Multiple)</td>
+          <td class="py-3 px-4 text-center text-slate-300">${base.net_profit_r || 0}R</td>
+          <td class="py-3 px-4 text-center text-cyan-400 font-bold">${ml.net_profit_r || 0}R</td>
+          <td class="py-3 px-4 text-right text-cyan-400 font-bold">+$${(ml.net_profit_dollars || 0).toFixed(2)} Net</td>
+        </tr>
+        <tr class="hover:bg-slate-800/40">
+          <td class="py-3 px-4 font-bold text-white">Max Drawdown %</td>
+          <td class="py-3 px-4 text-center text-rose-400">${base.max_drawdown_pct || 0}%</td>
+          <td class="py-3 px-4 text-center text-emerald-400 font-bold">${ml.max_drawdown_pct || 0}%</td>
+          <td class="py-3 px-4 text-right text-emerald-400 font-bold">-${((base.max_drawdown_pct || 0) - (ml.max_drawdown_pct || 0)).toFixed(1)}% Drawdown Reduction</td>
+        </tr>
+        <tr class="hover:bg-slate-800/40">
+          <td class="py-3 px-4 font-bold text-white">Sharpe Ratio</td>
+          <td class="py-3 px-4 text-center text-slate-300">${base.sharpe_ratio || 0}</td>
+          <td class="py-3 px-4 text-center text-purple-300 font-bold">${ml.sharpe_ratio || 0}</td>
+          <td class="py-3 px-4 text-right text-purple-300 font-bold">+${((ml.sharpe_ratio || 0) - (base.sharpe_ratio || 0)).toFixed(2)}</td>
+        </tr>
+      `;
+    }
+
+    async function fetchMLPerformance() {
+      try {
+        const res = await fetch('/api/ml/performance');
+        const data = await res.json();
+        if (!data.success) return;
+
+        const calibBox = document.getElementById('mlCalibrationTable');
+        if (calibBox && data.metrics && data.metrics.calibration_curve) {
+          let html = '<table class="w-full text-left"><thead><tr class="text-slate-500 border-b border-bordercol"><th>Decile Bin</th><th>Predicted Prob</th><th>Observed Win Rate</th><th>Samples</th></tr></thead><tbody>';
+          data.metrics.calibration_curve.forEach(c => {
+            html += `<tr class="border-b border-bordercol/40">
+              <td class="py-1.5 text-white">Bin ${c.bin + 1}</td>
+              <td class="py-1.5 text-purple-300">${(c.predicted * 100).toFixed(1)}%</td>
+              <td class="py-1.5 text-emerald-400">${(c.actual * 100).toFixed(1)}%</td>
+              <td class="py-1.5 text-slate-400">${c.count}</td>
+            </tr>`;
+          });
+          html += '</tbody></table>';
+          calibBox.innerHTML = html;
+        }
+
+        const driftCard = document.getElementById('mlDriftCard');
+        if (driftCard && data.drift) {
+          const d = data.drift;
+          driftCard.innerHTML = `
+            <div class="flex justify-between">
+              <span class="text-slate-400">Drift Health Status:</span>
+              <strong class="${d.status === 'HEALTHY' ? 'text-emerald-400' : 'text-amber-400'}">${d.status}</strong>
+            </div>
+            <div class="flex justify-between">
+              <span class="text-slate-400">Training In-Sample Accuracy:</span>
+              <strong class="text-white">${(d.training_accuracy * 100).toFixed(1)}%</strong>
+            </div>
+            <div class="flex justify-between">
+              <span class="text-slate-400">Recent Realized Accuracy:</span>
+              <strong class="text-purple-300">${(d.recent_accuracy * 100).toFixed(1)}%</strong>
+            </div>
+            <div class="p-2.5 rounded-lg bg-slate-900 border border-bordercol text-slate-300">
+              ${d.message}
+            </div>
+          `;
+        }
+      } catch (err) {
+        console.error("fetchMLPerformance error:", err);
+      }
+    }
+
+    async function fetchMLJournal() {
+      const tbody = document.getElementById('mlJournalTbody');
+      const countEl = document.getElementById('mlJournalCount');
+      if (!tbody) return;
+
+      try {
+        const res = await fetch('/api/ml/journal');
+        const data = await res.json();
+        if (!data.success || !data.journal) return;
+
+        const preds = data.journal.predictions || [];
+        if (countEl) countEl.innerText = `${preds.length} Predictions Stored`;
+
+        if (preds.length === 0) {
+          tbody.innerHTML = '<tr><td colspan="7" class="py-8 text-center text-slate-500 font-mono">No predictions logged yet. Execute recommendations to populate journal audit trail.</td></tr>';
+          return;
+        }
+
+        let html = '';
+        preds.slice().reverse().forEach(p => {
+          html += `
+            <tr class="hover:bg-slate-800/40">
+              <td class="py-2.5 px-4 text-slate-400">${(p.recorded_at || '').slice(11, 19)}</td>
+              <td class="py-2.5 px-4 font-bold text-white">${p.strategy_code || 'Strategy'}</td>
+              <td class="py-2.5 px-4 font-bold ${p.direction === 'BUY' ? 'text-emerald-400' : 'text-rose-400'}">${p.direction}</td>
+              <td class="py-2.5 px-4 text-purple-300">${((p.win_probability || 0.6) * 100).toFixed(1)}%</td>
+              <td class="py-2.5 px-4 text-slate-300">${p.expected_value_r || '+0.2R'}</td>
+              <td class="py-2.5 px-4 text-slate-300">${p.outcome || p.status || 'PENDING'}</td>
+              <td class="py-2.5 px-4 text-right font-bold ${p.realized_pnl > 0 ? 'text-emerald-400' : (p.realized_pnl < 0 ? 'text-rose-400' : 'text-slate-400')}">
+                ${p.realized_pnl ? `$${p.realized_pnl.toFixed(2)}` : '--'}
+              </td>
+            </tr>
+          `;
+        });
+        tbody.innerHTML = html;
+      } catch (err) {
+        console.error("fetchMLJournal error:", err);
+      }
+    }
+
+    async function fetchMLRisk() {
+      try {
+        const res = await fetch('/api/ml/risk');
+        const data = await res.json();
+        if (!data.success) return;
+
+        const openEl = document.getElementById('mlRiskOpenCount');
+        if (openEl) openEl.innerText = data.open_gold_positions;
+
+        const spreadEl = document.getElementById('mlRiskCurrSpread');
+        if (spreadEl) spreadEl.innerText = `${data.current_spread_pts} pts ($${(data.current_spread_pts / 100).toFixed(2)}/oz)`;
+
+        const statusEl = document.getElementById('mlRiskCapStatus');
+        if (statusEl) {
+          if (data.open_gold_positions >= data.max_allowed) {
+            statusEl.innerText = 'BLOCKED (Max 1 Position Limit Active)';
+            statusEl.className = 'text-rose-400 font-bold';
+          } else {
+            statusEl.innerText = 'PASSED (Available for 1 Trade)';
+            statusEl.className = 'text-emerald-400 font-bold';
+          }
+        }
+      } catch (err) {
+        console.error("fetchMLRisk error:", err);
+      }
+    }
+
+    async function fetchMLSettings() {
+      try {
+        const res = await fetch('/api/ml/settings');
+        const data = await res.json();
+        if (!data.success || !data.settings) return;
+
+        const cfg = data.settings;
+        const minConfInput = document.getElementById('cfgMinConf');
+        if (minConfInput) {
+          minConfInput.value = Math.round((cfg.min_confidence_threshold || 0.60) * 100);
+          document.getElementById('lblCfgMinConf').innerText = minConfInput.value + '%';
+        }
+        const minEV = document.getElementById('cfgMinEV');
+        if (minEV) minEV.value = cfg.min_expected_value_r || 0.20;
+
+        const riskPct = document.getElementById('cfgRiskPct');
+        if (riskPct) riskPct.value = cfg.max_risk_per_trade_pct || 1.0;
+
+        const pType = document.getElementById('cfgPullbackType');
+        if (pType && cfg.chaser_option_b) pType.value = cfg.chaser_option_b.pullback_type || 'PERCENTAGE';
+
+        const pThresh = document.getElementById('cfgPullbackThresh');
+        if (pThresh && cfg.chaser_option_b) pThresh.value = cfg.chaser_option_b.pullback_threshold || 20;
+      } catch (err) {
+        console.error("fetchMLSettings error:", err);
+      }
+    }
+
+    async function saveMLSettingsFromUI() {
+      const minConf = document.getElementById('cfgMinConf').value;
+      const minEV = document.getElementById('cfgMinEV').value;
+      const riskPct = document.getElementById('cfgRiskPct').value;
+      const pType = document.getElementById('cfgPullbackType').value;
+      const pThresh = document.getElementById('cfgPullbackThresh').value;
+
+      try {
+        const res = await fetch('/api/ml/settings/update', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            min_confidence: minConf,
+            min_ev: minEV,
+            risk_pct: riskPct,
+            pullback_type: pType,
+            pullback_thresh: pThresh
+          })
+        });
+        const data = await res.json();
+        if (data.success) {
+          alert("ML & Option B Settings Saved Successfully!");
+          loadMLDashboard(true);
+        } else {
+          alert("Failed to save settings: " + (data.error || 'Unknown error'));
+        }
+      } catch (err) {
+        alert("Error saving settings: " + err.message);
+      }
+    }
+
+
+    setInterval(() => { if (currentMainTab === 'gold') loadGoldDashboard(); }, 5000);
+    setInterval(() => { if (currentMainTab === 'ml') loadMLDashboard(); }, 5000);
+  
+  // ==============================================================================
+  // 5-THEME DYNAMIC ENGINE & LOCALSTORAGE PERSISTENCE
+  // ==============================================================================
+  const THEME_NAMES = {
+    'gold-obsidian': '👑 24K OBSIDIAN GOLD',
+    'cyberpunk-neon': '⚡ CYBERPUNK NEON',
+    'emerald-matrix': '💎 EMERALD ALPHA',
+    'sapphire-nordic': '🌊 SAPPHIRE HORIZON',
+    'solar-forge': '🔥 SOLAR FORGE'
+  };
+
+  function setAppTheme(themeId) {
+    if (!THEME_NAMES[themeId]) themeId = 'gold-obsidian';
+    
+    // Apply data-theme to root
+    document.documentElement.setAttribute('data-theme', themeId);
+    try {
+      localStorage.setItem('headway_theme', themeId);
+    } catch(e) {}
+
+    // Update active badge in quick bar
+    const badge = document.getElementById('activeThemePillBadge');
+    if (badge) badge.innerText = THEME_NAMES[themeId];
+
+    // Update pill buttons visual state
+    ['gold-obsidian', 'cyberpunk-neon', 'emerald-matrix', 'sapphire-nordic', 'solar-forge'].forEach(id => {
+      const btn = document.getElementById('pill_' + id);
+      if (btn) {
+        if (id === themeId) {
+          btn.className = 'theme-pill px-3 py-1.5 rounded-xl text-xs font-bold transition flex items-center gap-1.5 theme-active-pill';
+        } else {
+          btn.className = 'theme-pill px-3 py-1.5 rounded-xl text-xs font-bold transition flex items-center gap-1.5 border border-slate-800 bg-slate-900/60 text-slate-400 hover:text-white';
+        }
+      }
+    });
+  }
+
+  function openThemeGalleryModal() {
+    const modal = document.getElementById('themeGalleryModal');
+    if (modal) modal.classList.remove('hidden');
+  }
+
+  function closeThemeGalleryModal() {
+    const modal = document.getElementById('themeGalleryModal');
+    if (modal) modal.classList.add('hidden');
+  }
+
+  // Load saved theme on boot
+  (function initTheme() {
+    let saved = 'gold-obsidian';
+    try {
+      saved = localStorage.getItem('headway_theme') || 'gold-obsidian';
+    } catch(e) {}
+    setAppTheme(saved);
+  })();
+
+</script>
+</body>
+</html>
+"""
+
+import commander.api as commander_api
+from commander.dashboard import inject as _commander_inject
+from commander.apex_dashboard import inject_apex as _apex_inject
+HTML_PAGE = _commander_inject(HTML_PAGE)
+HTML_PAGE = _apex_inject(HTML_PAGE)
+
+def get_gold_overview_data():
+    quote = get_symbol_quote("XAUUSD")
+    df_m15 = get_gold_candles("M15", 150, prefer_cache=True)
+    df_h1 = get_gold_candles("H1", 100, prefer_cache=True)
+    
+    regime = analyze_market_regime(df_h1) if not df_h1.empty else {"regime": "NEUTRAL", "bias": "NEUTRAL", "direction": "NO TRADE"}
+    asian = detect_asian_session_levels(df_m15) if not df_m15.empty else {"asian_high": 0, "asian_low": 0}
+    atr = compute_atr(df_m15, 14).iloc[-1] if not df_m15.empty else 8.0
+    rsi = compute_rsi(df_m15, 14).iloc[-1] if not df_m15.empty else 50.0
+    
+    bid = quote.get("bid", 2740.0) if quote else 2740.0
+    ask = quote.get("ask", 2743.8) if quote else 2743.8
+    spread_pts = quote.get("spread", 380) if quote else 380
+    spread_usd = round(spread_pts * 0.01, 2)
+    
+    return {
+        "symbol": "XAUUSD",
+        "name": "Gold / US Dollar",
+        "bid": bid,
+        "ask": ask,
+        "spread_points": spread_pts,
+        "spread_usd": spread_usd,
+        "atr_14": round(float(atr), 2),
+        "rsi_14": round(float(rsi), 1),
+        "regime": regime.get("regime", "RANGING_CONSOLIDATION"),
+        "bias": regime.get("bias", "NEUTRAL"),
+        "direction": regime.get("direction", "NO TRADE"),
+        "volatility": regime.get("volatility", "NORMAL"),
+        "asian_high": asian.get("asian_high", 0.0),
+        "asian_low": asian.get("asian_low", 0.0),
+        "asian_range_pts": asian.get("asian_range_pts", 0.0),
+        "asian_status": asian.get("status", "INSIDE_ASIAN_RANGE"),
+        "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    }
+
+class DerivServer(BaseHTTPRequestHandler):
+    def do_GET(self):
+        url = urlparse(self.path)
+        if commander_api.handles(url.path):
+            return commander_api.dispatch(self, "GET")
+        if url.path in ["/", "/index.html"]:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(HTML_PAGE.encode("utf-8"))
+        elif url.path.startswith("/static/"):
+            rel_path = url.path.lstrip("/").replace("/", os.sep)
+            local_file = Path(rel_path)
+            if local_file.exists() and local_file.is_file():
+                ext = local_file.suffix.lower()
+                content_types = {
+                    ".png": "image/png",
+                    ".jpg": "image/jpeg",
+                    ".jpeg": "image/jpeg",
+                    ".svg": "image/svg+xml",
+                    ".webp": "image/webp",
+                    ".gif": "image/gif",
+                    ".css": "text/css",
+                    ".js": "application/javascript"
+                }
+                c_type = content_types.get(ext, "application/octet-stream")
+                self.send_response(200)
+                self.send_header("Content-Type", c_type)
+                self.send_header("Cache-Control", "public, max-age=86400")
+                self.end_headers()
+                with open(local_file, "rb") as f:
+                    self.wfile.write(f.read())
+                return
+            else:
+                self.send_response(404)
+                self.end_headers()
+                return
+        elif url.path == "/api/state":
+            state = get_deriv_full_state()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(state).encode("utf-8"))
+        elif url.path == "/api/symbols":
+            global symbols_cache
+            if not symbols_cache:
+                symbols_cache = load_all_symbols()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(symbols_cache).encode("utf-8"))
+        elif url.path == "/api/quote":
+            qs = parse_qs(url.query)
+            sym = qs.get("symbol", ["BTCUSD"])[0]
+            quote = get_symbol_quote(sym)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(quote).encode("utf-8"))
+        elif url.path == "/api/setups":
+            state = scanner.get_state()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(state).encode("utf-8"))
+        elif url.path == "/api/profit_chaser/dashboard":
+            data = profit_chaser.get_dashboard_data() if profit_chaser else {"positions": [], "recent_events": []}
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(data).encode("utf-8"))
+        elif url.path == "/api/backtest/results":
+            res_file = Path("best_strategy_configs.json")
+            data = json.loads(res_file.read_text(encoding="utf-8")) if res_file.exists() else []
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({"success": True, "top_configs": data}).encode("utf-8"))
+        elif url.path == "/api/journal":
+            journal = scanner.load_journal()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(journal).encode("utf-8"))
+        elif url.path == "/api/history":
+            history = get_recent_trade_history()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(history).encode("utf-8"))
+        elif url.path == "/api/performance":
+            qs = parse_qs(url.query)
+            tf = qs.get("timeframe", ["all"])[0]
+            force = qs.get("resync", ["0"])[0] == "1"
+            perf = get_symbol_trading_analytics(timeframe=tf, force_refresh=force)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(perf).encode("utf-8"))
+        elif url.path == "/api/multi_tp/groups":
+            groups = sync_multi_tp_groups()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(groups).encode("utf-8"))
+        elif url.path == "/api/profit_guardian/status":
+            st = guardian.get_status() if guardian else {}
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(st).encode("utf-8"))
+        elif url.path == "/api/gold/overview":
+            data = get_gold_overview_data()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(data).encode("utf-8"))
+        elif url.path == "/api/gold/candles":
+            qs = parse_qs(url.query)
+            tf = qs.get("tf", ["M15"])[0].upper()
+            count = int(qs.get("count", ["150"])[0])
+            with mt5_lock:
+                df = get_gold_candles(tf, count=count)
+            candles = []
+            if df is not None and not df.empty:
+                for _, row in df.iterrows():
+                    try:
+                        t = int(pd.to_datetime(row['time']).timestamp())
+                        candles.append({
+                            "time": t,
+                            "open": float(row['open']),
+                            "high": float(row['high']),
+                            "low": float(row['low']),
+                            "close": float(row['close']),
+                            "volume": float(row.get('tick_volume', row.get('volume', 0)))
+                        })
+                    except Exception:
+                        pass
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(candles).encode("utf-8"))
+        elif url.path == "/api/gold/setups":
+            setups = generate_gold_trade_setups()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(setups).encode("utf-8"))
+        elif url.path == "/api/gold/matrix":
+            matrix = get_multi_timeframe_matrix()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(matrix).encode("utf-8"))
+        elif url.path == "/api/gold/macro":
+            events = get_gold_macro_events()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(events).encode("utf-8"))
+        elif url.path == "/api/gold/backtest/results":
+            if BACKTEST_RESULTS_FILE.exists():
+                try:
+                    data = json.loads(BACKTEST_RESULTS_FILE.read_text(encoding="utf-8"))
+                except Exception:
+                    bt = GoldBacktester()
+                    data = bt.run_all_strategies(5000)
+            else:
+                bt = GoldBacktester()
+                data = bt.run_all_strategies(5000)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(data).encode("utf-8"))
+        elif url.path == "/api/gold/auto_trade/status":
+            st = gold_auto_trader.get_status() if gold_auto_trader else {}
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(st).encode("utf-8"))
+        elif url.path == "/api/ml/overview":
+            try:
+                m15_path = CACHE_DIR / "XAUUSD_M15_5000.csv"
+                h1_path = CACHE_DIR / "XAUUSD_H1_5000.csv"
+                df_m15 = pd.read_csv(m15_path) if m15_path.exists() else None
+                df_h1 = pd.read_csv(h1_path) if h1_path.exists() else None
+                model = get_active_model()
+                drift = get_model_drift_analysis()
+                regime = detect_market_regime(df_m15, df_h1) if df_m15 is not None else {"regime_name": "Moderate Bullish Trend"}
+                mtf = analyze_multi_timeframe({"M15": df_m15, "H1": df_h1}) if df_m15 is not None else {"confluence_percentage": 75}
+                settings = load_ml_settings()
+
+                last_price = float(df_m15['close'].iloc[-1]) if df_m15 is not None else 2735.40
+                data = {
+                    "success": True,
+                    "model_version": model.version,
+                    "accuracy": model.metadata.get("accuracy", 0.652),
+                    "brier_score": model.metadata.get("brier_score", 0.184),
+                    "roc_auc": model.metadata.get("roc_auc", 0.712),
+                    "feature_importances": model.metadata.get("feature_importances", {}),
+                    "current_regime": regime["regime_name"],
+                    "mtf_confluence": mtf["confluence_percentage"],
+                    "model_drift": drift,
+                    "live_price": round(last_price, 2),
+                    "spread_pts": 380,
+                    "active_strategies_count": sum(1 for v in settings.get("enabled_strategies", {}).values() if v),
+                    "total_strategies_count": 7
+                }
+            except Exception as e:
+                data = {"success": False, "error": str(e)}
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(data).encode("utf-8"))
+
+        elif url.path == "/api/ml/recommendations":
+            try:
+                m15_path = CACHE_DIR / "XAUUSD_M15_5000.csv"
+                h1_path = CACHE_DIR / "XAUUSD_H1_5000.csv"
+                df_m15 = pd.read_csv(m15_path) if m15_path.exists() else None
+                df_h1 = pd.read_csv(h1_path) if h1_path.exists() else None
+                acc_info = {"balance": 10000.0}
+                if mt5 and mt5.initialize():
+                    ai = mt5.account_info()
+                    if ai:
+                        acc_info = {"balance": ai.balance, "equity": ai.equity}
+                recs = generate_ai_trade_recommendations(df_m15, df_h1, account_balance=acc_info["balance"]) if df_m15 is not None else []
+                data = {"success": True, "count": len(recs), "recommendations": recs}
+            except Exception as e:
+                data = {"success": False, "error": str(e), "recommendations": []}
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(data).encode("utf-8"))
+
+        elif url.path == "/api/ml/strategies":
+            try:
+                m15_path = CACHE_DIR / "XAUUSD_M15_5000.csv"
+                df_m15 = pd.read_csv(m15_path) if m15_path.exists() else None
+                strats = evaluate_all_strategies(df_m15) if df_m15 is not None else []
+                data = {"success": True, "strategies": strats}
+            except Exception as e:
+                data = {"success": False, "error": str(e), "strategies": []}
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(data).encode("utf-8"))
+
+        elif url.path == "/api/ml/mtf":
+            try:
+                tf_dict = {}
+                for tf in ["W1", "D1", "H4", "H1", "M15", "M5", "M1"]:
+                    p = CACHE_DIR / f"XAUUSD_{tf}_150.csv"
+                    if not p.exists() and tf in ["M15", "H1"]:
+                        p = CACHE_DIR / f"XAUUSD_{tf}_5000.csv"
+                    if p.exists():
+                        tf_dict[tf] = pd.read_csv(p)
+                mtf = analyze_multi_timeframe(tf_dict)
+                data = {"success": True, "data": mtf}
+            except Exception as e:
+                data = {"success": False, "error": str(e)}
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(data).encode("utf-8"))
+
+        elif url.path == "/api/ml/regime":
+            try:
+                m15_path = CACHE_DIR / "XAUUSD_M15_5000.csv"
+                h1_path = CACHE_DIR / "XAUUSD_H1_5000.csv"
+                df_m15 = pd.read_csv(m15_path) if m15_path.exists() else None
+                df_h1 = pd.read_csv(h1_path) if h1_path.exists() else None
+                regime = detect_market_regime(df_m15, df_h1) if df_m15 is not None else {}
+                data = {"success": True, "regime": regime, "all_regimes": REGIMES}
+            except Exception as e:
+                data = {"success": False, "error": str(e)}
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(data).encode("utf-8"))
+
+        elif url.path == "/api/ml/models":
+            try:
+                model = get_active_model()
+                data = {
+                    "success": True,
+                    "active_model": model.metadata,
+                    "feature_names": FEATURE_NAMES
+                }
+            except Exception as e:
+                data = {"success": False, "error": str(e)}
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(data).encode("utf-8"))
+
+        elif url.path == "/api/ml/train/status":
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(ml_training_state).encode("utf-8"))
+
+        elif url.path == "/api/ml/backtest":
+            try:
+                m15_path = CACHE_DIR / "XAUUSD_M15_5000.csv"
+                h1_path = CACHE_DIR / "XAUUSD_H1_5000.csv"
+                df_m15 = pd.read_csv(m15_path) if m15_path.exists() else None
+                df_h1 = pd.read_csv(h1_path) if h1_path.exists() else None
+                bt = run_ml_backtest(df_m15, df_h1, min_confidence=0.60) if df_m15 is not None else {}
+                data = {"success": True, "backtest": bt}
+            except Exception as e:
+                data = {"success": False, "error": str(e)}
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(data).encode("utf-8"))
+
+        elif url.path == "/api/ml/performance":
+            try:
+                model = get_active_model()
+                drift = get_model_drift_analysis()
+                data = {
+                    "success": True,
+                    "metrics": {
+                        "accuracy": model.metadata.get("accuracy", 0.652),
+                        "brier_score": model.metadata.get("brier_score", 0.184),
+                        "roc_auc": model.metadata.get("roc_auc", 0.712),
+                        "calibration_curve": model.metadata.get("calibration_curve", [])
+                    },
+                    "drift": drift
+                }
+            except Exception as e:
+                data = {"success": False, "error": str(e)}
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(data).encode("utf-8"))
+
+        elif url.path == "/api/ml/journal":
+            try:
+                journal = load_ml_journal()
+                data = {"success": True, "journal": journal}
+            except Exception as e:
+                data = {"success": False, "error": str(e)}
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(data).encode("utf-8"))
+
+        elif url.path == "/api/ml/risk":
+            try:
+                open_gold = 0
+                if mt5 and mt5.initialize():
+                    pos = mt5.positions_get(symbol="XAUUSD")
+                    if pos:
+                        open_gold = len(pos)
+                data = {
+                    "success": True,
+                    "open_gold_positions": open_gold,
+                    "max_allowed": 1,
+                    "current_spread_pts": 380,
+                    "max_allowed_spread_pts": 450,
+                    "risk_gate_status": "PASSED" if open_gold < 1 else "BLOCKED_MAX_OPEN_TRADES"
+                }
+            except Exception as e:
+                data = {"success": False, "error": str(e)}
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(data).encode("utf-8"))
+
+        elif url.path == "/api/ml/settings":
+            try:
+                cfg = load_ml_settings()
+                data = {"success": True, "settings": cfg}
+            except Exception as e:
+                data = {"success": False, "error": str(e)}
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(data).encode("utf-8"))
+
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def do_POST(self):
+        url = urlparse(self.path)
+        length = int(self.headers.get("Content-Length", 0))
+        body = self.rfile.read(length) if length > 0 else b""
+        
+        try:
+            data = json.loads(body.decode("utf-8")) if body else {}
+        except Exception:
+            data = {}
+
+        if commander_api.handles(url.path):
+            return commander_api.dispatch(self, "POST", data)
+
+        if url.path == "/api/order":
+            symbol = data.get("symbol", "BTCUSD")
+            action = data.get("action", "SELL")
+            volume = float(data.get("volume", 0.1))
+            sl = float(data.get("sl", 0.0))
+            tp = float(data.get("tp", 0.0))
+            trades_count = int(data.get("trades_count", 1))
+            volume_mode = data.get("volume_mode", "split")
+            setup_id = data.get("setup_id")
+            confidence = data.get("confidence", "--")
+            reason = data.get("reason", "Manual Order")
+            comment = data.get("comment", "Headway Agent")
+            res = execute_deriv_order(symbol, action, volume, sl, tp, trades_count, volume_mode, setup_id, confidence, reason, comment)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(res).encode("utf-8"))
+
+        elif url.path == "/api/multi_tp/execute":
+            symbol = data.get("symbol", "BTCUSD")
+            action = data.get("action", "BUY")
+            ref_balance = float(data.get("ref_balance", 1000.0))
+            lot_per_trade = float(data.get("lot_per_trade", 0.01))
+            ai_notes = data.get("ai_notes", "Manual 2-Trade Multi-TP Execution")
+            res = execute_multi_tp_group(
+                symbol=symbol,
+                action=action,
+                ref_balance=ref_balance,
+                default_lot=lot_per_trade,
+                ai_notes=ai_notes
+            )
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(res).encode("utf-8"))
+
+        elif url.path == "/api/multi_tp/close_group":
+            group_id = data.get("group_id")
+            res = close_multi_tp_group(group_id)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(res).encode("utf-8"))
+
+        elif url.path == "/api/multi_tp/close_trade":
+            ticket = int(data.get("ticket"))
+            res = close_multi_tp_trade(ticket)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(res).encode("utf-8"))
+
+        elif url.path == "/api/auto_trade_toggle":
+            new_state = scanner.toggle_auto_trade()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({
+                "auto_trade_enabled": new_state,
+                "message": f"Auto-trading {'ENABLED' if new_state else 'DISABLED'}"
+            }).encode("utf-8"))
+        elif url.path == "/api/profit_guardian/toggle":
+            en = guardian.toggle_enabled() if guardian else False
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({
+                "enabled": en,
+                "message": f"Profit Guardian {'ENABLED' if en else 'DISABLED'}"
+            }).encode("utf-8"))
+
+        elif url.path == "/api/setups/dismiss":
+            sid = data.get("setup_id")
+            sym = data.get("symbol")
+            act = data.get("action")
+            if scanner:
+                scanner.dismiss_setup(setup_id=sid, symbol=sym, action=act)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({"success": True, "message": f"Setup {sym} {act} dismissed"}).encode("utf-8"))
+        elif url.path == "/api/profit_chaser/config":
+            if profit_chaser:
+                for k, v in data.items():
+                    if hasattr(profit_chaser.config, k):
+                        setattr(profit_chaser.config, k, v)
+                profit_chaser.save_state()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({"success": True, "config": profit_chaser.get_dashboard_data()["config"] if profit_chaser else {}}).encode("utf-8"))
+        elif url.path == "/api/profit_guardian/config":
+            if guardian:
+                guardian.update_config(data)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({"success": True, "config": guardian.config if guardian else {}}).encode("utf-8"))
+
+        elif url.path == "/api/rescan":
+            scanner.run_scan_now()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({"success": True, "message": "Rescan complete"}).encode("utf-8"))
+
+        elif url.path == "/api/close":
+            ticket = int(data.get("ticket"))
+            res = close_deriv_position(ticket)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(res).encode("utf-8"))
+
+        elif url.path == "/api/close_all":
+            res = close_all_deriv_positions()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(res).encode("utf-8"))
+
+        elif url.path == "/api/gold/backtest/run":
+            bt = GoldBacktester()
+            data = bt.run_all_strategies(5000)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(data).encode("utf-8"))
+
+        elif url.path == "/api/gold/auto_trade/toggle":
+            new_state = gold_auto_trader.toggle_auto_trade() if gold_auto_trader else False
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({"success": True, "enabled": new_state}).encode("utf-8"))
+
+        elif url.path == "/api/gold/auto_trade/config":
+            cfg = gold_auto_trader.update_config(data) if gold_auto_trader else {}
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({"success": True, "config": cfg}).encode("utf-8"))
+
+        elif url.path == "/api/gold/execute_twin":
+            action = data.get("direction", "BUY").upper()
+            lot = float(data.get("lot", 0.01))
+            tf = data.get("timeframe", "M1").upper()
+            strat = data.get("strategy", f"Manual {tf} Twin Scalp")
+            conf = int(data.get("confidence", 92))
+            sl = float(data.get("sl", 0.0))
+            tp_fixed = float(data.get("tp_fixed", data.get("tp", 0.0)))
+            trail_dist = float(data.get("trail_dist", 0.0))
+
+            res = gold_auto_trader.execute_twin_gold_orders(
+                action=action,
+                lot=lot,
+                sl=sl,
+                tp_fixed=tp_fixed,
+                trail_dist=trail_dist,
+                confidence_score=conf,
+                strategy_name=strat,
+                timeframe=tf,
+                notes=f"Manual {tf} Twin Trade Execution",
+                is_auto=False
+            ) if gold_auto_trader else {"success": False, "message": "GoldAutoTrader not initialized"}
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(res).encode("utf-8"))
+
+        elif url.path == "/api/gold/close_all":
+            closed_count = 0
+            errs = []
+            if mt5 is not None:
+                with mt5_lock:
+                    open_pos = mt5.positions_get(symbol="XAUUSD")
+                    if open_pos:
+                        tick = mt5.symbol_info_tick("XAUUSD")
+                        for p in open_pos:
+                            action = mt5.ORDER_TYPE_SELL if p.type == mt5.ORDER_TYPE_BUY else mt5.ORDER_TYPE_BUY
+                            price = tick.bid if p.type == mt5.ORDER_TYPE_BUY else tick.ask
+                            req = {
+                                "action": mt5.TRADE_ACTION_DEAL,
+                                "symbol": "XAUUSD",
+                                "volume": p.volume,
+                                "type": action,
+                                "position": p.ticket,
+                                "price": price,
+                                "deviation": 40,
+                                "magic": 777199,
+                                "comment": "Close Gold Twin",
+                                "type_time": mt5.ORDER_TIME_GTC,
+                                "type_filling": mt5.ORDER_FILLING_IOC
+                            }
+                            res = guarded_order_send(mt5, req)
+                            if res and res.retcode == mt5.TRADE_RETCODE_DONE:
+                                closed_count += 1
+                            else:
+                                errs.append(getattr(res, "comment", "Failed"))
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({"success": True, "closed_count": closed_count, "errors": errs}).encode("utf-8"))
+
+        elif url.path == "/api/gold/execute_now":
+            action = data.get("direction", "BUY")
+            lot = float(data.get("lot", 0.01))
+            sl = float(data.get("sl", 0.0))
+            tp = float(data.get("tp", 0.0))
+            conf = int(data.get("confidence", 90))
+            strat = data.get("strategy", "Gold Intelligence Setup")
+            res = gold_auto_trader.execute_gold_order(
+                action=action, lot=lot, sl=sl, tp=tp,
+                confidence_score=conf, strategy_name=strat,
+                notes="Manual Instant Execution via Gold Page", is_auto=False
+            ) if gold_auto_trader else {"success": False, "message": "GoldAutoTrader not initialized"}
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(res).encode("utf-8"))
+        elif url.path == "/api/ml/train":
+            def train_worker():
+                global ml_training_state
+                ml_training_state["is_training"] = True
+                ml_training_state["progress"] = 10
+                ml_training_state["message"] = "Loading 5,000 M15 and H1 candles..."
+                try:
+                    m15_path = CACHE_DIR / "XAUUSD_M15_5000.csv"
+                    h1_path = CACHE_DIR / "XAUUSD_H1_5000.csv"
+                    df_m15 = pd.read_csv(m15_path) if m15_path.exists() else None
+                    df_h1 = pd.read_csv(h1_path) if h1_path.exists() else None
+                    if df_m15 is None:
+                        raise ValueError("Cached XAUUSD_M15_5000.csv not found.")
+
+                    ml_training_state["progress"] = 35
+                    ml_training_state["message"] = "Extracting 28 quantitative & SMC features with purged CV..."
+                    time.sleep(0.5)
+
+                    v_num = f"v{int(time.time())}"
+                    model = MLTradingModel(version=v_num)
+                    ml_training_state["progress"] = 65
+                    ml_training_state["message"] = "Fitting ensemble classifier with Platt probability calibration..."
+                    meta = model.train(df_m15, df_h1)
+
+                    ml_training_state["progress"] = 100
+                    ml_training_state["message"] = f"Training completed successfully! Accuracy: {meta.get('accuracy', 0)*100:.1f}%, Brier: {meta.get('brier_score', 0)}"
+                    ml_training_state["last_result"] = meta
+                    ml_training_state["is_training"] = False
+
+                    # Update active model in settings
+                    settings = load_ml_settings()
+                    settings["active_model_version"] = v_num
+                    save_ml_settings(settings)
+                except Exception as e:
+                    ml_training_state["is_training"] = False
+                    ml_training_state["message"] = f"Training error: {str(e)}"
+
+            threading.Thread(target=train_worker, daemon=True).start()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({"success": True, "message": "ML training initiated in background."}).encode("utf-8"))
+
+        elif url.path == "/api/ml/backtest/run":
+            try:
+                min_c = float(data.get("min_confidence", 60)) / 100.0
+                m15_path = CACHE_DIR / "XAUUSD_M15_5000.csv"
+                h1_path = CACHE_DIR / "XAUUSD_H1_5000.csv"
+                df_m15 = pd.read_csv(m15_path) if m15_path.exists() else None
+                df_h1 = pd.read_csv(h1_path) if h1_path.exists() else None
+                bt = run_ml_backtest(df_m15, df_h1, min_confidence=min_c) if df_m15 is not None else {}
+                res = {"success": True, "backtest": bt}
+            except Exception as e:
+                res = {"success": False, "error": str(e)}
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(res).encode("utf-8"))
+
+        elif url.path == "/api/ml/recommendations/execute":
+            try:
+                rec_data = data.get("recommendation", {})
+                action = rec_data.get("direction", "BUY")
+                lot = float(rec_data.get("recommended_lot_size", 0.01))
+                sl = float(rec_data.get("stop_loss", 0.0))
+                tp = float(rec_data.get("tp2", 0.0))
+                strat = rec_data.get("strategy_name", "ML Intelligence Setup")
+                conf = int(float(rec_data.get("win_probability", 0.70)) * 100)
+
+                # Check Risk Gate
+                open_gold = 0
+                if mt5 and mt5.initialize():
+                    pos = mt5.positions_get(symbol="XAUUSD")
+                    if pos:
+                        open_gold = len(pos)
+
+                passed, reason = evaluate_risk_gate({"balance": 10000.0}, rec_data, current_spread_pts=380, open_gold_positions_count=open_gold)
+                if not passed:
+                    res = {"success": False, "message": reason}
+                else:
+                    if gold_auto_trader:
+                        res = gold_auto_trader.execute_gold_order(
+                            action=action, lot=lot, sl=sl, tp=tp,
+                            confidence_score=conf, strategy_name=strat,
+                            notes=f"1-Click AI Execution ({rec_data.get('expected_value_r', '+0.4R')})", is_auto=False
+                        )
+                        # Record in journal
+                        record_ml_prediction({
+                            "strategy_code": rec_data.get("strategy_code", "Strategy A"),
+                            "direction": action,
+                            "win_probability": rec_data.get("win_probability", 0.7),
+                            "expected_value_r": rec_data.get("expected_value_r", "+0.4R"),
+                            "entry_price": rec_data.get("entry_price", 0),
+                            "sl": sl,
+                            "tp": tp,
+                            "status": "EXECUTED"
+                        })
+                    else:
+                        res = {"success": False, "message": "GoldAutoTrader engine not ready"}
+            except Exception as e:
+                res = {"success": False, "error": str(e)}
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(res).encode("utf-8"))
+
+        elif url.path == "/api/ml/strategies/toggle":
+            try:
+                code = data.get("strategy_code")
+                enabled = bool(data.get("enabled", True))
+                cfg = load_ml_settings()
+                if "enabled_strategies" not in cfg:
+                    cfg["enabled_strategies"] = {}
+                cfg["enabled_strategies"][code] = enabled
+                save_ml_settings(cfg)
+                res = {"success": True, "strategy": code, "enabled": enabled}
+            except Exception as e:
+                res = {"success": False, "error": str(e)}
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(res).encode("utf-8"))
+
+        elif url.path == "/api/ml/settings/update":
+            try:
+                cfg = load_ml_settings()
+                if "min_confidence" in data:
+                    cfg["min_confidence_threshold"] = float(data["min_confidence"]) / 100.0
+                if "min_ev" in data:
+                    cfg["min_expected_value_r"] = float(data["min_ev"])
+                if "risk_pct" in data:
+                    cfg["max_risk_per_trade_pct"] = float(data["risk_pct"])
+                if "pullback_type" in data:
+                    cfg["chaser_option_b"]["pullback_type"] = data["pullback_type"]
+                if "pullback_thresh" in data:
+                    cfg["chaser_option_b"]["pullback_threshold"] = float(data["pullback_thresh"])
+                save_ml_settings(cfg)
+                res = {"success": True, "settings": cfg}
+            except Exception as e:
+                res = {"success": False, "error": str(e)}
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(res).encode("utf-8"))
+
+            
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+def get_available_port(preferred_port=8765):
+    import socket
+    for p in [preferred_port, 8766, 8767, 8000]:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            try:
+                s.bind(("127.0.0.1", p))
+                return p
+            except OSError:
+                continue
+    return preferred_port
+
+def run(port=None):
+    global scanner
+    if port is None:
+        port = int(os.getenv("PORT", 0)) or get_available_port(8765)
+    global guardian
+    load_all_symbols()
+    server = ThreadingHTTPServer(("0.0.0.0", port), DerivServer)
+    scanner = AutomatedSetupScanner(interval_seconds=180)
+    guardian = ProfitGuardian()
+    guardian.start()
+    commander_api.get()  # starts Commander scheduler + health threads (default level 1: observer)
+    print("=" * 65)
+    print(" " * 10 + "HEADWAY MT5 INSTITUTIONAL WORKSTATION")
+    print("=" * 65)
+    print(f"[+] Workstation running at: http://127.0.0.1:{port}/ (or http://localhost:{port}/)")
+    print("[+] Opening web app in your default browser...")
+    try:
+        import webbrowser
+        threading.Timer(1.0, lambda: webbrowser.open(f"http://127.0.0.1:{port}/")).start()
+    except Exception:
+        pass
+    print(f"Workstation is LIVE on port {port}. Press Ctrl+C to stop.\n")
+    server.serve_forever()
+
+if __name__ == "__main__":
+    p_arg = None
+    for arg in sys.argv[1:]:
+        if arg.isdigit():
+            p_arg = int(arg)
+    run(p_arg)

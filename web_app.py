@@ -239,65 +239,138 @@ def check_symbol_market_open(sym):
     
     return True, "Market Open & Active"
 
-def calculate_setup_confidence(sym_info, tick, closes, highs, lows, ema20, rsi, atr, bias, stop_dist):
+# User Directive: Trade Only Gold Today
+GOLD_ONLY_MODE = True
+
+# Asset Class Classifications for Portfolio Heat & Correlation Protection
+CRYPTO_SYMBOLS = {"BTC", "ETH", "SOL", "DOGE", "XRP", "ADA", "LTC", "BTCUSD", "ETHUSD", "DOGEUSD", "XRPUSD", "SOLUSD", "LTCUSD", "ADAUSD"}
+METALS_SYMBOLS = {"XAUUSD", "XAGUSD", "GOLD", "SILVER"}
+FOREX_SYMBOLS = {"EURUSD", "GBPUSD", "USDJPY", "USDCAD", "AUDUSD", "NZDUSD", "USDCHF"}
+INDICES_SYMBOLS = {"US500", "DJ30", "NASDAQ-100", "VOL_20", "VOL_10", "BOOM_100", "CRASH_100"}
+
+def compute_robust_stop_distance(sym, tick, info, m15_atr=0.0, h1_atr=0.0):
     """
-    Rigorous Multi-Factor Confidence Scoring (Rule 2):
-      Evaluates trend confirmation, market structure, momentum/RSI, liquidity/spread, and risk ratio.
+    Computes an asset-class calibrated protective stop loss distance outside market noise.
+    Prevents microscopic noise stop-outs (e.g. 0.28% on crypto) that caused repeated losses.
+    """
+    cur_p = (tick.bid + tick.ask) / 2.0 if (tick.bid > 0 and tick.ask > 0) else 1.0
+    digits = info.digits
+    point = info.point or (10 ** -digits)
+    spread = tick.ask - tick.bid
+    broker_min = max(info.trade_stops_level * point, spread * 1.5, point * 50)
+    
+    sym_upper = sym.upper()
+    if sym_upper in CRYPTO_SYMBOLS or any(c in sym_upper for c in ["BTC", "ETH", "DOGE", "SOL", "XRP", "ADA", "LTC"]):
+        # Crypto: Minimum 2.0% price distance or 2.5x H1 ATR
+        dist = max(cur_p * 0.020, h1_atr * 2.2, m15_atr * 2.5, broker_min)
+    elif sym_upper in METALS_SYMBOLS or any(c in sym_upper for c in ["XAU", "GOLD", "XAG"]):
+        # Metals / Gold: Minimum $5.00/oz for Gold or 2.0x H1 ATR
+        gold_floor = 5.00 if ("XAU" in sym_upper or "GOLD" in sym_upper) else 0.35
+        dist = max(gold_floor, h1_atr * 2.0, m15_atr * 2.2, broker_min)
+    elif sym_upper in FOREX_SYMBOLS or any(c in sym_upper for c in ["EUR", "GBP", "USD", "JPY", "CAD", "AUD", "NZD", "CHF"]):
+        # Forex: Minimum 28 pips or 1.8x H1 ATR
+        pip_dist = point * 280 if digits >= 4 else point * 28
+        dist = max(pip_dist, h1_atr * 1.8, m15_atr * 2.0, broker_min)
+    else:
+        dist = max(cur_p * 0.012, h1_atr * 2.0, m15_atr * 2.2, broker_min)
+        
+    return dist
+
+def calculate_setup_confidence(sym_info, tick, closes, highs, lows, ema20, rsi, atr, bias, stop_dist, rates_h1=None):
+    """
+    Rigorous Multi-Factor Confidence Scoring (Rule 2 & High-Conviction Gate):
+      Evaluates Higher Timeframe (H1) alignment, market structure, momentum/RSI, spread, and multi-candle impulse.
       Returns (score: int, signals: list).
-      Only exceptional setups with multi-indicator alignment reach 88-100%.
+      Only exceptional setups with multi-timeframe and multi-indicator alignment reach 90-100%.
+      Counter-trend setups fighting H1 trend receive severe penalties and are rejected.
     """
-    score = 65  # Base score for passing initial M15 boundary scan
+    score = 30  # Disciplined base score (no artificial inflation)
     signals = []
     
     cur_p = tick.bid if bias == "SELL" else tick.ask
     
-    # Factor 1: Trend Confirmation & EMA alignment
+    # Factor 1: Higher Timeframe (H1) Trend Confluence (Crucial 25 points / -30 penalty)
+    if rates_h1 is not None and len(rates_h1) >= 20:
+        closes_h1 = rates_h1['close']
+        weights20 = np.exp(np.linspace(-1., 0., 20))
+        weights20 /= weights20.sum()
+        h1_ema20 = float(np.convolve(closes_h1[-20:], weights20, mode='valid')[-1])
+        h1_ema50 = float(np.mean(closes_h1[-20:]))
+        if len(closes_h1) >= 50:
+            weights50 = np.exp(np.linspace(-1., 0., 50))
+            weights50 /= weights50.sum()
+            h1_ema50 = float(np.convolve(closes_h1[-50:], weights50, mode='valid')[-1])
+            
+        if bias == "BUY":
+            if cur_p > h1_ema20 and h1_ema20 >= h1_ema50:
+                score += 25
+                signals.append("H1 Bullish Trend Confluence")
+            elif cur_p < h1_ema20:
+                score -= 30
+                signals.append("PENALTY: Counter-trend to H1 Downtrend")
+        elif bias == "SELL":
+            if cur_p < h1_ema20 and h1_ema20 <= h1_ema50:
+                score += 25
+                signals.append("H1 Bearish Trend Confluence")
+            elif cur_p > h1_ema20:
+                score -= 30
+                signals.append("PENALTY: Counter-trend to H1 Uptrend")
+    
+    # Factor 2: M15 Trend Confirmation & EMA alignment (15 points)
     if bias == "SELL" and cur_p < ema20:
-        score += 8
-        signals.append("Price below EMA20")
+        score += 10
+        signals.append("Price below M15 EMA20")
         if len(closes) >= 4 and closes[-1] < closes[-3]:
             score += 5
-            signals.append("Negative EMA slope")
+            signals.append("Negative M15 EMA slope")
     elif bias == "BUY" and cur_p > ema20:
-        score += 8
-        signals.append("Price above EMA20")
+        score += 10
+        signals.append("Price above M15 EMA20")
         if len(closes) >= 4 and closes[-1] > closes[-3]:
             score += 5
-            signals.append("Positive EMA slope")
+            signals.append("Positive M15 EMA slope")
             
-    # Factor 2: Momentum & RSI Sweet Spot
-    if bias == "SELL" and 40.0 <= rsi <= 55.0:
-        score += 8
-        signals.append(f"RSI in prime short momentum zone ({rsi:.1f})")
-    elif bias == "BUY" and 45.0 <= rsi <= 60.0:
-        score += 8
-        signals.append(f"RSI in prime long momentum zone ({rsi:.1f})")
+    # Factor 3: Momentum & RSI Sweet Spot (10 points / -15 penalty for extreme exhaustion)
+    if bias == "SELL":
+        if 38.0 <= rsi <= 52.0:
+            score += 10
+            signals.append(f"RSI prime short momentum ({rsi:.1f})")
+        elif rsi < 30.0:
+            score -= 15
+            signals.append(f"PENALTY: RSI Oversold exhaustion ({rsi:.1f})")
+    elif bias == "BUY":
+        if 48.0 <= rsi <= 62.0:
+            score += 10
+            signals.append(f"RSI prime long momentum ({rsi:.1f})")
+        elif rsi > 70.0:
+            score -= 15
+            signals.append(f"PENALTY: RSI Overbought exhaustion ({rsi:.1f})")
         
-    # Factor 3: Liquidity & Spread Tolerance
+    # Factor 4: Liquidity & Spread Tolerance (5 points / -15 penalty for wide spread)
     spread = tick.ask - tick.bid
     spread_pct = (spread / cur_p) * 100 if cur_p > 0 else 1.0
     if spread_pct < 0.05:
-        score += 7
+        score += 5
         signals.append(f"Ultra-low spread ({spread_pct:.3f}%)")
-    elif spread_pct < 0.15:
-        score += 4
-        signals.append(f"Tight spread ({spread_pct:.3f}%)")
+    elif spread_pct > 0.15:
+        score -= 15
+        signals.append(f"PENALTY: Wide spread ({spread_pct:.3f}%)")
         
-    # Factor 4: Volatility & ATR Adequacy
+    # Factor 5: Volatility & ATR Adequacy (5 points)
     if atr > 0:
         score += 5
         signals.append(f"Healthy ATR volatility ({atr:.2f})")
 
-    # Factor 5: Multi-Candle Trend Momentum Confluence (Enables 90-100% High Conviction)
-    if len(closes) >= 5:
+    # Factor 6: Multi-Candle Trend Momentum Confluence (10 points)
+    if len(closes) >= 4:
         if bias == "BUY" and closes[-1] > closes[-2] > closes[-3]:
-            score += 7
+            score += 10
             signals.append("Bullish 3-candle momentum continuation")
         elif bias == "SELL" and closes[-1] < closes[-2] < closes[-3]:
-            score += 7
+            score += 10
             signals.append("Bearish 3-candle impulse continuation")
         
-    score = min(100, max(50, score))
+    score = min(100, max(10, score))
     return score, signals
 
 # ==============================================================================
@@ -786,7 +859,12 @@ class AutomatedSetupScanner:
                     open_pos.add((p.symbol, p_type))
 
             # Candidate pool for Headway Quotes (Metals, Forex Majors, Crypto, Synthetic Indices)
-            candidate_pool = [
+            if GOLD_ONLY_MODE:
+                candidate_pool = [
+                    {"symbol": "XAUUSD", "category": "Metals (Exclusive Gold Intelligence Active)"}
+                ]
+            else:
+                candidate_pool = [
                 # Top Backtested Edge Assets (Ranked by Profit Factor & Expectancy)
                 {"symbol": "VOL_20", "category": "Indices 24/7 (Top Edge: 66.9% Win, PF 1.88)"},
                 {"symbol": "BOOM_100", "category": "Indices 24/7 (Top Edge: 62.9% Win, PF 2.15)"},
@@ -840,6 +918,13 @@ class AutomatedSetupScanner:
                     filtered_reasons[sym] = "Insufficient M15 candle history"
                     continue
 
+                rates_h1 = mt5.copy_rates_from_pos(sym, mt5.TIMEFRAME_H1, 0, 45)
+                h1_atr = 0.0
+                if rates_h1 is not None and len(rates_h1) >= 14:
+                    tr_h1 = np.maximum(rates_h1['high'][1:] - rates_h1['low'][1:], np.abs(rates_h1['high'][1:] - rates_h1['close'][:-1]))
+                    tr_h1 = np.maximum(tr_h1, np.abs(rates_h1['low'][1:] - rates_h1['close'][:-1]))
+                    h1_atr = float(np.mean(tr_h1[-14:]))
+
                 closes = rates['close']
                 highs = rates['high']
                 lows = rates['low']
@@ -871,7 +956,8 @@ class AutomatedSetupScanner:
                 rsi = float(100 - (100 / (1 + rs)))
 
                 cur_p = (tick.bid + tick.ask) / 2.0 if (tick.bid > 0 and tick.ask > 0) else closes[-1]
-                stop_dist = max(atr * 1.5, point * 50)
+                # Calibrated robust protective stop distance outside market noise
+                stop_dist = compute_robust_stop_distance(sym, tick, info, m15_atr=atr, h1_atr=h1_atr)
 
                 # Dynamic Trend & Momentum Determination (Long vs Short)
                 if cur_p >= ema20:
@@ -923,9 +1009,9 @@ class AutomatedSetupScanner:
                     filtered_reasons[sym] = "Broker risk data unavailable or minimum lot exceeds budget"
                     continue
 
-                # Compute Multi-Factor Confidence Score (Rule 2)
+                # Compute Multi-Factor Confidence Score (Rule 2 & High Conviction Gate)
                 confidence_score, signals_list = calculate_setup_confidence(
-                    info, tick, closes, highs, lows, ema20, rsi, atr, bias, stop_dist
+                    info, tick, closes, highs, lows, ema20, rsi, atr, bias, stop_dist, rates_h1=rates_h1
                 )
                 
                 tech_signals = f"M15 EMA20 at {round(ema20, digits)}, RSI(14) at {rsi:.1f}, ATR(14) at {round(atr, digits)} | Confluence: {'; '.join(signals_list[:2])}"
@@ -970,6 +1056,41 @@ class AutomatedSetupScanner:
                         setup_obj["notes"] += " [Queued: Taking 1 symbol at a time policy]"
                         valid_setups.append(setup_obj)
                         continue
+
+                    # Portfolio Correlation Protection Gate
+                    sym_u = sym.upper()
+                    open_crypto = sum(1 for p in positions if p.symbol.upper() in CRYPTO_SYMBOLS or any(c in p.symbol.upper() for c in ["BTC", "ETH", "DOGE", "SOL", "XRP", "ADA", "LTC"]))
+                    open_metals = sum(1 for p in positions if p.symbol.upper() in METALS_SYMBOLS or any(c in p.symbol.upper() for c in ["XAU", "GOLD", "XAG"]))
+                    open_forex = sum(1 for p in positions if p.symbol.upper() in FOREX_SYMBOLS or any(c in p.symbol.upper() for c in ["EUR", "GBP", "USD", "JPY", "CAD", "AUD", "NZD", "CHF"]))
+
+                    if (sym_u in CRYPTO_SYMBOLS or any(c in sym_u for c in ["BTC", "ETH", "DOGE", "SOL", "XRP", "ADA", "LTC"])) and open_crypto >= 1:
+                        filtered_reasons[sym] = f"Auto-Execution blocked: Portfolio Correlation Gate - Max 1 active Crypto trade allowed ({open_crypto} currently open)"
+                        setup_obj["notes"] += " [Blocked by Crypto Correlation Gate]"
+                        valid_setups.append(setup_obj)
+                        continue
+
+                    if (sym_u in METALS_SYMBOLS or any(c in sym_u for c in ["XAU", "GOLD", "XAG"])) and open_metals >= 1:
+                        filtered_reasons[sym] = f"Auto-Execution blocked: Portfolio Correlation Gate - Max 1 active Metals trade allowed ({open_metals} currently open)"
+                        setup_obj["notes"] += " [Blocked by Metals Correlation Gate]"
+                        valid_setups.append(setup_obj)
+                        continue
+
+                    if (sym_u in FOREX_SYMBOLS or any(c in sym_u for c in ["EUR", "GBP", "USD", "JPY", "CAD", "AUD", "NZD", "CHF"])) and open_forex >= 2:
+                        filtered_reasons[sym] = f"Auto-Execution blocked: Portfolio Correlation Gate - Max 2 active Forex trades allowed ({open_forex} currently open)"
+                        setup_obj["notes"] += " [Blocked by Forex Correlation Gate]"
+                        valid_setups.append(setup_obj)
+                        continue
+
+                    # Symbol Loss Cooldown: avoid repeated entries on symbol that stopped out in last 45 minutes
+                    recent_losses = getattr(self, "recent_losses", {})
+                    last_loss_ts = recent_losses.get(sym, 0)
+                    if time.time() - last_loss_ts < 2700:
+                        rem_m = int((2700 - (time.time() - last_loss_ts)) / 60)
+                        filtered_reasons[sym] = f"Auto-Execution blocked: 45-min Loss Cooldown active on {sym} ({rem_m}m remaining)"
+                        setup_obj["notes"] += " [Blocked by Loss Cooldown]"
+                        valid_setups.append(setup_obj)
+                        continue
+
                     # Risk gate: Disallow automatic execution on Priority 5 (AVOID) symbols with severe historical losses
                     if setup_obj.get("symbol_perf", {}).get("priority_num") == 5:
                         filtered_reasons[sym] = f"Auto-Execution blocked: {sym} has historical Priority 5 (AVOID) status (Severe Loss Skew/Drawdown). Manual confirmation required."
@@ -1294,7 +1415,8 @@ class ProfitGuardian:
                 "config": dict(self.config),
                 "tracked_positions": dict(self.peak_tracker),
                 "tracked_groups": dict(self.group_peak_tracker),
-                "recent_protections": list(self.closed_events[:10])
+                "recent_protections": list(self.closed_events[:10]),
+                "be_events": dict(getattr(self, "be_events", {}))
             }
 
 guardian = None
@@ -1612,10 +1734,26 @@ def load_multi_tp_groups(strict=False):
 
 
 def save_multi_tp_groups(groups):
-    # Commit the complete file; never expose a partially written JSON document.
+    # Commit the complete file; resilient against OneDrive file-locking on Windows
+    payload = json.dumps(groups, indent=2, allow_nan=False)
     pending = MULTI_TP_FILE.with_suffix(".json.tmp")
-    pending.write_text(json.dumps(groups, indent=2, allow_nan=False), encoding="utf-8")
-    os.replace(pending, MULTI_TP_FILE)
+    try:
+        pending.write_text(payload, encoding="utf-8")
+        for _ in range(5):
+            try:
+                os.replace(pending, MULTI_TP_FILE)
+                return
+            except PermissionError:
+                time.sleep(0.05)
+    except Exception:
+        pass
+    # Fallback direct write if os.replace is locked by OneDrive
+    try:
+        MULTI_TP_FILE.write_text(payload, encoding="utf-8")
+        if pending.exists():
+            pending.unlink(missing_ok=True)
+    except Exception as e:
+        print(f"Warning saving multi_tp_groups: {e}")
 
 
 def sync_multi_tp_groups():
@@ -1714,15 +1852,21 @@ def execute_multi_tp_group(symbol, action, ref_balance=1000.0, default_lot=0.01,
                 raise ValueError("Quote is crossed")
             point = positive(info.point, "Symbol point")
             minimum = max(info.trade_stops_level * point, spread * 1.5, point * 50)
-            rates = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M15, 0, 15)
-            # Retain the existing mean-candle-range calculation and targets.
-            scale = (sum(float(r["high"] - r["low"]) for r in rates) / len(rates)
-                     if rates is not None and len(rates) >= 5 else minimum * 2)
-            if not math.isfinite(scale):
-                raise ValueError("Non-finite candle range")
-            if scale <= point:
-                scale = minimum * 2
-            distance = max(minimum, scale * 1.8)
+            rates = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M15, 0, 25)
+            rates_h1 = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_H1, 0, 25)
+            m15_atr = 0.0
+            if rates is not None and len(rates) >= 14:
+                tr_m = np.maximum(rates['high'][1:] - rates['low'][1:], np.abs(rates['high'][1:] - rates['close'][:-1]))
+                tr_m = np.maximum(tr_m, np.abs(rates['low'][1:] - rates['close'][:-1]))
+                m15_atr = float(np.mean(tr_m[-14:]))
+            h1_atr = 0.0
+            if rates_h1 is not None and len(rates_h1) >= 14:
+                tr_h = np.maximum(rates_h1['high'][1:] - rates_h1['low'][1:], np.abs(rates_h1['high'][1:] - rates_h1['close'][:-1]))
+                tr_h = np.maximum(tr_h, np.abs(rates_h1['low'][1:] - rates_h1['close'][:-1]))
+                h1_atr = float(np.mean(tr_h[-14:]))
+
+            # Calibrated robust protective stop distance outside market noise
+            distance = compute_robust_stop_distance(symbol, tick, info, m15_atr=m15_atr, h1_atr=h1_atr)
             shared_sl = round(max(0.00001, entry - distance) if action == "BUY"
                               else entry + distance, info.digits)
             requested = default_lot if custom_lots is None else custom_lots
@@ -1743,7 +1887,8 @@ def execute_multi_tp_group(symbol, action, ref_balance=1000.0, default_lot=0.01,
         ]
         chosen_leg, chosen_multiple, chosen_label = random.choice(tp_choices)
 
-        target_distance = max(minimum, scale * chosen_multiple)
+        # Target distance respects 1.8R and 4.0R multiples of the protective stop distance
+        target_distance = max(minimum, distance * chosen_multiple)
         tp = round(entry + target_distance if action == "BUY" else
                    max(entry * 0.1, entry - target_distance), info.digits)
         fresh = mt5.symbol_info_tick(symbol)
@@ -1918,6 +2063,7 @@ HTML_PAGE = """<!DOCTYPE html>
   <title>Headway MT5 Institutional Trading Station & Analytics</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
   <script>
     tailwind.config = {
       darkMode: 'class',
@@ -1937,21 +2083,149 @@ HTML_PAGE = """<!DOCTYPE html>
       }
     }
   </script>
+
   <style>
-    body { background-color: #0B0E14; color: #E5E7EB; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+    /* ------------------------------------------------------------- */
+    /* THEME SYSTEM STYLES & DYNAMIC VARIABLES                       */
+    /* ------------------------------------------------------------- */
+    :root, html[data-theme="gold-obsidian"], html:not([data-theme]) {
+      --bg-primary: #07090e;
+      --bg-header: #0d111a;
+      --bg-panel: #111622;
+      --bg-card: rgba(18, 24, 38, 0.85);
+      --border-main: rgba(245, 158, 11, 0.28);
+      --border-glow: rgba(245, 158, 11, 0.4);
+      --accent-primary: #f59e0b;
+      --accent-secondary: #fbbf24;
+      --accent-gradient: linear-gradient(135deg, #fbbf24 0%, #f59e0b 50%, #b45309 100%);
+      --accent-text: #fef3c7;
+      --tag-bg: rgba(245, 158, 11, 0.15);
+      --card-shadow: 0 10px 30px -10px rgba(245, 158, 11, 0.15);
+      --hero-overlay: radial-gradient(circle at 50% 0%, rgba(245, 158, 11, 0.12) 0%, transparent 70%);
+    }
+
+    html[data-theme="cyberpunk-neon"] {
+      --bg-primary: #05050f;
+      --bg-header: #0a081a;
+      --bg-panel: #0e0c24;
+      --bg-card: rgba(18, 14, 40, 0.85);
+      --border-main: rgba(0, 240, 255, 0.35);
+      --border-glow: rgba(236, 72, 153, 0.4);
+      --accent-primary: #00f0ff;
+      --accent-secondary: #ec4899;
+      --accent-gradient: linear-gradient(135deg, #00f0ff 0%, #a855f7 50%, #ec4899 100%);
+      --accent-text: #cffafe;
+      --tag-bg: rgba(0, 240, 255, 0.15);
+      --card-shadow: 0 10px 30px -10px rgba(0, 240, 255, 0.22);
+      --hero-overlay: radial-gradient(circle at 50% 0%, rgba(0, 240, 255, 0.15) 0%, rgba(236, 72, 153, 0.08) 50%, transparent 75%);
+    }
+
+    html[data-theme="emerald-matrix"] {
+      --bg-primary: #040907;
+      --bg-header: #07150e;
+      --bg-panel: #0a1c13;
+      --bg-card: rgba(12, 32, 22, 0.85);
+      --border-main: rgba(16, 185, 129, 0.32);
+      --border-glow: rgba(0, 245, 155, 0.4);
+      --accent-primary: #10b981;
+      --accent-secondary: #00f59b;
+      --accent-gradient: linear-gradient(135deg, #34d399 0%, #10b981 50%, #047857 100%);
+      --accent-text: #d1fae5;
+      --tag-bg: rgba(16, 185, 129, 0.15);
+      --card-shadow: 0 10px 30px -10px rgba(16, 185, 129, 0.18);
+      --hero-overlay: radial-gradient(circle at 50% 0%, rgba(16, 185, 129, 0.15) 0%, transparent 70%);
+    }
+
+    html[data-theme="sapphire-nordic"] {
+      --bg-primary: #070e1b;
+      --bg-header: #0c172a;
+      --bg-panel: #111f38;
+      --bg-card: rgba(19, 34, 60, 0.85);
+      --border-main: rgba(56, 189, 248, 0.32);
+      --border-glow: rgba(59, 130, 246, 0.4);
+      --accent-primary: #38bdf8;
+      --accent-secondary: #3b82f6;
+      --accent-gradient: linear-gradient(135deg, #38bdf8 0%, #3b82f6 50%, #1d4ed8 100%);
+      --accent-text: #e0f2fe;
+      --tag-bg: rgba(56, 189, 248, 0.15);
+      --card-shadow: 0 10px 30px -10px rgba(59, 130, 246, 0.2);
+      --hero-overlay: radial-gradient(circle at 50% 0%, rgba(56, 189, 248, 0.14) 0%, transparent 70%);
+    }
+
+    html[data-theme="solar-forge"] {
+      --bg-primary: #0a0606;
+      --bg-header: #140b0b;
+      --bg-panel: #1c1010;
+      --bg-card: rgba(32, 16, 16, 0.85);
+      --border-main: rgba(249, 115, 22, 0.35);
+      --border-glow: rgba(239, 68, 68, 0.4);
+      --accent-primary: #f97316;
+      --accent-secondary: #ef4444;
+      --accent-gradient: linear-gradient(135deg, #fb923c 0%, #f97316 50%, #dc2626 100%);
+      --accent-text: #ffedd5;
+      --tag-bg: rgba(249, 115, 22, 0.15);
+      --card-shadow: 0 10px 30px -10px rgba(249, 115, 22, 0.22);
+      --hero-overlay: radial-gradient(circle at 50% 0%, rgba(249, 115, 22, 0.15) 0%, rgba(239, 68, 68, 0.08) 50%, transparent 70%);
+    }
+
+    body {
+      background-color: var(--bg-primary) !important;
+      background-image: var(--hero-overlay);
+      background-attachment: fixed;
+      color: #E5E7EB;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      transition: background-color 0.35s ease, background-image 0.35s ease;
+    }
+    
+    header {
+      background-color: var(--bg-header) !important;
+      border-color: var(--border-main) !important;
+      transition: all 0.35s ease;
+    }
+    
+    .bg-panel {
+      background-color: var(--bg-card) !important;
+      border-color: var(--border-main) !important;
+      box-shadow: var(--card-shadow) !important;
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      transition: all 0.35s ease;
+    }
+
+    .border-bordercol {
+      border-color: var(--border-main) !important;
+    }
+
+    .theme-active-pill {
+      box-shadow: 0 0 15px var(--border-glow) !important;
+      border-color: var(--accent-primary) !important;
+      color: #ffffff !important;
+      font-weight: 800 !important;
+    }
+
+    /* Modal Animation */
+    .modal-enter {
+      animation: modalFadeIn 0.25s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+    }
+    @keyframes modalFadeIn {
+      from { opacity: 0; transform: scale(0.96) translateY(10px); }
+      to { opacity: 1; transform: scale(1) translateY(0); }
+    }
+
     .custom-scroll::-webkit-scrollbar { width: 5px; height: 5px; }
-    .custom-scroll::-webkit-scrollbar-track { background: #121722; }
-    .custom-scroll::-webkit-scrollbar-thumb { background: #222C40; border-radius: 3px; }
+    .custom-scroll::-webkit-scrollbar-track { background: var(--bg-primary); }
+    .custom-scroll::-webkit-scrollbar-thumb { background: var(--border-main); border-radius: 3px; }
   </style>
+
 </head>
 <body class="min-h-screen flex flex-col">
 
   <!-- Header -->
   <header class="border-b border-bordercol bg-panel/95 backdrop-blur px-6 py-3 flex flex-wrap items-center justify-between gap-4 sticky top-0 z-50">
     <div class="flex items-center space-x-3.5">
-      <div class="w-9 h-9 rounded-lg bg-gradient-to-tr from-blue-600 to-cyan-500 flex items-center justify-center shadow-lg shadow-blue-500/20 font-black text-white text-lg">
-        H
-      </div>
+      <a href="/landing" title="Home" class="w-10 h-10 rounded-xl overflow-hidden border border-amber-500/40 shadow-lg shadow-amber-500/20 relative group block">
+        <img src="/static/images/gold_bullion_3d.jpg" alt="Headway Institutional" class="w-full h-full object-cover filter brightness-105">
+      </a>
       <div>
         <h1 class="text-sm font-bold tracking-tight text-white flex items-center gap-2">
           HEADWAY MT5 INSTITUTIONAL WORKSTATION
@@ -1999,6 +2273,249 @@ HTML_PAGE = """<!DOCTYPE html>
       </button>
     </div>
   </header>
+
+  <!-- Interactive Theme Studio Bar (5 Modern Live Demos) -->
+  <div class="border-b border-bordercol px-6 py-2.5 flex flex-wrap items-center justify-between gap-3 shadow-md z-40 transition" style="background-color: var(--bg-header)">
+    <div class="flex items-center gap-3">
+      <div class="w-7 h-7 rounded-lg flex items-center justify-center text-sm shadow-inner" style="background: var(--tag-bg); border: 1px solid var(--border-main)">
+        🎨
+      </div>
+      <div>
+        <div class="flex items-center gap-2">
+          <span class="text-xs font-black text-white uppercase tracking-wider">Modern Theme Studio</span>
+          <span id="activeThemePillBadge" class="text-[10px] px-2 py-0.5 rounded-full font-mono font-bold" style="background: var(--tag-bg); color: var(--accent-primary); border: 1px solid var(--border-main)">
+            👑 24K OBSIDIAN GOLD
+          </span>
+        </div>
+        <p class="text-[11px] text-slate-400">Click any theme to transform the entire workstation in real time:</p>
+      </div>
+    </div>
+
+    <!-- 5 Live Theme Pills -->
+    <div class="flex items-center gap-2 overflow-x-auto custom-scroll pb-1">
+      <button onclick="setAppTheme('gold-obsidian')" id="pill_gold-obsidian" class="theme-pill px-3 py-1.5 rounded-xl text-xs font-bold transition flex items-center gap-1.5 border border-amber-500/40 bg-amber-500/20 text-amber-300 shadow">
+        <span>👑</span> <span>24K Gold</span>
+      </button>
+      <button onclick="setAppTheme('cyberpunk-neon')" id="pill_cyberpunk-neon" class="theme-pill px-3 py-1.5 rounded-xl text-xs font-bold transition flex items-center gap-1.5 border border-slate-800 bg-slate-900/60 text-slate-300 hover:text-cyan-300 hover:border-cyan-500/40">
+        <span>⚡</span> <span>Cyberpunk</span>
+      </button>
+      <button onclick="setAppTheme('emerald-matrix')" id="pill_emerald-matrix" class="theme-pill px-3 py-1.5 rounded-xl text-xs font-bold transition flex items-center gap-1.5 border border-slate-800 bg-slate-900/60 text-slate-300 hover:text-emerald-300 hover:border-emerald-500/40">
+        <span>💎</span> <span>Emerald Alpha</span>
+      </button>
+      <button onclick="setAppTheme('sapphire-nordic')" id="pill_sapphire-nordic" class="theme-pill px-3 py-1.5 rounded-xl text-xs font-bold transition flex items-center gap-1.5 border border-slate-800 bg-slate-900/60 text-slate-300 hover:text-blue-300 hover:border-blue-500/40">
+        <span>🌊</span> <span>Sapphire</span>
+      </button>
+      <button onclick="setAppTheme('solar-forge')" id="pill_solar-forge" class="theme-pill px-3 py-1.5 rounded-xl text-xs font-bold transition flex items-center gap-1.5 border border-slate-800 bg-slate-900/60 text-slate-300 hover:text-orange-300 hover:border-orange-500/40">
+        <span>🔥</span> <span>Solar Forge</span>
+      </button>
+      <button onclick="openThemeGalleryModal()" class="px-3.5 py-1.5 rounded-xl text-xs font-bold transition bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white shadow-lg flex items-center gap-1.5">
+        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"></path></svg>
+        <span>Inspect All 5 Themes</span>
+      </button>
+    </div>
+  </div>
+
+  <!-- THEME DEMO GALLERY MODAL (Interactive Visual Showcase) -->
+  <div id="themeGalleryModal" class="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-md hidden flex items-center justify-center p-4 sm:p-6 overflow-y-auto">
+    <div class="modal-enter max-w-5xl w-full rounded-3xl bg-slate-900/95 border border-bordercol shadow-2xl p-6 sm:p-8 space-y-6 relative overflow-hidden max-h-[90vh] overflow-y-auto custom-scroll" style="background-color: var(--bg-panel); border-color: var(--border-main)">
+      
+      <!-- Modal Header -->
+      <div class="flex items-center justify-between border-b border-bordercol pb-4">
+        <div class="flex items-center gap-3.5">
+          <div class="w-12 h-12 rounded-2xl flex items-center justify-center text-2xl shadow-lg" style="background: var(--accent-gradient); color: #000">
+            🎨
+          </div>
+          <div>
+            <h2 class="text-xl font-black text-white tracking-tight flex items-center gap-2">
+              Modern Trading Theme Gallery
+              <span class="text-xs px-2.5 py-0.5 rounded-full font-mono font-bold bg-purple-500/20 text-purple-300 border border-purple-500/30">
+                5 BESPOKE DEMOS
+              </span>
+            </h2>
+            <p class="text-xs text-slate-400 mt-0.5">Explore each visual direction with custom artwork, color tokens, and sample cards. Click "Apply & Select" to activate.</p>
+          </div>
+        </div>
+        <button onclick="closeThemeGalleryModal()" class="w-9 h-9 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white flex items-center justify-center text-lg font-bold transition">
+          &times;
+        </button>
+      </div>
+
+      <!-- 5 Theme Cards Grid -->
+      <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
+        
+        <!-- CARD 1: 24K Obsidian Gold -->
+        <div class="rounded-2xl border border-amber-500/40 bg-slate-950/80 p-5 space-y-4 hover:border-amber-400 transition shadow-xl relative overflow-hidden flex flex-col justify-between">
+          <div class="space-y-3">
+            <div class="h-32 rounded-xl overflow-hidden border border-amber-500/40 relative group">
+              <img src="/static/images/gold_bullion_3d.jpg" alt="24K Obsidian Gold" class="w-full h-full object-cover filter brightness-85 group-hover:scale-105 transition duration-500">
+              <div class="absolute inset-0 bg-gradient-to-t from-black/90 via-black/30 to-transparent"></div>
+              <div class="absolute bottom-2.5 left-3 right-3 flex items-end justify-between">
+                <div>
+                  <span class="text-[9px] font-mono px-1.5 py-0.2 rounded bg-amber-500/30 text-amber-300 font-bold border border-amber-500/40">THEME 01</span>
+                  <h3 class="text-sm font-black text-white">24K Obsidian Gold</h3>
+                </div>
+                <div class="text-2xl filter drop-shadow">👑</div>
+              </div>
+            </div>
+            
+            <p class="text-xs text-slate-300 leading-relaxed">
+              Deep celestial obsidian black canvas paired with metallic 24K Gold highlights and warm champagne text. Designed specifically for institutional Gold traders.
+            </p>
+
+            <div class="flex items-center gap-1.5 pt-1">
+              <span class="w-4 h-4 rounded-full bg-[#fbbf24] shadow-sm"></span>
+              <span class="w-4 h-4 rounded-full bg-[#f59e0b] shadow-sm"></span>
+              <span class="w-4 h-4 rounded-full bg-[#07090e] border border-amber-500/50 shadow-sm"></span>
+              <span class="text-[10px] font-mono text-slate-400 ml-1">#fbbf24 • #f59e0b • #07090e</span>
+            </div>
+          </div>
+
+          <button onclick="setAppTheme('gold-obsidian'); closeThemeGalleryModal();" class="w-full py-2.5 rounded-xl font-black text-xs transition bg-gradient-to-r from-amber-500 to-yellow-600 hover:from-amber-400 hover:to-yellow-500 text-slate-950 shadow-lg shadow-amber-500/20">
+            Apply 24K Obsidian Gold
+          </button>
+        </div>
+
+        <!-- CARD 2: Cyberpunk Neon -->
+        <div class="rounded-2xl border border-cyan-500/40 bg-slate-950/80 p-5 space-y-4 hover:border-cyan-400 transition shadow-xl relative overflow-hidden flex flex-col justify-between">
+          <div class="space-y-3">
+            <div class="h-32 rounded-xl overflow-hidden border border-cyan-500/40 relative group">
+              <img src="/static/images/theme_cyberpunk_neon.svg" alt="Cyberpunk Neon" class="w-full h-full object-cover group-hover:scale-105 transition duration-500">
+              <div class="absolute inset-0 bg-gradient-to-t from-black/90 via-black/30 to-transparent"></div>
+              <div class="absolute bottom-2.5 left-3 right-3 flex items-end justify-between">
+                <div>
+                  <span class="text-[9px] font-mono px-1.5 py-0.2 rounded bg-cyan-500/30 text-cyan-300 font-bold border border-cyan-500/40">THEME 02</span>
+                  <h3 class="text-sm font-black text-white">Cyberpunk Neon</h3>
+                </div>
+                <div class="text-2xl filter drop-shadow">⚡</div>
+              </div>
+            </div>
+            
+            <p class="text-xs text-slate-300 leading-relaxed">
+              Ultra-modern midnight violet canvas illuminated with electric cyan and neon fuchsia laser glow. Gives the station an adrenaline-fueled high-frequency feel.
+            </p>
+
+            <div class="flex items-center gap-1.5 pt-1">
+              <span class="w-4 h-4 rounded-full bg-[#00f0ff] shadow-sm"></span>
+              <span class="w-4 h-4 rounded-full bg-[#ec4899] shadow-sm"></span>
+              <span class="w-4 h-4 rounded-full bg-[#05050f] border border-cyan-500/50 shadow-sm"></span>
+              <span class="text-[10px] font-mono text-slate-400 ml-1">#00f0ff • #ec4899 • #05050f</span>
+            </div>
+          </div>
+
+          <button onclick="setAppTheme('cyberpunk-neon'); closeThemeGalleryModal();" class="w-full py-2.5 rounded-xl font-black text-xs transition bg-gradient-to-r from-cyan-500 to-fuchsia-600 hover:from-cyan-400 hover:to-fuchsia-500 text-white shadow-lg shadow-cyan-500/20">
+            Apply Cyberpunk Neon
+          </button>
+        </div>
+
+        <!-- CARD 3: Emerald Matrix -->
+        <div class="rounded-2xl border border-emerald-500/40 bg-slate-950/80 p-5 space-y-4 hover:border-emerald-400 transition shadow-xl relative overflow-hidden flex flex-col justify-between">
+          <div class="space-y-3">
+            <div class="h-32 rounded-xl overflow-hidden border border-emerald-500/40 relative group">
+              <img src="/static/images/theme_emerald_matrix.svg" alt="Emerald Matrix" class="w-full h-full object-cover group-hover:scale-105 transition duration-500">
+              <div class="absolute inset-0 bg-gradient-to-t from-black/90 via-black/30 to-transparent"></div>
+              <div class="absolute bottom-2.5 left-3 right-3 flex items-end justify-between">
+                <div>
+                  <span class="text-[9px] font-mono px-1.5 py-0.2 rounded bg-emerald-500/30 text-emerald-300 font-bold border border-emerald-500/40">THEME 03</span>
+                  <h3 class="text-sm font-black text-white">Emerald Matrix</h3>
+                </div>
+                <div class="text-2xl filter drop-shadow">💎</div>
+              </div>
+            </div>
+            
+            <p class="text-xs text-slate-300 leading-relaxed">
+              Deep graphite obsidian with vivid cyber mint and emerald green HUD accents. Clean, authoritative, and laser-focused on win rate and equity growth.
+            </p>
+
+            <div class="flex items-center gap-1.5 pt-1">
+              <span class="w-4 h-4 rounded-full bg-[#10b981] shadow-sm"></span>
+              <span class="w-4 h-4 rounded-full bg-[#00f59b] shadow-sm"></span>
+              <span class="w-4 h-4 rounded-full bg-[#040907] border border-emerald-500/50 shadow-sm"></span>
+              <span class="text-[10px] font-mono text-slate-400 ml-1">#10b981 • #00f59b • #040907</span>
+            </div>
+          </div>
+
+          <button onclick="setAppTheme('emerald-matrix'); closeThemeGalleryModal();" class="w-full py-2.5 rounded-xl font-black text-xs transition bg-gradient-to-r from-emerald-500 to-teal-600 hover:from-emerald-400 hover:to-teal-500 text-slate-950 shadow-lg shadow-emerald-500/20">
+            Apply Emerald Matrix
+          </button>
+        </div>
+
+        <!-- CARD 4: Sapphire Nordic -->
+        <div class="rounded-2xl border border-sky-500/40 bg-slate-950/80 p-5 space-y-4 hover:border-sky-400 transition shadow-xl relative overflow-hidden flex flex-col justify-between">
+          <div class="space-y-3">
+            <div class="h-32 rounded-xl overflow-hidden border border-sky-500/40 relative group">
+              <img src="/static/images/theme_sapphire_nordic.svg" alt="Sapphire Horizon" class="w-full h-full object-cover group-hover:scale-105 transition duration-500">
+              <div class="absolute inset-0 bg-gradient-to-t from-black/90 via-black/30 to-transparent"></div>
+              <div class="absolute bottom-2.5 left-3 right-3 flex items-end justify-between">
+                <div>
+                  <span class="text-[9px] font-mono px-1.5 py-0.2 rounded bg-sky-500/30 text-sky-300 font-bold border border-sky-500/40">THEME 04</span>
+                  <h3 class="text-sm font-black text-white">Sapphire Horizon</h3>
+                </div>
+                <div class="text-2xl filter drop-shadow">🌊</div>
+              </div>
+            </div>
+            
+            <p class="text-xs text-slate-300 leading-relaxed">
+              Oceanic deep navy slate paired with crisp frosted glass and sapphire blue accents. Inspired by top-tier modern Silicon Valley fintech interfaces (Linear, Stripe).
+            </p>
+
+            <div class="flex items-center gap-1.5 pt-1">
+              <span class="w-4 h-4 rounded-full bg-[#38bdf8] shadow-sm"></span>
+              <span class="w-4 h-4 rounded-full bg-[#3b82f6] shadow-sm"></span>
+              <span class="w-4 h-4 rounded-full bg-[#070e1b] border border-sky-500/50 shadow-sm"></span>
+              <span class="text-[10px] font-mono text-slate-400 ml-1">#38bdf8 • #3b82f6 • #070e1b</span>
+            </div>
+          </div>
+
+          <button onclick="setAppTheme('sapphire-nordic'); closeThemeGalleryModal();" class="w-full py-2.5 rounded-xl font-black text-xs transition bg-gradient-to-r from-sky-500 to-blue-600 hover:from-sky-400 hover:to-blue-500 text-white shadow-lg shadow-sky-500/20">
+            Apply Sapphire Horizon
+          </button>
+        </div>
+
+        <!-- CARD 5: Solar Forge -->
+        <div class="rounded-2xl border border-orange-500/40 bg-slate-950/80 p-5 space-y-4 hover:border-orange-400 transition shadow-xl relative overflow-hidden flex flex-col justify-between">
+          <div class="space-y-3">
+            <div class="h-32 rounded-xl overflow-hidden border border-orange-500/40 relative group">
+              <img src="/static/images/theme_solar_forge.svg" alt="Solar Forge" class="w-full h-full object-cover group-hover:scale-105 transition duration-500">
+              <div class="absolute inset-0 bg-gradient-to-t from-black/90 via-black/30 to-transparent"></div>
+              <div class="absolute bottom-2.5 left-3 right-3 flex items-end justify-between">
+                <div>
+                  <span class="text-[9px] font-mono px-1.5 py-0.2 rounded bg-orange-500/30 text-orange-300 font-bold border border-orange-500/40">THEME 05</span>
+                  <h3 class="text-sm font-black text-white">Solar Forge</h3>
+                </div>
+                <div class="text-2xl filter drop-shadow">🔥</div>
+              </div>
+            </div>
+            
+            <p class="text-xs text-slate-300 leading-relaxed">
+              Volcanic dark basalt with glowing solar flame and crimson forge accents. Built for aggressive momentum breakouts and fast-moving volatility surges.
+            </p>
+
+            <div class="flex items-center gap-1.5 pt-1">
+              <span class="w-4 h-4 rounded-full bg-[#f97316] shadow-sm"></span>
+              <span class="w-4 h-4 rounded-full bg-[#ef4444] shadow-sm"></span>
+              <span class="w-4 h-4 rounded-full bg-[#0a0606] border border-orange-500/50 shadow-sm"></span>
+              <span class="text-[10px] font-mono text-slate-400 ml-1">#f97316 • #ef4444 • #0a0606</span>
+            </div>
+          </div>
+
+          <button onclick="setAppTheme('solar-forge'); closeThemeGalleryModal();" class="w-full py-2.5 rounded-xl font-black text-xs transition bg-gradient-to-r from-orange-500 to-rose-600 hover:from-orange-400 hover:to-rose-500 text-white shadow-lg shadow-orange-500/20">
+            Apply Solar Forge
+          </button>
+        </div>
+
+      </div>
+
+      <!-- Modal Footer -->
+      <div class="flex items-center justify-between border-t border-bordercol pt-4 text-xs font-mono text-slate-400">
+        <span>Active Theme Stored in LocalStorage</span>
+        <button onclick="closeThemeGalleryModal()" class="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-white font-bold transition">
+          Close Gallery
+        </button>
+      </div>
+
+    </div>
+  </div>
+
 
   <!-- Live Market Watch Bar -->
   <div class="bg-slate-950/80 border-b border-bordercol px-6 py-2 overflow-x-auto custom-scroll">
@@ -2707,6 +3224,29 @@ HTML_PAGE = """<!DOCTYPE html>
     <!-- GOLD TRADING INTELLIGENCE DASHBOARD (XAUUSD)                      -->
     <!-- ================================================================= -->
     <div id="goldView" class="space-y-6 hidden">
+      <!-- 3D Gold Bullion Hero Banner -->
+      <div class="rounded-3xl border border-amber-500/40 overflow-hidden shadow-2xl relative bg-slate-950">
+        <div class="relative h-44 sm:h-52 w-full overflow-hidden">
+          <img src="/static/images/gold_bullion_3d.jpg" alt="Gold Bullion" class="w-full h-full object-cover filter brightness-90 contrast-110 hover:scale-105 transition duration-700">
+          <div class="absolute inset-0 bg-gradient-to-t from-slate-950 via-slate-950/40 to-transparent"></div>
+          <div class="absolute bottom-4 left-6 right-6 flex flex-wrap items-end justify-between gap-4">
+            <div>
+              <div class="flex items-center gap-2 mb-1">
+                <span class="px-2.5 py-0.5 rounded-full text-[10px] font-mono font-bold bg-amber-500/20 text-amber-300 border border-amber-500/40 shadow">INSTITUTIONAL GRADE</span>
+                <span class="text-xs text-amber-200/90 font-mono">XAUUSD &bull; 999.9 FINE GOLD &bull; 1:1000 LEVERAGE</span>
+              </div>
+              <h2 class="text-2xl sm:text-3xl font-black text-white tracking-tight drop-shadow-md">Gold Intelligence &amp; Autonomous Scalp Station</h2>
+            </div>
+            <div class="bg-slate-950/80 backdrop-blur-md px-4 py-2.5 rounded-2xl border border-amber-500/30 font-mono text-right shadow-lg">
+              <div class="text-[10px] text-slate-400 font-bold uppercase tracking-wider">Active Concurrency Rule</div>
+              <div class="text-sm font-black text-emeraldaccent flex items-center gap-1.5 justify-end mt-0.5">
+                <span class="w-2 h-2 rounded-full bg-emeraldaccent animate-pulse"></span>
+                5 TRADES MAX &bull; AUTO-REPLACE ON TP
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
       <!-- 1. Gold Live Overview Hero Header -->
       <div class="rounded-2xl bg-gradient-to-r from-amber-950/40 via-slate-900/90 to-slate-900 border border-amber-500/30 p-6 shadow-2xl relative overflow-hidden">
         <div class="absolute -right-10 -top-10 w-64 h-64 bg-amber-500/5 rounded-full blur-3xl pointer-events-none"></div>
@@ -2806,11 +3346,12 @@ HTML_PAGE = """<!DOCTYPE html>
                 <option value="92">≥ 92% Confidence</option>
                 <option value="95">≥ 95% Confidence</option>
               </select>
-              <span class="text-[10px] font-mono text-slate-400 px-2">TP Mode:</span>
-              <select id="goldTpSelect" onchange="updateGoldAutoSettings()" class="bg-slate-900 text-amber-300 font-mono text-xs px-2 py-1 rounded border border-slate-800 font-bold">
-                <option value="RANDOM_TP1_TP2">Random TP1/TP2 (Rule #2)</option>
-                <option value="TP1_CONSERVATIVE">TP1 (1.8R Conservative)</option>
-                <option value="TP2_RUNNER">TP2 (4.0R Runner)</option>
+              <span class="text-[10px] font-mono text-slate-400 px-2">Auto Target:</span>
+              <select id="goldAutoTfSelect" onchange="updateGoldAutoSettings()" class="bg-slate-900 text-amber-300 font-mono text-xs px-2 py-1 rounded border border-slate-800 font-bold">
+                <option value="M1_M5">⚡ 1M & 5M Fast Setups (Recommended)</option>
+                <option value="M1">⚡ 1M Scalp Only</option>
+                <option value="M5">⚡ 5M Momentum Only</option>
+                <option value="ALL">All Setups (M1 – H1)</option>
               </select>
             </div>
           </div>
@@ -2827,21 +3368,206 @@ HTML_PAGE = """<!DOCTYPE html>
             <span id="goldCfgLot" class="font-bold text-white">0.01 Lot (1 oz)</span>
           </div>
           <div class="p-2.5 rounded-lg bg-slate-950/60 border border-bordercol">
-            <span class="text-[10px] text-slate-400 uppercase block">TP Target Mode</span>
-            <span id="goldCfgTp" class="font-bold text-amber-300">Random TP1/TP2</span>
+            <span class="text-[10px] text-slate-400 uppercase block">Execution Mode</span>
+            <span id="goldCfgTp" class="font-bold text-emeraldaccent">TWIN TRADE (2 LEGS)</span>
           </div>
           <div class="p-2.5 rounded-lg bg-slate-950/60 border border-bordercol">
             <span class="text-[10px] text-slate-400 uppercase block">Today's Trades</span>
             <span id="goldDailyTrades" class="font-bold text-blue-400">0 / 3 max</span>
           </div>
           <div class="p-2.5 rounded-lg bg-slate-950/60 border border-bordercol">
-            <span class="text-[10px] text-slate-400 uppercase block">Open Gold Position</span>
-            <span id="goldOpenPosStatus" class="font-bold text-slate-300">None (0/1)</span>
+            <span class="text-[10px] text-slate-400 uppercase block">Active Concurrency</span>
+            <span id="goldOpenPosStatus" class="font-bold text-amber-300">0 / 5 Trades (Auto-Replace on TP)</span>
           </div>
           <div class="p-2.5 rounded-lg bg-slate-950/60 border border-bordercol">
             <span class="text-[10px] text-slate-400 uppercase block">Macro News Gate</span>
             <span id="goldCfgNews" class="font-bold text-emeraldaccent">ACTIVE (30m)</span>
           </div>
+        </div>
+      </section>
+
+      <!-- GOLD HIGH-FREQUENCY TRADING TERMINAL & TWIN-ORDER EXECUTION (User Requirement) -->
+      <section class="rounded-2xl bg-gradient-to-br from-panel via-slate-900 to-panel border border-amber-500/50 p-6 shadow-2xl space-y-4">
+        <div class="flex flex-wrap items-center justify-between gap-4 border-b border-bordercol/80 pb-4">
+          <div class="flex items-center gap-3.5">
+            <div class="w-11 h-11 rounded-2xl bg-gradient-to-br from-amber-400 to-yellow-600 flex items-center justify-center text-xl shadow-lg shadow-amber-500/20 font-black text-slate-950">
+              ⚡
+            </div>
+            <div>
+              <div class="flex items-center gap-2">
+                <h3 class="text-base font-black text-white tracking-tight flex items-center gap-2">
+                  GOLD HIGH-FREQUENCY TRADING TERMINAL
+                </h3>
+                <span class="px-2.5 py-0.5 rounded-full text-[10px] font-bold font-mono bg-emerald-500/20 text-emeraldaccent border border-emerald-500/30">
+                  TWIN-ORDER MODE (1 FIXED TP + 1 TRAILING TP)
+                </span>
+              </div>
+              <p class="text-xs text-slate-400 mt-0.5">
+                Manual &amp; Autonomous Scalp Execution &bull; Opens 2 Orders Every Trade &bull; Trade 1: Hard Fixed TP1 &bull; Trade 2: Dynamic Trailing Runner
+              </p>
+            </div>
+          </div>
+          
+          <div class="flex items-center gap-3">
+            <div class="text-right px-3.5 py-1.5 rounded-xl bg-slate-950/80 border border-bordercol">
+              <span class="text-[10px] uppercase font-mono text-slate-400 block font-bold">Terminal Mode</span>
+              <span id="activeTerminalTfDisplay" class="text-xs font-mono font-black text-amber-300">⚡ M1 SCALP MODE</span>
+            </div>
+            <button onclick="closeAllGoldPositions()" class="px-3.5 py-2 rounded-xl bg-rose-600/15 hover:bg-rose-600/30 text-rose-300 border border-rose-500/30 text-xs font-bold transition flex items-center gap-1.5">
+              <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+              Close All Gold
+            </button>
+          </div>
+        </div>
+
+        <!-- Trading Controls Row -->
+        <div class="grid grid-cols-1 md:grid-cols-12 gap-4 items-center">
+          <!-- Timeframe & Lot selector (5 Cols) -->
+          <div class="md:col-span-5 space-y-3">
+            <div class="space-y-1.5">
+              <label class="block text-[11px] font-mono text-slate-400 uppercase font-bold">Execution Strategy Timeframe:</label>
+              <div class="grid grid-cols-3 gap-2 text-xs font-mono">
+                <button type="button" id="btnTerminalM1" onclick="setManualTradeTf('M1')" class="py-2 px-2.5 rounded-xl bg-amber-500/20 text-amber-300 font-bold border border-amber-500/40 text-center transition flex flex-col items-center">
+                  <span class="font-bold">⚡ 1M Scalp</span>
+                  <span class="text-[10px] text-slate-400 font-normal">SL $3.50 | TP 1.5R</span>
+                </button>
+                <button type="button" id="btnTerminalM5" onclick="setManualTradeTf('M5')" class="py-2 px-2.5 rounded-xl bg-slate-950 text-slate-400 hover:text-white border border-bordercol text-center transition flex flex-col items-center">
+                  <span class="font-bold">⚡ 5M Momentum</span>
+                  <span class="text-[10px] text-slate-400 font-normal">SL $4.50 | TP 1.8R</span>
+                </button>
+                <button type="button" id="btnTerminalM15" onclick="setManualTradeTf('M15')" class="py-2 px-2.5 rounded-xl bg-slate-950 text-slate-400 hover:text-white border border-bordercol text-center transition flex flex-col items-center">
+                  <span class="font-bold">M15 Intraday</span>
+                  <span class="text-[10px] text-slate-400 font-normal">SL $6.00 | TP 2.5R</span>
+                </button>
+              </div>
+            </div>
+
+            <div class="grid grid-cols-2 gap-3 text-xs font-mono">
+              <div class="space-y-1">
+                <label class="block text-[10px] text-slate-400 uppercase font-bold">Volume per Leg:</label>
+                <select id="terminalLotSelect" onchange="updateTerminalPreview()" class="w-full bg-slate-950 text-white font-mono text-xs px-3 py-2 rounded-xl border border-slate-800">
+                  <option value="0.01">0.01 Lot (1 oz)</option>
+                  <option value="0.02">0.02 Lot (2 oz)</option>
+                  <option value="0.05">0.05 Lot (5 oz)</option>
+                  <option value="0.10">0.10 Lot (10 oz)</option>
+                </select>
+              </div>
+              <div class="space-y-1">
+                <label class="block text-[10px] text-slate-400 uppercase font-bold">Total Exposure (2 Legs):</label>
+                <div id="terminalTotalLot" class="w-full bg-slate-950 text-amber-300 font-bold font-mono text-xs px-3 py-2 rounded-xl border border-slate-800">
+                  0.02 Lot (2 oz total)
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Twin-Order Specification Preview (7 Cols) -->
+          <div class="md:col-span-7 bg-slate-950/80 rounded-xl border border-bordercol p-4 space-y-3">
+            <div class="flex items-center justify-between text-xs font-mono border-b border-bordercol/60 pb-2">
+              <span class="text-slate-400 font-bold uppercase text-[10px]">Dual-Order Blueprint (Rule #1 &amp; #2):</span>
+              <span class="text-emeraldaccent font-bold">Shared Protective Risk</span>
+            </div>
+
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs font-mono">
+              <!-- Leg 1 -->
+              <div class="p-3 rounded-lg bg-slate-900 border border-blue-500/30 space-y-1">
+                <div class="flex items-center justify-between">
+                  <span class="text-blue-400 font-bold">TRADE 1: FIXED TARGET</span>
+                  <span class="text-[10px] px-1.5 py-0.2 rounded bg-blue-500/20 text-blue-300 font-bold">LEG 1</span>
+                </div>
+                <div class="text-[11px] text-slate-300">
+                  Target: <strong id="previewLeg1Tp" class="text-emeraldaccent">+1.5R Fixed TP1</strong>
+                </div>
+                <div class="text-[10px] text-slate-400">
+                  Automatically fills &amp; locks in profits on broker limit target.
+                </div>
+              </div>
+
+              <!-- Leg 2 -->
+              <div class="p-3 rounded-lg bg-slate-900 border border-amber-500/30 space-y-1">
+                <div class="flex items-center justify-between">
+                  <span class="text-amber-400 font-bold">TRADE 2: TRAILING RUNNER</span>
+                  <span class="text-[10px] px-1.5 py-0.2 rounded bg-amber-500/20 text-amber-300 font-bold">LEG 2</span>
+                </div>
+                <div class="text-[11px] text-slate-300">
+                  Target: <strong id="previewLeg2Tp" class="text-amber-300">Dynamic Trailing Stop</strong>
+                </div>
+                <div class="text-[10px] text-slate-400">
+                  Break-Even at +1.0R &bull; Trails price to ride major trend expansions.
+                </div>
+              </div>
+            </div>
+
+            <!-- Instant Dual Execution Action Buttons -->
+            <div class="grid grid-cols-2 gap-3 pt-1">
+              <button onclick="executeManualGoldTrade('BUY')" class="w-full py-3 px-4 rounded-xl bg-gradient-to-r from-emerald-600 to-emerald-500 hover:from-emerald-500 hover:to-emerald-400 text-slate-950 font-black text-xs transition shadow-lg shadow-emerald-500/20 flex items-center justify-center gap-2">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 10l7-7m0 0l7 7m-7-7v18"></path></svg>
+                BUY XAUUSD (TWIN TRADE)
+              </button>
+              <button onclick="executeManualGoldTrade('SELL')" class="w-full py-3 px-4 rounded-xl bg-gradient-to-r from-rose-600 to-rose-500 hover:from-rose-500 hover:to-rose-400 text-white font-black text-xs transition shadow-lg shadow-rose-600/20 flex items-center justify-center gap-2">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M19 14l-7 7m0 0l-7-7m7 7V3"></path></svg>
+                SELL XAUUSD (TWIN TRADE)
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Live Open Gold Twin Positions & Trailing Monitor -->
+        <div class="pt-3 border-t border-bordercol/60">
+          <div class="flex items-center justify-between pb-2">
+            <span class="text-[11px] font-mono text-slate-400 uppercase font-bold flex items-center gap-2">
+              <span class="w-2 h-2 rounded-full bg-amber-400 animate-pulse"></span>
+              Live Gold Positions &amp; Dynamic Trailing Status:
+            </span>
+            <span id="goldOpenLegsCount" class="text-[10px] font-mono px-2 py-0.5 rounded bg-slate-900 border border-bordercol text-slate-300">0 Active Legs</span>
+          </div>
+          <div id="goldPositionsTableContainer" class="overflow-x-auto custom-scroll">
+            <table class="w-full text-left text-xs font-mono">
+              <thead class="bg-slate-950/80 text-slate-400 uppercase text-[10px] border-b border-bordercol">
+                <tr>
+                  <th class="py-2 px-3">Ticket</th>
+                  <th class="py-2 px-3">Leg Role</th>
+                  <th class="py-2 px-3">Type</th>
+                  <th class="py-2 px-3">Volume</th>
+                  <th class="py-2 px-3">Entry</th>
+                  <th class="py-2 px-3">Live Price</th>
+                  <th class="py-2 px-3">Stop Loss</th>
+                  <th class="py-2 px-3">Take Profit</th>
+                  <th class="py-2 px-3">Floating P/L</th>
+                  <th class="py-2 px-3">Trailing Telemetry</th>
+                </tr>
+              </thead>
+              <tbody id="goldPositionsTbody" class="divide-y divide-bordercol/60 text-slate-300">
+                <tr><td colspan="10" class="py-4 text-center text-slate-500">No open Gold positions currently.</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- LIVE TRADINGVIEW LIGHTWEIGHT CANDLESTICK CHART & STRATEGY OVERLAYS -->
+      <section class="rounded-2xl bg-panel border border-bordercol p-5 shadow-xl space-y-3">
+        <div class="flex flex-wrap items-center justify-between gap-3">
+          <div class="flex items-center gap-3">
+            <h3 class="text-sm font-bold text-white flex items-center gap-2">
+              <svg class="w-4 h-4 text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 12l3-3 3 3 4-4M8 21l4-4 4 4M3 4h18M4 4h16v12a1 1 0 01-1 1H5a1 1 0 01-1-1V4z"></path></svg>
+              XAUUSD Live Candlestick Chart &amp; Strategy Overlays
+            </h3>
+            <span id="chartLiveQuote" class="text-xs font-mono text-slate-300 bg-slate-900 border border-bordercol px-2.5 py-0.5 rounded">XAUUSD: --</span>
+            <span id="chartBeBadge" class="hidden text-[10px] font-mono font-bold bg-amber-500/20 text-amber-300 border border-amber-500/40 px-2 py-0.5 rounded-full flex items-center gap-1">🛡️ AUTO BREAK-EVEN ACTIVE (+1.0R PROTECTED)</span>
+          </div>
+          <!-- Timeframe Switcher: M1, M5, M15, H1, H4 -->
+          <div class="flex items-center gap-1.5 bg-slate-950 p-1 rounded-xl border border-bordercol text-xs font-mono">
+            <span class="text-[10px] text-slate-500 uppercase px-1">TF:</span>
+            <button id="btnTfM1" onclick="switchGoldChartTf('M1')" class="px-2.5 py-1 rounded text-slate-400 hover:text-white transition">M1</button>
+            <button id="btnTfM5" onclick="switchGoldChartTf('M5')" class="px-2.5 py-1 rounded text-slate-400 hover:text-white transition">M5</button>
+            <button id="btnTfM15" onclick="switchGoldChartTf('M15')" class="px-2.5 py-1 rounded bg-amber-500/20 text-amber-300 font-bold border border-amber-500/40">M15</button>
+            <button id="btnTfH1" onclick="switchGoldChartTf('H1')" class="px-2.5 py-1 rounded text-slate-400 hover:text-white transition">H1</button>
+            <button id="btnTfH4" onclick="switchGoldChartTf('H4')" class="px-2.5 py-1 rounded text-slate-400 hover:text-white transition">H4</button>
+          </div>
+        </div>
+        <div id="goldTradingChart" class="w-full h-[420px] rounded-xl overflow-hidden bg-slate-950 border border-slate-900 relative">
+          <!-- TradingView Lightweight Chart canvas renders here -->
         </div>
       </section>
 
@@ -2853,11 +3579,22 @@ HTML_PAGE = """<!DOCTYPE html>
               <svg class="w-5 h-5 text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
               Recommended Trade Setups &amp; Technical Invalidation Notes
             </h3>
-            <p class="text-xs text-slate-400">Actionable institutional signals with explicit setup, stop-loss, and time-based invalidation boundaries.</p>
+            <p class="text-xs text-slate-400">Actionable institutional signals across M1 Scalp, M5 Momentum, M15 Intraday, and H1 Swing.</p>
           </div>
-          <span class="px-2.5 py-1 rounded-lg text-xs font-mono bg-slate-900 border border-bordercol text-slate-300">
-            Min Confidence: <strong class="text-emeraldaccent">90%</strong>
-          </span>
+          <div class="flex flex-wrap items-center gap-2">
+            <!-- Timeframe Filter Buttons -->
+            <div class="flex items-center gap-1 bg-slate-950 p-1 rounded-xl border border-bordercol text-xs font-mono">
+              <span class="text-[10px] text-slate-500 uppercase px-1.5 font-bold">Filter:</span>
+              <button id="filterSetupAll" onclick="filterGoldSetups('ALL')" class="px-2.5 py-1 rounded bg-amber-500/20 text-amber-300 font-bold border border-amber-500/40">All (<span id="countAllSetups">7</span>)</button>
+              <button id="filterSetupM1" onclick="filterGoldSetups('M1')" class="px-2.5 py-1 rounded text-slate-400 hover:text-white transition">⚡ 1M Scalp</button>
+              <button id="filterSetupM5" onclick="filterGoldSetups('M5')" class="px-2.5 py-1 rounded text-slate-400 hover:text-white transition">⚡ 5M Momentum</button>
+              <button id="filterSetupM15" onclick="filterGoldSetups('M15')" class="px-2.5 py-1 rounded text-slate-400 hover:text-white transition">M15 Intraday</button>
+              <button id="filterSetupH1" onclick="filterGoldSetups('H1')" class="px-2.5 py-1 rounded text-slate-400 hover:text-white transition">H1 Swing</button>
+            </div>
+            <span class="px-2.5 py-1.5 rounded-lg text-xs font-mono bg-slate-900 border border-bordercol text-slate-300">
+              Min Confidence: <strong class="text-emeraldaccent">90%</strong>
+            </span>
+          </div>
         </div>
 
         <div id="goldSetupsContainer" class="grid grid-cols-1 gap-4">
@@ -4272,11 +5009,13 @@ HTML_PAGE = """<!DOCTYPE html>
       const bar = document.getElementById('tickerBar');
       if (!quotes) return;
 
+      const symIcons = { 'XAUUSD': '🟡', 'BTCUSD': '🟠', 'ETHUSD': '🔷', 'SOLUSD': '🟣', 'EURUSD': '💶', 'GBPUSD': '💷', 'USDJPY': '💴' };
       bar.innerHTML = Object.entries(quotes).map(([sym, q]) => `
-        <div onclick="selectSymbol('${sym}')" class="cursor-pointer hover:bg-slate-900 px-2 py-1 rounded border border-transparent hover:border-bordercol transition flex items-center gap-2">
-          <span class="font-bold text-slate-200 font-sans">${sym}</span>
-          <span class="text-slate-400">${q.bid}</span>
-          <span class="text-[10px] px-1 rounded bg-slate-800 text-slate-500">Spread ${q.spread}</span>
+        <div onclick="selectSymbol('${sym}')" class="cursor-pointer hover:bg-slate-900 px-2.5 py-1 rounded-lg border border-transparent hover:border-bordercol transition flex items-center gap-2">
+          <span class="text-xs">${symIcons[sym] || '📊'}</span>
+          <span class="font-bold text-slate-200 font-sans text-xs">${sym}</span>
+          <span class="text-slate-300 font-mono text-xs font-bold">${q.bid}</span>
+          <span class="text-[10px] px-1.5 py-0.5 rounded bg-slate-800/80 text-slate-400 font-mono">Spr ${q.spread}</span>
         </div>
       `).join('<span class="text-slate-700">&bull;</span>');
     }
@@ -5187,7 +5926,238 @@ HTML_PAGE = """<!DOCTYPE html>
     // ==============================================================================
     let goldBacktestData = null;
 
+    // --------------------------------------------------------------------------
+    // TRADINGVIEW LIGHTWEIGHT CANDLESTICK CHART & STRATEGY OVERLAYS
+    // --------------------------------------------------------------------------
+    let goldChartInstance = null;
+    let goldCandleSeries = null;
+    let currentGoldChartTf = 'M15';
+    let chartPriceLines = [];
+
+    function initGoldChart() {
+      const container = document.getElementById('goldTradingChart');
+      if (!container || goldChartInstance) return;
+
+      if (typeof LightweightCharts === 'undefined') {
+        console.warn('LightweightCharts loading...');
+        setTimeout(initGoldChart, 400);
+        return;
+      }
+
+      try {
+        goldChartInstance = LightweightCharts.createChart(container, {
+          width: container.clientWidth || 800,
+          height: container.clientHeight || 420,
+          layout: {
+            background: { color: '#020617' },
+            textColor: '#94a3b8',
+            fontSize: 11,
+            fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace'
+          },
+          grid: {
+            vertLines: { color: 'rgba(30, 41, 59, 0.4)' },
+            horzLines: { color: 'rgba(30, 41, 59, 0.4)' }
+          },
+          crosshair: {
+            mode: LightweightCharts.CrosshairMode.Normal,
+            vertLine: { color: 'rgba(148, 163, 184, 0.5)', width: 1, style: 2 },
+            horzLine: { color: 'rgba(148, 163, 184, 0.5)', width: 1, style: 2 }
+          },
+          rightPriceScale: {
+            borderColor: 'rgba(30, 41, 59, 0.8)',
+            scaleMargins: { top: 0.15, bottom: 0.15 }
+          },
+          timeScale: {
+            borderColor: 'rgba(30, 41, 59, 0.8)',
+            timeVisible: true,
+            secondsVisible: false
+          }
+        });
+
+        goldCandleSeries = goldChartInstance.addCandlestickSeries({
+          upColor: '#10b981',
+          downColor: '#ef4444',
+          borderVisible: false,
+          wickUpColor: '#10b981',
+          wickDownColor: '#ef4444'
+        });
+
+        window.addEventListener('resize', () => {
+          if (goldChartInstance && container) {
+            goldChartInstance.applyOptions({ width: container.clientWidth, height: container.clientHeight });
+          }
+        });
+
+        refreshGoldChart(true);
+      } catch (e) {
+        console.error('Failed to init chart:', e);
+      }
+    }
+
+    async function switchGoldChartTf(tf) {
+      currentGoldChartTf = tf;
+      ['btnTfM1', 'btnTfM5', 'btnTfM15', 'btnTfH1', 'btnTfH4'].forEach(id => {
+        const btn = document.getElementById(id);
+        if (btn) {
+          btn.className = 'px-2.5 py-1 rounded text-slate-400 hover:text-white transition';
+        }
+      });
+      const activeBtn = document.getElementById('btnTf' + tf);
+      if (activeBtn) {
+        activeBtn.className = 'px-2.5 py-1 rounded bg-amber-500/20 text-amber-300 font-bold border border-amber-500/40';
+      }
+      refreshGoldChart(true);
+    }
+
+    async function refreshGoldChart(fitTime = false) {
+      if (!goldCandleSeries) {
+        initGoldChart();
+        return;
+      }
+      try {
+        const res = await fetch(`/api/gold/candles?tf=${currentGoldChartTf}&count=140`);
+        if (!res.ok) return;
+        const candles = await res.json();
+        if (candles && candles.length > 0) {
+          goldCandleSeries.setData(candles);
+          if (fitTime && goldChartInstance) {
+            goldChartInstance.timeScale().fitContent();
+          }
+          const latest = candles[candles.length - 1];
+          const quoteEl = document.getElementById('chartLiveQuote');
+          if (quoteEl) {
+            quoteEl.innerHTML = `XAUUSD: <span class="${latest.close >= latest.open ? 'text-emeraldaccent' : 'text-rose-400'} font-bold">${latest.close.toFixed(2)}</span>`;
+          }
+        }
+        await updateChartStrategyOverlays();
+      } catch (err) {
+        console.error('Error refreshing Gold chart:', err);
+      }
+    }
+
+    async function updateChartStrategyOverlays() {
+      if (!goldCandleSeries) return;
+
+      chartPriceLines.forEach(line => {
+        try { goldCandleSeries.removePriceLine(line); } catch (e) {}
+      });
+      chartPriceLines = [];
+
+      try {
+        const stRes = await fetch('/api/gold/auto_trade/status');
+        let activePos = null;
+        if (stRes.ok) {
+          const stData = await stRes.json();
+          const openPositions = stData.open_gold_positions || [];
+          if (openPositions.length > 0) {
+            activePos = openPositions[0];
+          }
+        }
+
+        const beBadge = document.getElementById('chartBeBadge');
+
+        if (activePos) {
+          const entryLine = goldCandleSeries.createPriceLine({
+            price: activePos.entry,
+            color: '#60a5fa',
+            lineWidth: 2,
+            lineStyle: LightweightCharts.LineStyle.Dashed,
+            axisLabelVisible: true,
+            title: `ENTRY (${activePos.direction} #${activePos.ticket})`
+          });
+          chartPriceLines.push(entryLine);
+
+          if (activePos.sl > 0) {
+            const isBe = (activePos.direction === 'BUY' && activePos.sl >= activePos.entry) ||
+                         (activePos.direction === 'SELL' && activePos.sl <= activePos.entry);
+            const slLine = goldCandleSeries.createPriceLine({
+              price: activePos.sl,
+              color: isBe ? '#f59e0b' : '#ef4444',
+              lineWidth: 2,
+              lineStyle: LightweightCharts.LineStyle.Solid,
+              axisLabelVisible: true,
+              title: isBe ? '🛡️ BREAK-EVEN (RISK FREE)' : 'SL (PROTECTIVE)'
+            });
+            chartPriceLines.push(slLine);
+
+            if (beBadge) {
+              if (isBe) beBadge.classList.remove('hidden');
+              else beBadge.classList.add('hidden');
+            }
+          }
+
+          if (activePos.tp > 0) {
+            const tpLine = goldCandleSeries.createPriceLine({
+              price: activePos.tp,
+              color: '#10b981',
+              lineWidth: 2,
+              lineStyle: LightweightCharts.LineStyle.Solid,
+              axisLabelVisible: true,
+              title: 'TP (TARGET)'
+            });
+            chartPriceLines.push(tpLine);
+          }
+        } else {
+          if (beBadge) beBadge.classList.add('hidden');
+          const setupsRes = await fetch('/api/gold/setups');
+          if (setupsRes.ok) {
+            const setups = await setupsRes.json();
+            if (setups && setups.length > 0) {
+              const best = setups[0];
+              if (best.entry > 0) {
+                chartPriceLines.push(goldCandleSeries.createPriceLine({
+                  price: best.entry,
+                  color: '#60a5fa',
+                  lineWidth: 1,
+                  lineStyle: LightweightCharts.LineStyle.Dashed,
+                  axisLabelVisible: true,
+                  title: `SETUP ENTRY (${best.direction})`
+                }));
+              }
+              if (best.sl > 0) {
+                chartPriceLines.push(goldCandleSeries.createPriceLine({
+                  price: best.sl,
+                  color: '#ef4444',
+                  lineWidth: 1,
+                  lineStyle: LightweightCharts.LineStyle.Solid,
+                  axisLabelVisible: true,
+                  title: 'SETUP SL'
+                }));
+              }
+              if (best.tp1 > 0) {
+                chartPriceLines.push(goldCandleSeries.createPriceLine({
+                  price: best.tp1,
+                  color: '#10b981',
+                  lineWidth: 1,
+                  lineStyle: LightweightCharts.LineStyle.Solid,
+                  axisLabelVisible: true,
+                  title: 'TP1 (1.8R)'
+                }));
+              }
+              if (best.tp2 > 0) {
+                chartPriceLines.push(goldCandleSeries.createPriceLine({
+                  price: best.tp2,
+                  color: '#22d3ee',
+                  lineWidth: 1,
+                  lineStyle: LightweightCharts.LineStyle.Solid,
+                  axisLabelVisible: true,
+                  title: 'TP2 (4.0R)'
+                }));
+              }
+            }
+          }
+        }
+      } catch (e) {
+        console.error('Error updating chart overlays:', e);
+      }
+    }
+
     async function loadGoldDashboard(force=false) {
+      if (!goldChartInstance) {
+        initGoldChart();
+      } else {
+        refreshGoldChart(false);
+      }
       const syncIcon = document.getElementById('goldSyncIcon');
       if (syncIcon) syncIcon.classList.add('animate-spin');
 
@@ -5277,28 +6247,82 @@ HTML_PAGE = """<!DOCTYPE html>
         const lotEl = document.getElementById('goldCfgLot');
         if (lotEl) lotEl.innerText = `${st.config.lot_size} Lot`;
         const tpEl = document.getElementById('goldCfgTp');
-        if (tpEl) tpEl.innerText = st.config.tp_mode.replace(/_/g, ' ');
+        if (tpEl) tpEl.innerText = 'TWIN (1 FIX + 1 TRL)';
 
         const lotSel = document.getElementById('goldLotSelect');
         if (lotSel && document.activeElement !== lotSel) lotSel.value = String(st.config.lot_size);
         const confSel = document.getElementById('goldConfSelect');
         if (confSel && document.activeElement !== confSel) confSel.value = String(st.config.min_confidence);
-        const tpSel = document.getElementById('goldTpSelect');
-        if (tpSel && document.activeElement !== tpSel) tpSel.value = st.config.tp_mode;
+        const autoTfSel = document.getElementById('goldAutoTfSelect');
+        if (autoTfSel && document.activeElement !== autoTfSel && st.config.timeframe_filter) {
+          autoTfSel.value = st.config.timeframe_filter;
+        }
       }
 
       const dailyEl = document.getElementById('goldDailyTrades');
-      if (dailyEl) dailyEl.innerText = `${st.daily_trades_count || 0} / ${st.max_daily_trades || 3} max`;
+      if (dailyEl) dailyEl.innerText = `${st.daily_trades_count || 0} / ${st.max_daily_trades || 6} max`;
+
+      const openPositions = st.open_gold_positions || [];
+      const trailingMap = {};
+      (st.trailing_positions || []).forEach(tr => { trailingMap[tr.ticket] = tr; });
 
       const openPosEl = document.getElementById('goldOpenPosStatus');
+      const legsCountEl = document.getElementById('goldOpenLegsCount');
+      const maxCap = st.max_concurrent_trades || 5;
+      if (legsCountEl) {
+        legsCountEl.innerText = `${openPositions.length} / ${maxCap} Active Trades ${openPositions.length >= maxCap ? '⚡ CAP FULL (5/5)' : '⚡ AUTO-REPLACE ON TP ACTIVE'}`;
+      }
+
       if (openPosEl) {
-        if (st.open_gold_positions && st.open_gold_positions.length > 0) {
-          const p = st.open_gold_positions[0];
+        if (openPositions.length > 0) {
           openPosEl.className = 'font-bold text-emeraldaccent';
-          openPosEl.innerText = `#${p.ticket} ${p.direction} (P&L: $${p.profit})`;
+          openPosEl.innerText = `${openPositions.length} / ${maxCap} Active Trades (${openPositions.map(p => `#${p.ticket} $${p.profit}`).join(', ')})`;
         } else {
           openPosEl.className = 'font-bold text-slate-400';
-          openPosEl.innerText = 'None (0/1 max)';
+          openPosEl.innerText = `0 / ${maxCap} Active (Auto-Replace Ready)`;
+        }
+      }
+
+      // Populate Gold Positions Table
+      const tbody = document.getElementById('goldPositionsTbody');
+      if (tbody) {
+        if (openPositions.length === 0) {
+          tbody.innerHTML = '<tr><td colspan="10" class="py-4 text-center text-slate-500">No open Gold positions currently. Use terminal above or setup cards to enter twin trades.</td></tr>';
+        } else {
+          tbody.innerHTML = openPositions.map(p => {
+            const trInfo = trailingMap[p.ticket];
+            const isTrailingLeg = !!trInfo || p.tp === 0;
+            const isBuy = p.direction === 'BUY';
+            const profitVal = parseFloat(p.profit) || 0.0;
+            const pnlColor = profitVal >= 0 ? 'text-emeraldaccent font-bold' : 'text-rose-400 font-bold';
+
+            let roleBadge = '';
+            let telemetryHtml = '';
+
+            if (isTrailingLeg) {
+              roleBadge = '<span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/30">✨ Trade 2: Trailing Runner</span>';
+              const beStatus = trInfo && trInfo.be_moved ? '<span class="text-emeraldaccent font-bold">🛡️ BE Armed</span>' : '<span class="text-slate-400">BE Pending (+1R)</span>';
+              telemetryHtml = `<div class="text-[10px]">${beStatus} &bull; Trail: <span class="text-amber-300">$${trInfo ? trInfo.trail_dist : 3.50}/oz</span></div>`;
+            } else {
+              roleBadge = '<span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-blue-500/20 text-blue-300 border border-blue-500/30">🎯 Trade 1: Fixed Target</span>';
+              telemetryHtml = `<div class="text-[10px] text-slate-400">Broker Limit Target: <span class="text-emeraldaccent font-bold">${p.tp}</span></div>`;
+            }
+
+            return `
+              <tr class="hover:bg-slate-900/60 transition">
+                <td class="py-2.5 px-3 font-bold text-slate-200">#${p.ticket}</td>
+                <td class="py-2.5 px-3">${roleBadge}</td>
+                <td class="py-2.5 px-3"><span class="px-1.5 py-0.5 rounded text-[10px] font-bold ${isBuy ? 'bg-emerald-500/20 text-emeraldaccent' : 'bg-rose-500/20 text-rose-300'}">${p.direction}</span></td>
+                <td class="py-2.5 px-3 text-slate-300">${p.lot} lot</td>
+                <td class="py-2.5 px-3 text-slate-300">${p.entry}</td>
+                <td class="py-2.5 px-3 text-white font-bold">${p.current}</td>
+                <td class="py-2.5 px-3 text-rose-300">${p.sl || '--'}</td>
+                <td class="py-2.5 px-3 text-emeraldaccent">${p.tp > 0 ? p.tp : 'Trailing'}</td>
+                <td class="py-2.5 px-3 ${pnlColor}">$${profitVal.toFixed(2)}</td>
+                <td class="py-2.5 px-3">${telemetryHtml}</td>
+              </tr>
+            `;
+          }).join('');
         }
       }
 
@@ -5338,9 +6362,9 @@ HTML_PAGE = """<!DOCTYPE html>
     }
 
     async function updateGoldAutoSettings() {
-      const lot = parseFloat(document.getElementById('goldLotSelect').value);
-      const conf = parseInt(document.getElementById('goldConfSelect').value);
-      const tpMode = document.getElementById('goldTpSelect').value;
+      const lot = parseFloat(document.getElementById('goldLotSelect') ? document.getElementById('goldLotSelect').value : 0.01);
+      const conf = parseInt(document.getElementById('goldConfSelect') ? document.getElementById('goldConfSelect').value : 90);
+      const tfFilter = document.getElementById('goldAutoTfSelect') ? document.getElementById('goldAutoTfSelect').value : 'M1_M5';
       try {
         await fetch('/api/gold/auto_trade/config', {
           method: 'POST',
@@ -5348,7 +6372,8 @@ HTML_PAGE = """<!DOCTYPE html>
           body: JSON.stringify({
             lot_size: lot,
             min_confidence: conf,
-            tp_mode: tpMode
+            timeframe_filter: tfFilter,
+            twin_trade_enabled: true
           })
         });
         loadGoldDashboard();
@@ -5357,26 +6382,139 @@ HTML_PAGE = """<!DOCTYPE html>
       }
     }
 
-    async function executeGoldSetupNow(direction, entry, sl, tp, confidence, strategy) {
-      if (!confirm(`Execute 1 Gold trade (${direction} 0.01 lot XAUUSD)?\nEntry: ~${entry}\nSL: ${sl}\nTP: ${tp}\nConfidence: ${confidence}%\nStrategy: ${strategy}\nProtected by Smart Profit Chaser Option B.`)) {
-        return;
+    // --------------------------------------------------------------------------
+    // GOLD HIGH-FREQUENCY MANUAL TRADING TERMINAL & TWIN-ORDER CONTROLLER
+    // --------------------------------------------------------------------------
+    let currentManualTradeTf = 'M1';
+
+    function setManualTradeTf(tf) {
+      currentManualTradeTf = tf;
+      ['btnTerminalM1', 'btnTerminalM5', 'btnTerminalM15'].forEach(id => {
+        const b = document.getElementById(id);
+        if (b) {
+          b.className = 'py-2 px-2.5 rounded-xl bg-slate-950 text-slate-400 hover:text-white border border-bordercol text-center transition flex flex-col items-center';
+        }
+      });
+      const activeBtn = document.getElementById('btnTerminal' + tf);
+      if (activeBtn) {
+        activeBtn.className = 'py-2 px-2.5 rounded-xl bg-amber-500/20 text-amber-300 font-bold border border-amber-500/40 text-center transition flex flex-col items-center';
       }
+
+      const displayEl = document.getElementById('activeTerminalTfDisplay');
+      if (displayEl) {
+        displayEl.innerText = tf === 'M1' ? '⚡ M1 SCALP MODE' : (tf === 'M5' ? '⚡ 5M MOMENTUM MODE' : 'M15 INTRADAY MODE');
+      }
+
+      // Automatically sync chart timeframe
+      switchGoldChartTf(tf);
+      updateTerminalPreview();
+    }
+
+    function updateTerminalPreview() {
+      const lotSel = document.getElementById('terminalLotSelect');
+      const lot = parseFloat(lotSel ? lotSel.value : 0.01);
+      const totalEl = document.getElementById('terminalTotalLot');
+      if (totalEl) totalEl.innerText = `${(lot * 2).toFixed(2)} Lot (${(lot * 200).toFixed(0)} oz total)`;
+
+      const p1El = document.getElementById('previewLeg1Tp');
+      const p2El = document.getElementById('previewLeg2Tp');
+      if (currentManualTradeTf === 'M1') {
+        if (p1El) p1El.innerText = '+1.5R Fixed Target (Scalp TP1)';
+        if (p2El) p2El.innerText = 'Trailing Stop ($3.00/oz Trail)';
+      } else if (currentManualTradeTf === 'M5') {
+        if (p1El) p1El.innerText = '+1.8R Fixed Target (Momentum TP1)';
+        if (p2El) p2El.innerText = 'Trailing Stop ($4.50/oz Trail)';
+      } else {
+        if (p1El) p1El.innerText = '+2.5R Fixed Target (Intraday TP1)';
+        if (p2El) p2El.innerText = 'Trailing Stop ($5.00/oz Trail)';
+      }
+    }
+
+    async function executeManualGoldTrade(action) {
+      const lotVal = parseFloat(document.getElementById('terminalLotSelect') ? document.getElementById('terminalLotSelect').value : 0.01);
+
+      // Find matching setup for the chosen timeframe if available
+      let matchedSetup = null;
+      if (cachedGoldSetups && cachedGoldSetups.length > 0) {
+        matchedSetup = cachedGoldSetups.find(s => s.timeframe === currentManualTradeTf && s.direction === action) ||
+                       cachedGoldSetups.find(s => s.timeframe === currentManualTradeTf) ||
+                       cachedGoldSetups[0];
+      }
+
+      let sl = matchedSetup ? matchedSetup.sl : 0.0;
+      let tp1 = matchedSetup ? matchedSetup.tp1 : 0.0;
+
+      const confirmMsg = `⚡ CONFIRM TWIN TRADE EXECUTION ON GOLD (XAUUSD)?\n\n` +
+                         `• Direction: ${action}\n` +
+                         `• Timeframe: ${currentManualTradeTf}\n` +
+                         `• Volume: ${lotVal} lot per leg (Total: ${(lotVal * 2).toFixed(2)} lots)\n` +
+                         `• Trade 1: Hard Fixed Take Profit (TP1 ${tp1 || '~1.5R'})\n` +
+                         `• Trade 2: Dynamic Trailing Take Profit (Runner)\n` +
+                         `• Stop Loss: Shared Structural Risk (${sl || 'ATR-based'})`;
+
+      if (!confirm(confirmMsg)) return;
+
       try {
-        const lotVal = parseFloat(document.getElementById('goldLotSelect') ? document.getElementById('goldLotSelect').value : 0.01);
-        const res = await fetch('/api/gold/execute_now', {
+        const res = await fetch('/api/gold/execute_twin', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            direction: action,
+            lot: lotVal,
+            timeframe: currentManualTradeTf,
+            sl: sl,
+            tp_fixed: tp1,
+            confidence: matchedSetup ? matchedSetup.confidence_score : 92,
+            strategy: matchedSetup ? matchedSetup.strategy : `Manual ${currentManualTradeTf} Twin Scalp`
+          })
+        });
+
+        const out = await res.json();
+        alert(out.message || 'Orders submitted to broker!');
+        loadGoldDashboard();
+      } catch (err) {
+        alert('Execution failed: ' + err);
+      }
+    }
+
+    async function closeAllGoldPositions() {
+      if (!confirm('Are you sure you want to close ALL active Gold positions immediately at market?')) return;
+      try {
+        const res = await fetch('/api/gold/close_all', { method: 'POST' });
+        const out = await res.json();
+        alert(`Closed ${out.closed_count || 0} Gold position(s).`);
+        loadGoldDashboard();
+      } catch (e) {
+        alert('Close error: ' + e);
+      }
+    }
+    async function executeGoldSetupNow(direction, entry, sl, tp, confidence, strategy, timeframe='M1') {
+      const lotVal = parseFloat(document.getElementById('goldLotSelect') ? document.getElementById('goldLotSelect').value : 0.01);
+      const confirmMsg = `⚡ EXECUTE TWIN TRADES ON GOLD (${strategy})?\n\n` +
+                         `• Direction: ${direction} (${lotVal} lot x 2)\n` +
+                         `• Entry Zone: ~${entry}\n` +
+                         `• Trade 1: Fixed Target TP1 @ ${tp}\n` +
+                         `• Trade 2: Dynamic Trailing Stop Runner\n` +
+                         `• Stop Loss: ${sl} (Confidence: ${confidence}%)`;
+
+      if (!confirm(confirmMsg)) return;
+
+      try {
+        const res = await fetch('/api/gold/execute_twin', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             direction: direction,
             lot: lotVal,
             sl: sl,
-            tp: tp,
+            tp_fixed: tp,
             confidence: confidence,
-            strategy: strategy
+            strategy: strategy,
+            timeframe: timeframe
           })
         });
         const out = await res.json();
-        alert(out.message);
+        alert(out.message || 'Twin trade submitted!');
         loadGoldDashboard();
       } catch (err) {
         alert('Execution error: ' + err);
@@ -5414,15 +6552,51 @@ HTML_PAGE = """<!DOCTYPE html>
       }
     }
 
+    let cachedGoldSetups = [];
+    let currentGoldSetupFilter = 'ALL';
+
+    function filterGoldSetups(tfFilter) {
+      currentGoldSetupFilter = tfFilter;
+      ['filterSetupAll', 'filterSetupM1', 'filterSetupM5', 'filterSetupM15', 'filterSetupH1'].forEach(id => {
+        const b = document.getElementById(id);
+        if (b) b.className = 'px-2.5 py-1 rounded text-slate-400 hover:text-white transition';
+      });
+      const activeId = tfFilter === 'ALL' ? 'filterSetupAll' : ('filterSetup' + tfFilter);
+      const activeBtn = document.getElementById(activeId);
+      if (activeBtn) {
+        activeBtn.className = 'px-2.5 py-1 rounded bg-amber-500/20 text-amber-300 font-bold border border-amber-500/40';
+      }
+      renderGoldSetupsList();
+    }
+
     function renderGoldSetups(setups) {
+      cachedGoldSetups = setups || [];
+      const countEl = document.getElementById('countAllSetups');
+      if (countEl) countEl.innerText = cachedGoldSetups.length;
+      renderGoldSetupsList();
+    }
+
+    function renderGoldSetupsList() {
       const container = document.getElementById('goldSetupsContainer');
       if (!container) return;
-      if (!setups || setups.length === 0) {
-        container.innerHTML = `<div class="p-6 rounded-xl bg-slate-900 border border-bordercol text-center text-slate-400 text-xs">No active Gold trade setups currently qualifying for strict 90%+ institutional criteria.</div>`;
+
+      let filtered = cachedGoldSetups;
+      if (currentGoldSetupFilter === 'M1') {
+        filtered = cachedGoldSetups.filter(s => s.timeframe === 'M1');
+      } else if (currentGoldSetupFilter === 'M5') {
+        filtered = cachedGoldSetups.filter(s => s.timeframe === 'M5');
+      } else if (currentGoldSetupFilter === 'M15') {
+        filtered = cachedGoldSetups.filter(s => s.timeframe.includes('M15'));
+      } else if (currentGoldSetupFilter === 'H1') {
+        filtered = cachedGoldSetups.filter(s => s.timeframe.includes('H1'));
+      }
+
+      if (!filtered || filtered.length === 0) {
+        container.innerHTML = `<div class="p-6 rounded-xl bg-slate-900 border border-bordercol text-center text-slate-400 text-xs">No trade setups found for filter '${currentGoldSetupFilter}'.</div>`;
         return;
       }
 
-      container.innerHTML = setups.map(s => {
+      container.innerHTML = filtered.map(s => {
         const isBuy = s.direction === 'BUY';
         const isSell = s.direction === 'SELL';
         const badgeBg = isBuy ? 'bg-emerald-500 text-slate-950' : (isSell ? 'bg-rose-600 text-white' : 'bg-slate-700 text-slate-300');
@@ -5448,8 +6622,8 @@ HTML_PAGE = """<!DOCTYPE html>
                   <span class="text-sm font-mono font-black text-emeraldaccent">${s.confidence_score}%</span>
                 </div>
                 ${s.direction !== 'NO TRADE' ? `
-                  <button onclick="executeGoldSetupNow('${s.direction}', ${s.entry}, ${s.sl}, ${s.tp1}, ${s.confidence_score}, '${(s.strategy||'').replace(/'/g, "\\'")}')" class="px-4 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-black transition shadow-lg shadow-amber-500/20 flex items-center gap-1.5">
-                    ⚡ Instant Execute (1 Trade)
+                  <button onclick="executeGoldSetupNow('${s.direction}', ${s.entry}, ${s.sl}, ${s.tp1}, ${s.confidence_score}, '${(s.strategy||'').replace(/'/g, "\\'")}', '${s.timeframe}')" class="px-4 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-black transition shadow-lg shadow-amber-500/20 flex items-center gap-1.5">
+                    ⚡ Execute Twin Trade (Fixed + Trailing)
                   </button>
                 ` : ''}
               </div>
@@ -6471,10 +7645,73 @@ HTML_PAGE = """<!DOCTYPE html>
 
     setInterval(() => { if (currentMainTab === 'gold') loadGoldDashboard(); }, 5000);
     setInterval(() => { if (currentMainTab === 'ml') loadMLDashboard(); }, 5000);
-  </script>
+  
+  // ==============================================================================
+  // 5-THEME DYNAMIC ENGINE & LOCALSTORAGE PERSISTENCE
+  // ==============================================================================
+  const THEME_NAMES = {
+    'gold-obsidian': '👑 24K OBSIDIAN GOLD',
+    'cyberpunk-neon': '⚡ CYBERPUNK NEON',
+    'emerald-matrix': '💎 EMERALD ALPHA',
+    'sapphire-nordic': '🌊 SAPPHIRE HORIZON',
+    'solar-forge': '🔥 SOLAR FORGE'
+  };
+
+  function setAppTheme(themeId) {
+    if (!THEME_NAMES[themeId]) themeId = 'gold-obsidian';
+    
+    // Apply data-theme to root
+    document.documentElement.setAttribute('data-theme', themeId);
+    try {
+      localStorage.setItem('headway_theme', themeId);
+    } catch(e) {}
+
+    // Update active badge in quick bar
+    const badge = document.getElementById('activeThemePillBadge');
+    if (badge) badge.innerText = THEME_NAMES[themeId];
+
+    // Update pill buttons visual state
+    ['gold-obsidian', 'cyberpunk-neon', 'emerald-matrix', 'sapphire-nordic', 'solar-forge'].forEach(id => {
+      const btn = document.getElementById('pill_' + id);
+      if (btn) {
+        if (id === themeId) {
+          btn.className = 'theme-pill px-3 py-1.5 rounded-xl text-xs font-bold transition flex items-center gap-1.5 theme-active-pill';
+        } else {
+          btn.className = 'theme-pill px-3 py-1.5 rounded-xl text-xs font-bold transition flex items-center gap-1.5 border border-slate-800 bg-slate-900/60 text-slate-400 hover:text-white';
+        }
+      }
+    });
+  }
+
+  function openThemeGalleryModal() {
+    const modal = document.getElementById('themeGalleryModal');
+    if (modal) modal.classList.remove('hidden');
+  }
+
+  function closeThemeGalleryModal() {
+    const modal = document.getElementById('themeGalleryModal');
+    if (modal) modal.classList.add('hidden');
+  }
+
+  // Load saved theme on boot
+  (function initTheme() {
+    let saved = 'gold-obsidian';
+    try {
+      saved = localStorage.getItem('headway_theme') || 'gold-obsidian';
+    } catch(e) {}
+    setAppTheme(saved);
+  })();
+
+</script>
 </body>
 </html>
 """
+
+import commander.api as commander_api
+from commander.dashboard import inject as _commander_inject
+from commander.apex_dashboard import inject_apex as _apex_inject
+HTML_PAGE = _commander_inject(HTML_PAGE)
+HTML_PAGE = _apex_inject(HTML_PAGE)
 
 def get_gold_overview_data():
     quote = get_symbol_quote("XAUUSD")
@@ -6514,11 +7751,45 @@ def get_gold_overview_data():
 class DerivServer(BaseHTTPRequestHandler):
     def do_GET(self):
         url = urlparse(self.path)
+        if commander_api.handles(url.path):
+            return commander_api.dispatch(self, "GET")
         if url.path in ["/", "/index.html"]:
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.end_headers()
             self.wfile.write(HTML_PAGE.encode("utf-8"))
+        elif url.path in ["/landing", "/landing/"]:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            self.wfile.write((Path(__file__).parent / "landing" / "index.html").read_bytes())
+        elif url.path.startswith("/static/"):
+            rel_path = url.path.lstrip("/").replace("/", os.sep)
+            local_file = Path(rel_path)
+            if local_file.exists() and local_file.is_file():
+                ext = local_file.suffix.lower()
+                content_types = {
+                    ".png": "image/png",
+                    ".jpg": "image/jpeg",
+                    ".jpeg": "image/jpeg",
+                    ".svg": "image/svg+xml",
+                    ".webp": "image/webp",
+                    ".gif": "image/gif",
+                    ".css": "text/css",
+                    ".js": "application/javascript"
+                }
+                c_type = content_types.get(ext, "application/octet-stream")
+                self.send_response(200)
+                self.send_header("Content-Type", c_type)
+                self.send_header("Cache-Control", "public, max-age=86400")
+                self.end_headers()
+                with open(local_file, "rb") as f:
+                    self.wfile.write(f.read())
+                return
+            else:
+                self.send_response(404)
+                self.end_headers()
+                return
         elif url.path == "/api/state":
             state = get_deriv_full_state()
             self.send_response(200)
@@ -6599,6 +7870,31 @@ class DerivServer(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "application/json")
             self.end_headers()
             self.wfile.write(json.dumps(data).encode("utf-8"))
+        elif url.path == "/api/gold/candles":
+            qs = parse_qs(url.query)
+            tf = qs.get("tf", ["M15"])[0].upper()
+            count = int(qs.get("count", ["150"])[0])
+            with mt5_lock:
+                df = get_gold_candles(tf, count=count)
+            candles = []
+            if df is not None and not df.empty:
+                for _, row in df.iterrows():
+                    try:
+                        t = int(pd.to_datetime(row['time']).timestamp())
+                        candles.append({
+                            "time": t,
+                            "open": float(row['open']),
+                            "high": float(row['high']),
+                            "low": float(row['low']),
+                            "close": float(row['close']),
+                            "volume": float(row.get('tick_volume', row.get('volume', 0)))
+                        })
+                    except Exception:
+                        pass
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(candles).encode("utf-8"))
         elif url.path == "/api/gold/setups":
             setups = generate_gold_trade_setups()
             self.send_response(200)
@@ -6853,6 +8149,9 @@ class DerivServer(BaseHTTPRequestHandler):
         except Exception:
             data = {}
 
+        if commander_api.handles(url.path):
+            return commander_api.dispatch(self, "POST", data)
+
         if url.path == "/api/order":
             symbol = data.get("symbol", "BTCUSD")
             action = data.get("action", "SELL")
@@ -6995,6 +8294,67 @@ class DerivServer(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "application/json")
             self.end_headers()
             self.wfile.write(json.dumps({"success": True, "config": cfg}).encode("utf-8"))
+
+        elif url.path == "/api/gold/execute_twin":
+            action = data.get("direction", "BUY").upper()
+            lot = float(data.get("lot", 0.01))
+            tf = data.get("timeframe", "M1").upper()
+            strat = data.get("strategy", f"Manual {tf} Twin Scalp")
+            conf = int(data.get("confidence", 92))
+            sl = float(data.get("sl", 0.0))
+            tp_fixed = float(data.get("tp_fixed", data.get("tp", 0.0)))
+            trail_dist = float(data.get("trail_dist", 0.0))
+
+            res = gold_auto_trader.execute_twin_gold_orders(
+                action=action,
+                lot=lot,
+                sl=sl,
+                tp_fixed=tp_fixed,
+                trail_dist=trail_dist,
+                confidence_score=conf,
+                strategy_name=strat,
+                timeframe=tf,
+                notes=f"Manual {tf} Twin Trade Execution",
+                is_auto=False
+            ) if gold_auto_trader else {"success": False, "message": "GoldAutoTrader not initialized"}
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(res).encode("utf-8"))
+
+        elif url.path == "/api/gold/close_all":
+            closed_count = 0
+            errs = []
+            if mt5 is not None:
+                with mt5_lock:
+                    open_pos = mt5.positions_get(symbol="XAUUSD")
+                    if open_pos:
+                        tick = mt5.symbol_info_tick("XAUUSD")
+                        for p in open_pos:
+                            action = mt5.ORDER_TYPE_SELL if p.type == mt5.ORDER_TYPE_BUY else mt5.ORDER_TYPE_BUY
+                            price = tick.bid if p.type == mt5.ORDER_TYPE_BUY else tick.ask
+                            req = {
+                                "action": mt5.TRADE_ACTION_DEAL,
+                                "symbol": "XAUUSD",
+                                "volume": p.volume,
+                                "type": action,
+                                "position": p.ticket,
+                                "price": price,
+                                "deviation": 40,
+                                "magic": 777199,
+                                "comment": "Close Gold Twin",
+                                "type_time": mt5.ORDER_TIME_GTC,
+                                "type_filling": mt5.ORDER_FILLING_IOC
+                            }
+                            res = mt5.order_send(req)
+                            if res and res.retcode == mt5.TRADE_RETCODE_DONE:
+                                closed_count += 1
+                            else:
+                                errs.append(getattr(res, "comment", "Failed"))
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({"success": True, "closed_count": closed_count, "errors": errs}).encode("utf-8"))
 
         elif url.path == "/api/gold/execute_now":
             action = data.get("direction", "BUY")
@@ -7183,6 +8543,7 @@ def run(port=None):
     scanner = AutomatedSetupScanner(interval_seconds=180)
     guardian = ProfitGuardian()
     guardian.start()
+    commander_api.get()  # starts Commander scheduler + health threads (default level 1: observer)
     print("=" * 65)
     print(" " * 10 + "HEADWAY MT5 INSTITUTIONAL WORKSTATION")
     print("=" * 65)

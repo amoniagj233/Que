@@ -1,0 +1,423 @@
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500;700&family=Space+Grotesk:wght@600;700&display=swap" rel="stylesheet">
+
+<div id="cb-migrate" class="cb-overlay" role="dialog" aria-modal="true" aria-labelledby="cb-title">
+  <div class="cb-bg">
+    <div class="cb-nebula n1"></div>
+    <div class="cb-nebula n2"></div>
+    <div class="cb-nebula n3"></div>
+    <canvas id="cb-stars"></canvas>
+  </div>
+
+  <div class="cb-box">
+    <div class="cb-top">
+      <div class="cb-lang" role="group" aria-label="Language">
+        <button type="button" data-lang="vi" onclick="cbSetLang('vi')">VI</button>
+        <button type="button" data-lang="en" class="active" onclick="cbSetLang('en')">EN</button>
+      </div>
+    </div>
+
+    <div class="cb-stage">
+      <div class="cb-ring r1"></div>
+      <div class="cb-ring r2"></div>
+      <div class="cb-ring r3"></div>
+
+      <div class="cb-planet">
+        <div class="cb-planet-inner">
+          <div class="cb-planet-main">CityBot</div>
+          <div class="cb-planet-sub">MT5 · EA</div>
+        </div>
+        <span class="cb-free-badge" data-i18n="badge">FREE</span>
+      </div>
+
+      <div class="cb-orbit-system">
+        <div class="cb-sat" style="--angle:0deg"><div class="cb-chip"><span class="cb-ico">🚀</span><span class="cb-name">XTO Speeder</span></div></div>
+        <div class="cb-sat" style="--angle:60deg"><div class="cb-chip"><span class="cb-ico">🛡️</span><span class="cb-name">Hedging-Pro</span></div></div>
+        <div class="cb-sat" style="--angle:120deg"><div class="cb-chip"><span class="cb-ico">⚡</span><span class="cb-name">B9-Scalper</span></div></div>
+        <div class="cb-sat" style="--angle:180deg"><div class="cb-chip"><span class="cb-ico">🌟</span><span class="cb-name">Season-X</span></div></div>
+        <div class="cb-sat" style="--angle:240deg"><div class="cb-chip"><span class="cb-ico">💰</span><span class="cb-name">Money-TICK</span></div></div>
+        <div class="cb-sat" style="--angle:300deg"><div class="cb-chip"><span class="cb-ico">🧠</span><span class="cb-name">CENTURY-AI</span></div></div>
+      </div>
+    </div>
+
+    <h3 class="cb-title" id="cb-title" data-i18n="title">XTO Speeder has been upgraded!</h3>
+    <p class="cb-desc" data-i18n="desc">
+      XTO Speeder is now integrated as <strong>a Bot Trade Module</strong> inside the super EA <strong>CityBot</strong> — together with 15+ modules and new tools.
+    </p>
+
+    <ul class="cb-feats">
+      <li><i>🤖</i><span data-i18n="f1">Multi-strategy Bot Trade</span></li>
+      <li><i>🛠️</i><span data-i18n="f2">Semi-auto tools &amp; order management</span></li>
+      <li><i>📡</i><span data-i18n="f3">Market insight &amp; trade statistics</span></li>
+      <li><i>🎁</i><span data-i18n="f4">Free to use</span></li>
+    </ul>
+
+    <div class="cb-free">
+      <div class="cb-free-ico">🎁</div>
+      <div class="cb-free-txt">
+        <strong data-i18n="freeTitle">EA CityBot — Free to use</strong>
+      </div>
+    </div>
+
+    <a href="https://citybot.vn" class="cb-btn" id="cb-cta">
+      <span data-i18n="btn">Get CityBot for free</span>
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8h10M9 4l4 4-4 4"/></svg>
+    </a>
+  </div>
+</div>
+
+<style>
+  #cb-migrate.cb-overlay{
+    position:fixed;inset:0;z-index:9999;
+    display:none;align-items:center;justify-content:center;
+    padding:16px;
+    font-family:'Inter',-apple-system,'Segoe UI',sans-serif;
+    background:rgba(4,6,11,.86);
+    backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);
+  }
+  #cb-migrate.cb-overlay.show{display:flex;animation:cbFade .35s ease}
+  @keyframes cbFade{from{opacity:0}to{opacity:1}}
+
+  #cb-migrate .cb-bg{position:absolute;inset:0;overflow:hidden;pointer-events:none}
+  #cb-migrate .cb-nebula{position:absolute;border-radius:50%;filter:blur(90px);opacity:.4;will-change:transform}
+  #cb-migrate .cb-nebula.n1{width:520px;height:520px;top:-15%;left:-10%;background:radial-gradient(circle,rgba(217,169,62,.55),transparent 65%);animation:cbNeb1 30s ease-in-out infinite}
+  #cb-migrate .cb-nebula.n2{width:640px;height:640px;bottom:-20%;right:-15%;background:radial-gradient(circle,rgba(74,125,255,.4),transparent 65%);animation:cbNeb2 42s ease-in-out infinite}
+  #cb-migrate .cb-nebula.n3{width:480px;height:480px;top:30%;left:40%;background:radial-gradient(circle,rgba(87,217,232,.28),transparent 65%);animation:cbNeb3 36s ease-in-out infinite}
+  @keyframes cbNeb1{0%,100%{transform:translate(0,0) scale(1)}50%{transform:translate(60px,50px) scale(1.12)}}
+  @keyframes cbNeb2{0%,100%{transform:translate(0,0) scale(1)}50%{transform:translate(-80px,40px) scale(1.1)}}
+  @keyframes cbNeb3{0%,100%{transform:translate(0,0) scale(1)}50%{transform:translate(-50px,-60px) scale(.92)}}
+  #cb-stars{position:absolute;inset:0;width:100%;height:100%}
+
+  #cb-migrate .cb-box{
+    position:relative;z-index:2;
+    width:100%;max-width:540px;
+    max-height:calc(100vh - 32px);max-height:calc(100dvh - 32px);
+    overflow-y:auto;
+    background:
+      radial-gradient(120% 60% at 50% 0%,rgba(217,169,62,.10),transparent 60%),
+      linear-gradient(180deg,#0e1424 0%,#070a13 100%);
+    border:1px solid transparent;
+    border-radius:22px;
+    padding:18px 28px 22px;
+    text-align:center;
+    box-shadow:0 40px 90px -30px rgba(0,0,0,.95),0 0 90px -30px rgba(217,169,62,.4),inset 0 1px 0 rgba(255,255,255,.06);
+    animation:cbPop .5s cubic-bezier(.16,1,.3,1);
+  }
+  #cb-migrate .cb-box::before{
+    content:'';position:absolute;inset:0;border-radius:inherit;padding:1px;
+    background:linear-gradient(160deg,rgba(255,229,102,.65),rgba(217,169,62,.12) 40%,rgba(87,217,232,.25) 100%);
+    -webkit-mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);
+    -webkit-mask-composite:xor;mask-composite:exclude;
+    pointer-events:none;
+  }
+  #cb-migrate .cb-box::-webkit-scrollbar{width:5px}
+  #cb-migrate .cb-box::-webkit-scrollbar-thumb{background:rgba(217,169,62,.35);border-radius:4px}
+  @keyframes cbPop{from{opacity:0;transform:translateY(18px) scale(.97)}to{opacity:1;transform:none}}
+
+  #cb-migrate .cb-top{display:flex;align-items:center;justify-content:flex-end;position:relative;z-index:6}
+  #cb-migrate .cb-lang{
+    display:flex;gap:2px;padding:3px;
+    background:rgba(217,169,62,.06);
+    border:1px solid rgba(217,169,62,.22);
+    border-radius:100px;
+  }
+  #cb-migrate .cb-lang button{
+    background:none;border:none;cursor:pointer;
+    font-family:'JetBrains Mono',monospace;font-size:11px;font-weight:700;letter-spacing:.06em;
+    color:#8c98b4;padding:6px 12px;border-radius:100px;transition:all .2s;line-height:1;
+  }
+  #cb-migrate .cb-lang button:hover{color:#E8C766}
+  #cb-migrate .cb-lang button.active{
+    background:linear-gradient(135deg,#FFE566 0%,#F0C04A 35%,#C9972A 70%,#8B6914 100%);
+    color:#181206;box-shadow:0 0 10px rgba(217,169,62,.35);
+  }
+
+  #cb-migrate .cb-stage{
+    position:relative;height:230px;margin:0 0 14px;
+    display:flex;align-items:center;justify-content:center;
+    perspective:900px;transform-style:preserve-3d;
+    --r:128px;
+  }
+  #cb-migrate .cb-ring{
+    position:absolute;top:50%;left:50%;border-radius:50%;
+    border:1px dashed rgba(217,169,62,.22);
+    transform:translate(-50%,-50%) rotateX(72deg);
+    pointer-events:none;
+  }
+  #cb-migrate .cb-ring.r1{width:156px;height:156px;border-color:rgba(217,169,62,.34);animation:cbRing 22s linear infinite}
+  #cb-migrate .cb-ring.r2{width:220px;height:220px;border-color:rgba(87,217,232,.24);animation:cbRing 32s linear infinite reverse}
+  #cb-migrate .cb-ring.r3{width:284px;height:284px;border-color:rgba(217,169,62,.16);animation:cbRing 44s linear infinite}
+  @keyframes cbRing{
+    from{transform:translate(-50%,-50%) rotateX(72deg) rotateZ(0)}
+    to{transform:translate(-50%,-50%) rotateX(72deg) rotateZ(360deg)}
+  }
+
+  #cb-migrate .cb-planet{
+    position:relative;width:108px;height:108px;border-radius:50%;
+    display:flex;align-items:center;justify-content:center;
+    background:radial-gradient(circle at 30% 25%,#FFF8DD 0%,#F5D77A 18%,#D9A93E 42%,#B8892A 68%,#7A5C14 100%);
+    box-shadow:0 0 32px rgba(217,169,62,.55),0 0 76px rgba(217,169,62,.25),inset -14px -20px 40px rgba(0,0,0,.55),inset 10px 10px 26px rgba(255,248,221,.35);
+    animation:cbFloat 6s ease-in-out infinite;
+  }
+  #cb-migrate .cb-planet::before{
+    content:'';position:absolute;inset:-24px;border-radius:50%;
+    background:radial-gradient(circle,rgba(217,169,62,.35),transparent 70%);
+    animation:cbGlow 4s ease-in-out infinite;z-index:-1;
+  }
+  @keyframes cbFloat{0%,100%{transform:translateY(0)}50%{transform:translateY(-7px)}}
+  @keyframes cbGlow{0%,100%{transform:scale(1);opacity:.6}50%{transform:scale(1.12);opacity:.95}}
+  #cb-migrate .cb-planet-inner{text-align:center}
+  #cb-migrate .cb-planet-main{
+    font-family:'Space Grotesk','Inter',sans-serif;font-size:18px;font-weight:700;color:#fff;line-height:1.1;
+    text-shadow:0 2px 8px rgba(0,0,0,.55),0 0 12px rgba(232,199,102,.4);
+  }
+  #cb-migrate .cb-planet-sub{
+    font-family:'JetBrains Mono',monospace;font-size:8px;color:rgba(255,255,255,.9);
+    letter-spacing:2px;font-weight:700;margin-top:3px;
+  }
+  #cb-migrate .cb-free-badge{
+    position:absolute;right:-18px;top:2px;
+    padding:4px 9px;border-radius:100px;
+    font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:700;letter-spacing:.08em;
+    color:#04210f;background:linear-gradient(135deg,#7CFFB2,#2DD47F);
+    box-shadow:0 0 0 3px rgba(7,10,19,.9),0 4px 14px rgba(45,212,127,.5);
+    animation:cbBadge 2.4s ease-in-out infinite;
+  }
+  @keyframes cbBadge{0%,100%{transform:scale(1)}50%{transform:scale(1.08)}}
+
+  #cb-migrate .cb-orbit-system{
+    position:absolute;top:50%;left:50%;width:0;height:0;
+    transform-style:preserve-3d;
+    animation:cbUni 30s linear infinite;
+  }
+  @keyframes cbUni{from{transform:rotateY(0)}to{transform:rotateY(360deg)}}
+  #cb-migrate .cb-sat{
+    position:absolute;top:0;left:0;width:0;height:0;
+    transform-style:preserve-3d;
+    transform:rotateY(var(--angle)) translateZ(var(--r));
+  }
+  #cb-migrate .cb-chip{
+    position:absolute;top:0;left:0;
+    display:flex;align-items:center;gap:6px;
+    padding:6px 11px 6px 8px;white-space:nowrap;
+    background:linear-gradient(135deg,rgba(22,29,48,.97),rgba(13,18,32,.97));
+    border:1px solid rgba(217,169,62,.35);border-radius:8px;
+    box-shadow:0 6px 18px rgba(0,0,0,.6),0 0 12px rgba(217,169,62,.15);
+    transform:translate(-50%,-50%) rotateY(calc(-1 * var(--angle)));
+    animation:cbCounter 30s linear infinite;
+  }
+  @keyframes cbCounter{
+    from{transform:translate(-50%,-50%) rotateY(calc(-1 * var(--angle)))}
+    to{transform:translate(-50%,-50%) rotateY(calc(-1 * var(--angle) - 360deg))}
+  }
+  #cb-migrate .cb-sat:nth-child(1) .cb-chip{border-color:rgba(217,169,62,.6)}
+  #cb-migrate .cb-sat:nth-child(2) .cb-chip{border-color:rgba(87,217,232,.45)}
+  #cb-migrate .cb-sat:nth-child(3) .cb-chip{border-color:rgba(255,140,66,.45)}
+  #cb-migrate .cb-sat:nth-child(4) .cb-chip{border-color:rgba(74,125,255,.45)}
+  #cb-migrate .cb-sat:nth-child(5) .cb-chip{border-color:rgba(55,217,155,.45)}
+  #cb-migrate .cb-sat:nth-child(6) .cb-chip{border-color:rgba(160,107,255,.45)}
+  #cb-migrate .cb-chip .cb-ico{font-size:12px;flex-shrink:0}
+  #cb-migrate .cb-chip .cb-name{font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:600;color:#f0f3f8}
+
+  #cb-migrate .cb-title{
+    font-family:'Space Grotesk','Inter',sans-serif;
+    font-size:24px;font-weight:700;line-height:1.25;letter-spacing:-.02em;
+    margin:0 0 10px;
+    background:linear-gradient(135deg,#FFE9A0 0%,#F5B041 55%,#D9A93E 100%);
+    -webkit-background-clip:text;background-clip:text;
+    -webkit-text-fill-color:transparent;color:#f5b041;
+  }
+  #cb-migrate .cb-desc{font-size:14px;color:#9aa6c2;line-height:1.7;margin:0 auto 18px;max-width:440px}
+  #cb-migrate .cb-desc strong{color:#E8C766;font-weight:600}
+
+  #cb-migrate .cb-feats{
+    list-style:none;padding:0;margin:0 0 16px;
+    display:grid;grid-template-columns:1fr 1fr;gap:8px;text-align:left;
+  }
+  #cb-migrate .cb-feats li{
+    display:flex;align-items:center;gap:10px;
+    font-size:12.5px;font-weight:500;color:#e8edf7;line-height:1.35;
+    padding:9px 11px;
+    background:rgba(255,255,255,.03);
+    border:1px solid rgba(255,255,255,.07);border-radius:10px;
+  }
+  #cb-migrate .cb-feats li i{
+    font-style:normal;font-size:14px;flex-shrink:0;
+    width:28px;height:28px;display:grid;place-items:center;
+    background:rgba(217,169,62,.12);border-radius:8px;
+  }
+
+  #cb-migrate .cb-free{
+    display:flex;align-items:center;gap:12px;text-align:left;
+    margin:0 0 16px;padding:12px 14px;
+    background:linear-gradient(135deg,rgba(45,212,127,.14),rgba(45,212,127,.05));
+    border:1px solid rgba(45,212,127,.4);border-radius:12px;
+    box-shadow:0 0 24px -8px rgba(45,212,127,.45);
+  }
+  #cb-migrate .cb-free-ico{
+    flex-shrink:0;width:38px;height:38px;display:grid;place-items:center;font-size:20px;
+    background:rgba(45,212,127,.18);border-radius:10px;
+  }
+  #cb-migrate .cb-free-txt{display:flex;flex-direction:column;gap:2px;min-width:0}
+  #cb-migrate .cb-free-txt strong{font-size:14px;font-weight:700;color:#7CFFB2;line-height:1.3}
+  #cb-migrate .cb-free-txt span{font-size:12.5px;color:#b5c2d9;line-height:1.5}
+
+  #cb-migrate .cb-btn{
+    position:relative;overflow:hidden;
+    display:flex;align-items:center;justify-content:center;gap:9px;
+    width:100%;padding:15px 0;
+    background:linear-gradient(135deg,#FFE566 0%,#F0C04A 35%,#C9972A 70%,#8B6914 100%);
+    color:#181206;font-size:15.5px;font-weight:700;text-decoration:none;
+    border-radius:40px;
+    box-shadow:0 8px 26px rgba(217,169,62,.42);
+    transition:transform .25s cubic-bezier(.4,0,.2,1),box-shadow .25s;
+  }
+  #cb-migrate .cb-btn::after{
+    content:'';position:absolute;top:0;left:-60%;width:40%;height:100%;
+    background:linear-gradient(100deg,transparent,rgba(255,255,255,.55),transparent);
+    transform:skewX(-20deg);animation:cbShine 3.6s ease-in-out infinite;
+  }
+  @keyframes cbShine{0%,55%{left:-60%}100%{left:130%}}
+  #cb-migrate .cb-btn svg{transition:transform .25s}
+  #cb-migrate .cb-btn:hover{transform:translateY(-2px);box-shadow:0 12px 34px rgba(217,169,62,.58);color:#181206}
+  #cb-migrate .cb-btn:hover svg{transform:translateX(3px)}
+  #cb-migrate .cb-btn:active{transform:translateY(0)}
+  #cb-migrate .cb-btn:focus-visible,
+  #cb-migrate .cb-lang button:focus-visible{outline:2px solid #7CFFB2;outline-offset:3px}
+
+  @media(max-width:520px){
+    #cb-migrate .cb-box{padding:14px 18px 18px}
+    #cb-migrate .cb-stage{height:200px;--r:104px}
+    #cb-migrate .cb-ring.r1{width:128px;height:128px}
+    #cb-migrate .cb-ring.r2{width:180px;height:180px}
+    #cb-migrate .cb-ring.r3{width:232px;height:232px}
+    #cb-migrate .cb-planet{width:90px;height:90px}
+    #cb-migrate .cb-planet-main{font-size:15px}
+    #cb-migrate .cb-free-badge{right:-14px;font-size:9px}
+    #cb-migrate .cb-title{font-size:20px}
+    #cb-migrate .cb-desc{font-size:13px}
+    #cb-migrate .cb-feats{grid-template-columns:1fr}
+    #cb-migrate .cb-chip{padding:5px 9px 5px 7px}
+    #cb-migrate .cb-chip .cb-name{font-size:9px}
+  }
+
+  @media (prefers-reduced-motion: reduce){
+    #cb-migrate *{animation:none!important}
+  }
+</style>
+
+<script>
+(function(){
+  var CB_I18N = {
+    en: {
+      badge    : 'FREE',
+      title    : 'XTO Speeder has been upgraded!',
+      desc     : 'XTO Speeder is now integrated as <strong>a Bot Trade Module</strong> inside the super EA <strong>CityBot</strong> — together with 15+ modules and new tools.',
+      f1       : 'Multi-strategy Bot Trade',
+      f2       : 'Semi-auto tools &amp; order management',
+      f3       : 'Market insight &amp; trade statistics',
+      f4       : 'Free to use',
+      freeTitle: 'EA CityBot — Free to use',
+      btn      : 'Get CityBot for free'
+    },
+    vi: {
+      badge    : 'MIỄN PHÍ',
+      title    : 'XTO Speeder đã được nâng cấp!',
+      desc     : 'XTO Speeder nay đã tích hợp thành <strong>1 Module Bot Trade</strong> trong siêu EA <strong>CityBot</strong> — cùng 15+ module và công cụ mới.',
+      f1       : 'Bot Trade đa chiến lược',
+      f2       : 'Công cụ bán tự động &amp; quản lý lệnh',
+      f3       : 'Insight thị trường &amp; thống kê giao dịch',
+      f4       : 'Miễn phí sử dụng',
+      freeTitle: 'EA CityBot — Miễn phí sử dụng',
+      btn      : 'Nhận CityBot miễn phí'
+    }
+  };
+
+  var currentLang = 'en';
+  try {
+    var saved = localStorage.getItem('cb_lang');
+    if (saved === 'vi' || saved === 'en') currentLang = saved;
+  } catch(e){}
+
+  window.cbSetLang = function(lang){
+    if (!CB_I18N[lang]) return;
+    currentLang = lang;
+    try { localStorage.setItem('cb_lang', lang); } catch(e){}
+    document.documentElement.setAttribute('data-cb-lang', lang);
+    document.querySelectorAll('#cb-migrate .cb-lang button').forEach(function(b){
+      b.classList.toggle('active', b.dataset.lang === lang);
+    });
+    document.querySelectorAll('#cb-migrate [data-i18n]').forEach(function(el){
+      var key = el.getAttribute('data-i18n');
+      if (CB_I18N[lang][key] != null) el.innerHTML = CB_I18N[lang][key];
+    });
+  };
+  window.cbSetLang(currentLang);
+
+  function initStars(){
+    var canvas = document.getElementById('cb-stars');
+    if (!canvas) return;
+    var ctx = canvas.getContext('2d');
+    var W, H, dpr = Math.min(window.devicePixelRatio || 1, 2);
+    var stars = [], t = 0;
+    var reduce = window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+    function build(){
+      var count = Math.max(60, Math.min(160, Math.floor((W * H) / 9000)));
+      stars = [];
+      for (var i = 0; i < count; i++){
+        var r = Math.random();
+        stars.push({
+          x: Math.random() * W, y: Math.random() * H,
+          r: Math.random() * 1.3 + 0.4,
+          base: Math.random() * 0.5 + 0.3,
+          speed: Math.random() * 0.8 + 0.4,
+          phase: Math.random() * Math.PI * 2,
+          rgb: r < 0.35 ? '232,212,154' : (r < 0.65 ? '184,232,255' : '255,255,255')
+        });
+      }
+    }
+    function resize(){
+      var p = canvas.parentElement;
+      W = p.clientWidth; H = p.clientHeight;
+      canvas.width = W * dpr; canvas.height = H * dpr;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      build();
+      if (reduce) draw(true);
+    }
+    function draw(once){
+      t += 0.016;
+      ctx.clearRect(0, 0, W, H);
+      for (var i = 0; i < stars.length; i++){
+        var s = stars[i];
+        var a = Math.min(1, Math.max(0, s.base + Math.sin(t * s.speed + s.phase) * 0.35));
+        ctx.beginPath();
+        ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(' + s.rgb + ',' + a + ')';
+        ctx.fill();
+      }
+      if (once !== true && !reduce) requestAnimationFrame(draw);
+    }
+    window.addEventListener('resize', resize, { passive: true });
+    resize();
+    if (!reduce) draw();
+  }
+
+  function showPopup(){
+    var box = document.getElementById('cb-migrate');
+    if (!box) return;
+    box.classList.add('show');
+    document.body.style.overflow = 'hidden';
+    initStars();
+    var cta = document.getElementById('cb-cta');
+    if (cta) cta.focus({ preventScroll: true });
+  }
+
+  (function(){
+    var go = function(){ setTimeout(showPopup, 300); };
+    if (document.readyState === 'complete') go();
+    else window.addEventListener('load', go);
+  })();
+})();
+</script>

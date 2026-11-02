@@ -22,3 +22,6 @@ Thumbs.db
 
 
 data_cache/
+
+# Supreme AI Commander runtime state
+commander/data/

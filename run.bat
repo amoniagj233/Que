@@ -1,6 +1,8 @@
 @echo off
 title Headway MT5 Institutional Trading Station
 color 0b
+cd /d "%~dp0"
+
 echo ========================================================
 echo   HEADWAY MT5 INSTITUTIONAL TRADING STATION & ANALYTICS
 echo ========================================================

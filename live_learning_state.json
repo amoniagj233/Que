@@ -1,0 +1,14 @@
+{
+  "timestamp": "2026-10-29 07:38:46",
+  "regime": "HEALTHY_RANGE",
+  "atr": 3.36,
+  "rsi": 58.1,
+  "net_change_3m": 0.04,
+  "step_mult": 1.4,
+  "tp_mult": 1.0,
+  "allow_new_basket": true,
+  "require_green_bar": false,
+  "equity": 1499591.82,
+  "balance": 1499642.48,
+  "free_margin": 1499559.55
+}

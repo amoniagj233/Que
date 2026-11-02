@@ -1,0 +1,13 @@
+{
+  "timestamp": "2026-10-29 09:42:41",
+  "current_price": 4026.81,
+  "bias": "BEARISH_DISPLACEMENT",
+  "target_liquidity": "SELL_SIDE_LIQUIDITY (Daily Lows)",
+  "nearest_demand_zone": 4011.81,
+  "nearest_supply_zone": 4052.27,
+  "daily_high": 4068.33,
+  "daily_low": 4015.38,
+  "daily_open": 4063.75,
+  "active_fvgs_count": 17,
+  "active_order_blocks_count": 4
+}

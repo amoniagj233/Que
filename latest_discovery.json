@@ -1,0 +1,25 @@
+{
+  "timestamp": "2026-11-02 16:32:32",
+  "is_new": true,
+  "champion": {
+    "name": "Mut-6495",
+    "net_profit": 1926.56,
+    "roi_pct": 192.7,
+    "win_rate": 97.2,
+    "profit_factor": 4.83,
+    "max_drawdown": 265.57,
+    "max_dd_pct": 9.1,
+    "fitness": 4741.75,
+    "spacing_mode": "ASYMMETRIC_ATR",
+    "atr_mult": 2.18
+  },
+  "challenger": {
+    "name": "Mut-5327",
+    "net_profit": 2008.21,
+    "roi_pct": 200.8,
+    "win_rate": 96.8,
+    "profit_factor": 4.19,
+    "max_drawdown": 268.97,
+    "fitness": 4302.24
+  }
+}

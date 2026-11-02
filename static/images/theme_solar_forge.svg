@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 450" width="100%" height="100%">
+  <defs>
+    <radialGradient id="solarBg" cx="50%" cy="40%" r="70%">
+      <stop offset="0%" stop-color="#3d1508"/>
+      <stop offset="50%" stop-color="#1c0a05"/>
+      <stop offset="100%" stop-color="#0a0504"/>
+    </radialGradient>
+    <filter id="fireGlow">
+      <feGaussianBlur stdDeviation="10" result="coloredBlur"/>
+      <feMerge><feMergeNode in="coloredBlur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <rect width="800" height="450" fill="url(#solarBg)"/>
+
+  <!-- Flame Core Waves -->
+  <path d="M 0,380 Q 200,280 400,320 T 800,180" fill="none" stroke="#f97316" stroke-width="4" filter="url(#fireGlow)"/>
+  <path d="M 0,400 Q 250,290 450,330 T 800,210" fill="none" stroke="#ef4444" stroke-width="3" filter="url(#fireGlow)"/>
+  <path d="M 0,380 Q 200,280 400,320 T 800,180 L 800,450 L 0,450 Z" fill="#ff5722" fill-opacity="0.15"/>
+
+  <!-- Volcanic Core -->
+  <circle cx="400" cy="220" r="80" fill="#f97316" fill-opacity="0.25" filter="url(#fireGlow)"/>
+  <circle cx="400" cy="220" r="45" fill="#fde047" fill-opacity="0.6" filter="url(#fireGlow)"/>
+
+  <text x="400" y="225" font-family="monospace" font-size="28" font-weight="900" fill="#fff" text-anchor="middle" letter-spacing="4">VOLATILITY</text>
+  <text x="400" y="250" font-family="monospace" font-size="12" font-weight="700" fill="#ffedd5" text-anchor="middle" letter-spacing="2">AGGRESSIVE BREAKOUT ENGINE</text>
+</svg>

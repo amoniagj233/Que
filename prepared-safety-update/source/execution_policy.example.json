@@ -1,0 +1,15 @@
+{
+  "enabled": false,
+  "account_login": 0,
+  "account_server": "REPLACE_WITH_EXACT_DEMO_SERVER",
+  "allow_live": false,
+  "max_trade_risk_pct": 0.25,
+  "max_combined_risk_pct": 1.0,
+  "max_daily_loss_pct": 2.0,
+  "max_weekly_loss_pct": 6.0,
+  "max_drawdown_pct": 10.0,
+  "max_volume": 0.01,
+  "max_open_positions": 1,
+  "max_spread": 0.65,
+  "max_quote_age_seconds": 15
+}

@@ -1,0 +1,31 @@
+{
+  "timestamp": "2026-10-29 09:42:29",
+  "total_losses_audited": 145,
+  "total_wins_audited": 260,
+  "disaster_stops_detected": 79,
+  "total_realized_losses": 1029.01,
+  "total_realized_wins": 524.72,
+  "win_loss_ratio": 1.79,
+  "penalty_rules": [
+    {
+      "rule": "MIN_ATR_SPACING",
+      "min_mult": 1.8,
+      "reason": "Fixed steps under 1.8x ATR caused 72% of disaster stops"
+    },
+    {
+      "rule": "ENFORCE_WATERFALL_FREEZE",
+      "required": true,
+      "reason": "Freezing DCA during 3-bar velocity drops saves >$600/month"
+    },
+    {
+      "rule": "ENFORCE_MARGIN_CLAMPING",
+      "max_lot_cap": 0.02,
+      "reason": "Unclamped martingale (>0.03 lots) caused 85% of margin drawdown"
+    }
+  ],
+  "recommendations": [
+    "Prohibit any strategy with ATR step multiplier < 1.8",
+    "Auto-reject genomes without waterfall velocity protection",
+    "Cap maximum layer progression to 0.02 lots max on $1,000 capital"
+  ]
+}

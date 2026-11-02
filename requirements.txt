@@ -1,6 +1,31 @@
+# APEX AI / Headway MT5 Trading Platform Dependencies
+# Compatible with Python 3.9 - 3.14 (Windows 64-bit)
+
+# Core MT5 & Trading Framework
 MetaTrader5>=5.0.45
-fastapi>=0.110
-uvicorn>=0.27
-pydantic>=2.0
-pandas>=2.0
-requests>=2.31
+pandas>=2.0.0
+numpy>=1.24.0
+
+# Machine Learning & Quantitative Intelligence
+scikit-learn>=1.3.0
+scipy>=1.11.0
+lightgbm>=4.0.0
+
+# Technical Analysis & Market Structure
+ta>=0.11.0
+smartmoneyconcepts>=0.0.24
+
+# Web Dashboard & Supreme Commander Server
+fastapi>=0.110.0
+uvicorn>=0.27.0
+pydantic>=2.0.0
+pydantic-settings>=2.0.0
+requests>=2.31.0
+python-dotenv>=1.0.0
+
+# Charts & Visualization
+matplotlib>=3.7.0
+
+# Testing & Windows Utilities
+pytest>=7.0.0
+pywin32>=306; sys_platform == 'win32'
